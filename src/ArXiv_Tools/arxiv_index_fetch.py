@@ -1,71 +1,143 @@
 import re
+import time
+import logging
+from copy import deepcopy
 from urllib.parse import urlencode
-import feedparser
 
+import feedparser
 from bs4 import BeautifulSoup
 
-from .codex import quant_ph
-sub = 'quant-ph'
+from .arxiv_entry import ArxivEntry
 
-search_url = 'https://arxiv.org/search/advanced?'
+logger = logging.getLogger(__name__)
 
-test_url = 'https://arxiv.org/search/advanced?advanced=&terms-0-term=&terms-0-operator=AND&terms-0-field=title&classification-physics=y&classification-physics_archives=quant-ph&classification-include_cross_list=include&date-filter_by=date_range&date-year=&date-from_date=2025-02-01&date-to_date=2025-02-02&date-date_type=submitted_date&abstracts=show&size=200&order=submitted_date'
-
-
-
-def query_arxiv_dict(date_from_date='2025-02-01', date_to_date='2025-02-02', query_args=quant_ph):
-
-    query_args['date-from_date'] = date_from_date
-    query_args['date-to_date'] = date_to_date
-
-    query_dict = {}
-
-    url_args = re.sub(
-            "%2B", "+", urlencode(query_args)
-        )
-    # print(url_args)
-
-    url = search_url + url_args
-
-    results = feedparser.parse(url)
-
-    summary_text = results['feed']['summary']
-
-    so = BeautifulSoup(summary_text, 'lxml')
+SEARCH_URL = "https://arxiv.org/search/advanced?"
+MAX_RETRIES = 3
+RETRY_BACKOFF = (1, 2, 4)
 
 
-    find_results = so.find_all(class_='arxiv-result')
+def _parse_arxiv_result(res) -> ArxivEntry | None:
+    """Parse a single <li class='arxiv-result'> element into an ArxivEntry.
 
-    tmp_res = []
-    for res in find_results:
-        aso = BeautifulSoup(res.__str__(), 'lxml')
+    res is already a BeautifulSoup Tag from the outer parse — we operate on
+    it directly rather than re-parsing with BeautifulSoup(str(res), 'lxml').
+    """
 
-        list_title = aso.find(class_='list-title')
-        arxiv_id_text = list_title.find('a').text
-        arxiv_id = arxiv_id_text # with or without v version 
+    aso = res
 
-        title = aso.find(class_='title')
-        title = title.text.strip()
+    list_title = aso.find(class_="list-title")
+    if not list_title:
+        return None
+    arxiv_id = list_title.find("a").text.strip()
 
-        _authors = aso.find(class_='authors')
-        authors = []
-        for s in _authors.find_all('a'):
-            authors.append(s.text)
+    title_el = aso.find(class_="title")
+    title = title_el.text.strip() if title_el else ""
 
-        abstract = aso.find(class_='abstract-full')
-        abstract = abstract.text.strip() # with less
+    authors = []
+    authors_el = aso.find(class_="authors")
+    if authors_el:
+        for a in authors_el.find_all("a"):
+            authors.append(a.text.strip())
 
-        tags = aso.find_all(class_='tag')
-        external_doi = ''
-        for tag in tags:
-            if tag.find(class_='fa fa-external-link'):
-                href_link = tag.find_next()['href']
+    abstract = ""
+    abstract_full = aso.find(class_="abstract-full")
+    if abstract_full:
+        abstract = abstract_full.text.strip()
+
+    external_doi = ""
+    external_doi_url = ""
+    subjects = []
+
+    for tag in aso.find_all(class_="tag"):
+        tag_classes = tag.get("class", [])
+        # Subject tags have is-link (primary category) or is-grey (cross-list) classes.
+        if "is-link" in tag_classes or "is-grey" in tag_classes:
+            subjects.append(tag.text.strip())
+        # External DOI tags: <span class="tag is-light is-size-7"> with a child <a> link.
+        # arXiv updates these after the paper is formally published.
+        if "is-light" in tag_classes and "is-size-7" in tag_classes:
+            a_tag = tag.find("a")
+            if a_tag:
                 external_doi = tag.text.strip()
+                external_doi_url = a_tag.get("href", "")
 
-        if len(external_doi) > 0:
-            query_dict[arxiv_id] = [title, authors, abstract, (external_doi, href_link) ]
-        else:
-            query_dict[arxiv_id] = [title, authors, abstract, () ]
-        # tmp_res.append([arxiv_id, title, authors, abstract])
+    # A single paper can have TWO <p class="comments"> elements:
+    # one with "Comments:" (page count, etc.) and one with "Journal ref:".
+    # The journal_ref is filled in by arXiv when the paper is published.
+    journal_ref = ""
+    comments = ""
 
-    return query_dict
+    for comment_el in aso.find_all(class_="comments"):
+        text = comment_el.get_text(" ", strip=True)
+        if text.startswith("Journal ref:"):
+            journal_ref = text[len("Journal ref:"):].strip()
+        elif text.startswith("Comments:"):
+            comments = text[len("Comments:"):].strip()
+
+    return ArxivEntry(
+        arxiv_id=arxiv_id,
+        title=title,
+        authors=authors,
+        abstract=abstract,
+        external_doi=external_doi,
+        external_doi_url=external_doi_url,
+        journal_ref=journal_ref,
+        comments=comments,
+        subjects=subjects,
+    )
+
+
+def query_arxiv_dict(date_from_date: str = "2025-02-01",
+                     date_to_date: str = "2025-02-02",
+                     query_args: dict | None = None) -> dict[str, ArxivEntry]:
+    """Query arXiv advanced search for papers submitted on a date range.
+
+    Returns a dict mapping arxiv_id (e.g. 'arXiv:2502.07673') to ArxivEntry.
+
+    The query_args dict is deep-copied before mutation to avoid corrupting
+    the module-level template dict (quant_ph in codex.py).
+    """
+
+    if query_args is None:
+        from .codex import quant_ph
+        query_args = deepcopy(quant_ph)
+    else:
+        query_args = deepcopy(query_args)
+
+    query_args["date-from_date"] = date_from_date
+    query_args["date-to_date"] = date_to_date
+
+    url_args = re.sub("%2B", "+", urlencode(query_args))
+    url = SEARCH_URL + url_args
+
+    # arXiv sometimes returns transient errors under load; retry with backoff.
+    last_exc = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            results = feedparser.parse(url)
+            break
+        except Exception as e:
+            last_exc = e
+            if attempt < MAX_RETRIES - 1:
+                delay = RETRY_BACKOFF[attempt]
+                logger.warning("arXiv fetch attempt %d/3 failed: %s. Retrying in %ds...", attempt + 1, e, delay)
+                time.sleep(delay)
+    else:
+        logger.error("arXiv fetch failed after %d attempts: %s", MAX_RETRIES, last_exc)
+        return {}
+
+    result: dict[str, ArxivEntry] = {}
+
+    if "feed" not in results or "summary" not in results["feed"]:
+        return result
+
+    summary_text = results["feed"]["summary"]
+    soup = BeautifulSoup(summary_text, "lxml")
+    find_results = soup.find_all(class_="arxiv-result")
+
+    for res in find_results:
+        entry = _parse_arxiv_result(res)
+        if entry is not None:
+            result[entry.arxiv_id] = entry
+
+    return result

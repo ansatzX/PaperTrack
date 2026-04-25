@@ -1,189 +1,225 @@
 import os
-from copy import deepcopy
-from unicodedata import category
-from .arxiv_index_fetch import query_arxiv_dict
-from .zotero_query import zotero_query
-from .codex import replace_characters, quant_ph
-from . import arxiv_logger
+import re
+import calendar
 import logging
+from datetime import datetime, timedelta
 
-logger = arxiv_logger
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-def _get_arxiv_doi(arxiv_id):
-    arxiv_doi = arxiv_id.replace(':', '.')
-    arxiv_doi = f'10.48550/{arxiv_doi}'
-    return arxiv_doi
+from .arxiv_entry import ArxivEntry
+from .arxiv_index_fetch import query_arxiv_dict
+from .zotero_query import ZoteroQuery
 
-def _get_arxiv_url(arxiv_id):
-    root_url = 'https://arxiv.org/abs'
-    arg = arxiv_id.replace('arXiv:', '/')
-    arxiv_url = f'{root_url}{arg}'
-    return arxiv_url
+logger = logging.getLogger(__name__)
 
-def _gen_arxiv_markdown(arxiv_id, title, authors, abstract):
-    arxiv_link_text = '[' + arxiv_id+ ']' + '(' + _get_arxiv_url(arxiv_id) + ')'
-    title_text = title
-    author_text = ''
-    for author in authors:
-        author_text += f'{author}, '
-    abstract_text = abstract
-    for key in replace_characters:
-        abstract_text = abstract_text.replace(key, replace_characters[key])
-    arxiv_markdown = f'''
-### {arxiv_id}
-
-Links:
-
-- [ ] {arxiv_link_text} 
-
-Title:  {title_text}
-
-Authors:  {author_text}
-
-Abstract: 
-> [!quote]- Abstract
-> {abstract_text}
+# Jinja2 environment is lazily initialised to avoid filesystem access at
+# import time — useful when the module is imported for tests or utilities.
+_jinja_env: Environment | None = None
 
 
-'''
-    return arxiv_markdown
+def _get_jinja_env() -> Environment:
+    global _jinja_env
+    if _jinja_env is None:
+        _jinja_env = Environment(
+            loader=FileSystemLoader(os.path.join(os.path.dirname(__file__), "templates")),
+            autoescape=select_autoescape(),
+        )
+    return _jinja_env
 
 
-def _gen_data(arxiv_dict, Zot_=None):
-    collect_dict = {}
-    not_collect_dict = {}
-    # TO-DO
-    # update_dict = {} 
-    for _, (arxiv_id, (title, authors, abstract, external_)) in enumerate(arxiv_dict.items()):
-        arxiv_doi = _get_arxiv_doi(arxiv_id)
-        try:
-            query_res = Zot_.query_('DOI', arxiv_doi)
-        except:
-            query_res = []
-        if query_res.__len__() :
-            last_ok = query_res
-            collect_dict[arxiv_id] =  _gen_arxiv_markdown(arxiv_id, title, authors, abstract)
-        else:
-            if external_.__len__() == 2:
-                external_doi = external_[0]
-                try:
-                    query_res = Zot_.query_('DOI', external_doi)
-                except:
-                    query_res = []
-                if query_res.__len__() :
-                    last_ok = query_res
-                    collect_dict[arxiv_id] =  _gen_arxiv_markdown(arxiv_id, title, authors, abstract)
-                else:
-                    not_collect_dict[arxiv_id] =  _gen_arxiv_markdown(arxiv_id, title, authors, abstract)
+def _render_paper(entry: ArxivEntry) -> str:
+    return _get_jinja_env().get_template("paper.md.j2").render(entry=entry)
+
+
+def _render_report(date_string: str, category: str,
+                   collected_papers: list[str],
+                   not_collected_papers: list[str],
+                   new_data: list[str]) -> str:
+    tmpl = _get_jinja_env().get_template("report.md.j2")
+    return tmpl.render(
+        date_string=date_string,
+        category=category,
+        collected_papers=collected_papers,
+        not_collected_papers=not_collected_papers,
+        new_data=new_data,
+    )
+
+
+def _classify_papers(arxiv_dict: dict[str, ArxivEntry],
+                     zotero: ZoteroQuery | None) -> tuple[list[str], list[str]]:
+    """Split papers into 'collected' (found in Zotero) and 'not collected'.
+
+    When Zotero is unavailable (zotero=None), all papers go to not_collected
+    rather than failing — the user still gets a report, just without the
+    collection-status annotations.
+    """
+    collected: list[str] = []
+    not_collected: list[str] = []
+
+    for arxiv_id, entry in arxiv_dict.items():
+        if zotero is not None:
+            try:
+                found = zotero.find_by_entry(entry)
+            except Exception:
+                logger.exception("Zotero lookup failed for %s", arxiv_id)
+                found = False
+            if found:
+                collected.append(_render_paper(entry))
             else:
-                not_collect_dict[arxiv_id] =  _gen_arxiv_markdown(arxiv_id, title, authors, abstract)
-    return collect_dict, not_collect_dict
+                not_collected.append(_render_paper(entry))
+        else:
+            not_collected.append(_render_paper(entry))
+
+    return collected, not_collected
 
 
-def _gen_oneday_markdown(date_string, oneday_arxiv_dict, Zot_, old_data=None):
+def _gen_oneday_markdown(date_string: str, category: str,
+                         oneday_arxiv_dict: dict[str, ArxivEntry],
+                         zotero: ZoteroQuery | None,
+                         old_data: list[str] | None = None) -> str:
+    """Generate a single-day Markdown report.
 
-    oneday_arxiv_dict = deepcopy(oneday_arxiv_dict)
-    category = oneday_arxiv_dict['category']
-    del oneday_arxiv_dict['category']
-    collect_dict, not_collect_dict= _gen_data(oneday_arxiv_dict, Zot_)
+    If old_data (arxiv IDs from a previous report run) is provided, any
+    paper present in the new fetch that wasn't in the old report is listed
+    in an 'update' section. This catches:
 
-    new_data = []
-    date_markdown = f'# {date_string} preprint by arxiv_tools\n\n'
-    date_markdown +=  f'''
----
-tags:
-  - #{category}-{date_string}
----
+    - New submissions that were cross-listed to this category after the
+      original query date.
+    - Papers whose metadata (external DOI, journal_ref) was updated by
+      arXiv after formal publication.
+    """
+    collected, not_collected = _classify_papers(oneday_arxiv_dict, zotero)
+
+    new_data: list[str] = []
+    if old_data is not None:
+        for arxiv_id in oneday_arxiv_dict:
+            if arxiv_id not in old_data:
+                new_data.append(arxiv_id)
+
+    return _render_report(date_string, category, collected, not_collected, new_data)
 
 
-```dataview
-TASK
-from #{category}-{date_string}
+def parse_old_report(file_path: str) -> list[str] | None:
+    """Extract arXiv IDs from a previously generated report.
 
-WHERE completed
+    Returns None if the file doesn't exist (first run for that day).
 
-```
+    Collects arxiv IDs from TWO sources in the old report:
+    - ### arXiv:XXXX headers (all papers that were listed)
+    - - [x] [[#arXiv:XXXX]] completed tasks (papers the user read)
 
-'''
-    date_markdown += '## collected\n\n'
-    for key in sorted([key for key in collect_dict]):
-        value = collect_dict[key]
-        date_markdown += value
-        if old_data is not None:
-            if key not in old_data:
-                new_data.append(key)
-
-    date_markdown += '## not collected\n\n'
-
-    for key in sorted([key for key in not_collect_dict]):
-        value = not_collect_dict[key]
-        date_markdown += value
-        if old_data is not None:
-            if key not in old_data:
-                new_data.append(key)
-            
-    if new_data.__len__(): 
-        date_markdown += '## update \n\n'
-
-        for key in sorted([key for key in new_data]):
-            value = f'- [ ] [[#{key}]]\n'
-            date_markdown += value
-        
-    return date_markdown
-
-def parse_old_report(file_path):
-    if os.path.exists(file_path):
-        
-        with open(
-                file_path, 
-                "r", encoding="utf-8"
-            ) as f:
-            lines = f.readlines()
-        old_title_lines = []
-        for line in lines:
-            if line.startswith('### arXiv:'):
-                arxiv_id_str = line[4:-1].strip()
-                old_title_lines.append(arxiv_id_str)
-            if line.startswith('- [x]'):
-                arxiv_id_str = line[8:-2].strip()
-                old_title_lines.append(arxiv_id_str)
-            
-        return old_title_lines
-    else:
+    Both are treated as 'existing' IDs; any ID in the new fetch that isn't
+    in this list is flagged as a new/updated entry.
+    """
+    if not os.path.exists(file_path):
         return None
-        
-def filter_arxiv_to_md(year: int, month: int, md_folder: str, query_args: dict=quant_ph, category='quant-ph'):
 
-    try:
-        Zot_ = zotero_query() # default local use
-        Zot_.get_everything()
-    except:
-        Zot_ = None
-    root_dir = md_folder
-    
-    for i in range(31):
-        day = i + 1
-        date_from_date = f'{year}-{month:02}-{day:02}'
-        date_to_date = f'{year}-{month:02}-{day+1:02}'
-        # print(date_from_date, date_to_date)
-        arxiv_dict = query_arxiv_dict(date_from_date, date_to_date, query_args)
-        
-        if arxiv_dict.__len__():
-            arxiv_dict['category'] = category
-            logger.info(f'{arxiv_dict.__len__() - 1}')
-            year_dir = os.path.join(root_dir, f'{year}')
-            month_dir = os.path.join(year_dir, f'{month:02}')
-            # date_dir = os.path.join(month_dir, f'{day:02}')
-            os.makedirs(month_dir, exist_ok=True)
-            date_string = f'{year}-{month:02}-{day:02}'
-            logger.info(f'processing {date_from_date}, total num: {arxiv_dict.__len__()} -1 ')
-            oneday_report_file = os.path.join(month_dir, f'{day:02}.md')
-            parse_old = parse_old_report(oneday_report_file)
-            # print(parse_old)
-            markdown_str = _gen_oneday_markdown(date_string, arxiv_dict, Zot_, parse_old)
-            # print(markdown_str)
-            with open(
-                oneday_report_file, 
-                "w", encoding="utf-8"
-            ) as f:
-                f.write(markdown_str)
+    with open(file_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    old_ids: list[str] = []
+
+    arxiv_pattern = r"^###\s*(arXiv:\S+)"
+    for match in re.finditer(arxiv_pattern, content, re.MULTILINE):
+        old_ids.append(match.group(1))
+
+    completed_pattern = r"-\s*\[x\]\s*\[\[#(arXiv:\S+)\]\]"
+    for match in re.finditer(completed_pattern, content):
+        old_ids.append(match.group(1))
+
+    return old_ids
+
+
+def filter_arxiv_to_md(year: int, month: int, md_folder: str,
+                       query_args: dict | None = None,
+                       category: str = "quant-ph",
+                       output_format: str = "category/year/month/day",
+                       zotero: ZoteroQuery | None = None):
+    """Fetch arXiv papers for every day in a month and write Markdown reports.
+
+    Each day is queried individually rather than as a single range. This is
+    an intentional design choice: re-running a day's query later may return
+    new papers (cross-listed after the fact) and updated metadata (external
+    DOIs, journal references added after formal publication). Comparing
+    against the previously written report detects these changes.
+    """
+    _, num_days = calendar.monthrange(year, month)
+    year_str = str(year)
+    month_str = f"{month:02}"
+
+    for day in range(1, num_days + 1):
+        date_string = f"{year_str}-{month_str}-{day:02}"
+        try:
+            datetime(year, month, day)
+        except ValueError:
+            continue
+        next_date = datetime(year, month, day) + timedelta(days=1)
+        date_to_date = next_date.strftime("%Y-%m-%d")
+        arxiv_dict = query_arxiv_dict(date_string, date_to_date, query_args)
+
+        if not arxiv_dict:
+            continue
+
+        logger.info("processing %s, papers: %d", date_string, len(arxiv_dict))
+
+        day_str = f"{day:02}"
+        if output_format == "category/year/month/day":
+            file_dir = os.path.join(md_folder, year_str, month_str)
+        elif output_format == "year/month/day/category":
+            file_dir = os.path.join(md_folder, year_str, month_str, day_str, category)
+        elif output_format == "year/month/category/day":
+            file_dir = os.path.join(md_folder, year_str, month_str, category, day_str)
+        else:
+            file_dir = os.path.join(md_folder, year_str, month_str)
+
+        os.makedirs(file_dir, exist_ok=True)
+        oneday_report_file = os.path.join(file_dir, f"{day_str}.md")
+
+        parse_old = parse_old_report(oneday_report_file)
+        markdown_str = _gen_oneday_markdown(date_string, category, arxiv_dict, zotero, parse_old)
+
+        with open(oneday_report_file, "w", encoding="utf-8") as f:
+            f.write(markdown_str)
+
+
+def parse_md_to_arxiv_dict(md_file: str) -> dict[str, list]:
+    """Parse a generated Markdown report back into a dict of arXiv IDs → data.
+
+    Returns the legacy list format [title, authors, abstract, ()] for
+    backwards compatibility with code that predates the ArxivEntry dataclass.
+    """
+    old_arxiv_dict: dict[str, list] = {}
+    with open(md_file) as f:
+        content = f.read()
+
+    entry_pattern = r"###\s*(arXiv:\S+.*?)(?=###\s*arXiv:|## update)"
+    for match in re.finditer(entry_pattern, content, re.DOTALL):
+        entry_content = match.group(0)
+
+        arxiv_match = re.search(r"^###\s*(arXiv:\S+)", entry_content)
+        if not arxiv_match:
+            continue
+        arxiv_id = arxiv_match.group(1)
+
+        title_match = re.search(r"Title:\s*(.+)", entry_content)
+        title = title_match.group(1).strip() if title_match else ""
+
+        authors_match = re.search(r"Authors:\s*(.+)", entry_content)
+        if authors_match:
+            authors_text = authors_match.group(1).strip()
+            authors = [a.strip() for a in authors_text.split(",") if a.strip()]
+        else:
+            authors = []
+
+        abstract_match = re.search(
+            r"Abstract:\s*> \[!quote\]- Abstract\s*>\s*(.+?)(?=###\s*arXiv:|## update|\Z)",
+            entry_content, re.DOTALL)
+        if abstract_match:
+            abstract_text = abstract_match.group(1).strip()
+            abstract_text = re.sub(r">\s*", " ", abstract_text).strip()
+        else:
+            abstract_text = ""
+
+        old_arxiv_dict[arxiv_id] = [title, authors, abstract_text, ()]
+
+    return old_arxiv_dict

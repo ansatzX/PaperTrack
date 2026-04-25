@@ -7,3 +7,12 @@ develop/
 data/
 *.pyc
 *.egg-info
+.venv/
+.vscode/
+.python-version
+*.swp
+*.swo
+*~
+docs/
+.claude/
+.pytest_cache

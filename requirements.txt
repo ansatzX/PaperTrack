@@ -1,4 +1,0 @@
-pyzotero 
-bs4
-lxml
-feedparser
