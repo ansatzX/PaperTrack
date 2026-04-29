@@ -8,6 +8,8 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from .arxiv_entry import ArxivEntry
 from .arxiv_index_fetch import query_arxiv_dict
+from .journal_entry import JournalEntry
+from .journal_fetch import query_journal_issue_full
 from .zotero_query import ZoteroQuery
 
 logger = logging.getLogger(__name__)
@@ -223,3 +225,207 @@ def parse_md_to_arxiv_dict(md_file: str) -> dict[str, list]:
         old_arxiv_dict[arxiv_id] = [title, authors, abstract_text, ()]
 
     return old_arxiv_dict
+
+
+# ── Journal (issue-based) report functions ──────────────────────────────
+
+
+def _render_journal_paper(entry: JournalEntry) -> str:
+    return _get_jinja_env().get_template("journal_paper.md.j2").render(entry=entry)
+
+
+def _render_journal_report(journal_name: str, journal_slug: str,
+                           volume: str, issue: str, date: str,
+                           collected_papers: list[str],
+                           not_collected_papers: list[str],
+                           new_data: list[str]) -> str:
+    tmpl = _get_jinja_env().get_template("journal_report.md.j2")
+    return tmpl.render(
+        journal_name=journal_name,
+        journal_slug=journal_slug,
+        volume=volume,
+        issue=issue,
+        date=date,
+        collected_papers=collected_papers,
+        not_collected_papers=not_collected_papers,
+        new_data=new_data,
+    )
+
+
+def _classify_journal_papers(entries: dict[str, JournalEntry],
+                              zotero: ZoteroQuery | None) -> tuple[list[str], list[str]]:
+    collected: list[str] = []
+    not_collected: list[str] = []
+
+    for doi, entry in entries.items():
+        if zotero is not None:
+            try:
+                found = zotero.find_by_doi(doi)
+            except Exception:
+                logger.exception("Zotero lookup failed for %s", doi)
+                found = False
+            if found:
+                collected.append(_render_journal_paper(entry))
+            else:
+                not_collected.append(_render_journal_paper(entry))
+        else:
+            not_collected.append(_render_journal_paper(entry))
+
+    return collected, not_collected
+
+
+def parse_journal_report(file_path: str) -> list[str] | None:
+    """Extract DOIs from a previously generated journal report.
+
+    Returns None if the file doesn't exist (first run for that issue).
+    """
+    if not os.path.exists(file_path):
+        return None
+
+    with open(file_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    old_ids: list[str] = []
+
+    doi_pattern = r"^###\s*(10\.\S+)"
+    for match in re.finditer(doi_pattern, content, re.MULTILINE):
+        old_ids.append(match.group(1))
+
+    completed_pattern = r"-\s*\[x\]\s*\[\[#(10\.\S+)\]\]"
+    for match in re.finditer(completed_pattern, content):
+        old_ids.append(match.group(1))
+
+    return old_ids
+
+
+def filter_journal_to_md(journal_name: str, journal_slug: str,
+                         volume: str, issue: str, issn: str,
+                         md_folder: str, zotero: ZoteroQuery | None = None,
+                         year: int | None = None, acs_code: str = ""):
+    """Fetch journal articles for a volume/issue and write a Markdown report.
+
+    The report goes to {md_folder}/{journal_slug}/{volume}/{issue}.md
+    """
+    entries = query_journal_issue_full(issn, volume, issue, journal_name, year, acs_code)
+
+    if not entries:
+        logger.warning("No articles found for %s Vol.%s Iss.%s", journal_name, volume, issue)
+        return
+
+    # Infer date from first entry
+    first = next(iter(entries.values()))
+    date_str = first.date or f"{year or ''}"
+
+    logger.info("processing %s Vol.%s Iss.%s, papers: %d", journal_name, volume, issue, len(entries))
+
+    file_dir = os.path.join(md_folder, journal_slug, f"{volume}", f"{issue}")
+    os.makedirs(file_dir, exist_ok=True)
+    report_file = os.path.join(file_dir, "report.md")
+
+    parse_old = parse_journal_report(report_file)
+    collected, not_collected = _classify_journal_papers(entries, zotero)
+
+    new_data: list[str] = []
+    if parse_old is not None:
+        for doi in entries:
+            if doi not in parse_old:
+                new_data.append(doi)
+
+    markdown_str = _render_journal_report(
+        journal_name, journal_slug, volume, issue,
+        date_str, collected, not_collected, new_data,
+    )
+
+    with open(report_file, "w", encoding="utf-8") as f:
+        f.write(markdown_str)
+
+
+# ── State file helpers ──────────────────────────────────────────────────
+
+
+def _state_path(md_folder: str) -> str:
+    return os.path.join(md_folder, ".papertrack_state.json")
+
+
+def _load_state(md_folder: str) -> dict:
+    import json
+    sp = _state_path(md_folder)
+    if os.path.exists(sp):
+        with open(sp) as f:
+            return json.load(f)
+    return {}
+
+
+def _save_state(md_folder: str, state: dict):
+    import json
+    os.makedirs(md_folder, exist_ok=True)
+    with open(_state_path(md_folder), "w") as f:
+        json.dump(state, f, indent=2)
+
+
+# ── Auto-discover journal pipeline ──────────────────────────────────────
+
+
+def filter_journal_auto(journal_name: str, journal_slug: str,
+                        issn: str, acs_code: str,
+                        md_folder: str, zotero: ZoteroQuery | None = None,
+                        backfill: bool = False, from_year: int = 0):
+    """Auto-discover new issues for an ACS journal and process them.
+
+    Scrapes the ACS LOI page to find issues.  In normal mode only the
+    latest unseen issue is processed; with backfill=True all historical
+    issues are processed.
+
+    State is persisted in {md_folder}/.papertrack_state.json so that
+    repeated runs only pick up newly published issues.
+    """
+    from .acs_loi import discover_issues, get_latest_issue
+
+    state = _load_state(md_folder)
+    journal_state = state.get(journal_slug, {})
+    processed = set(tuple(p) for p in journal_state.get("processed", []))
+
+    if backfill:
+        issues = discover_issues(acs_code, from_year=from_year)
+        if not issues:
+            logger.warning("No issues discovered for %s", journal_name)
+            return
+        issues.reverse()  # oldest-first for backfill
+    else:
+        latest = get_latest_issue(acs_code)
+        if latest is None:
+            logger.warning("Could not determine latest issue for %s", journal_name)
+            return
+        issues = [latest]
+
+    new_count = 0
+    for vol, iss, url in issues:
+        key = (int(vol), int(iss))
+        if key in processed:
+            continue
+
+        logger.info("New issue: %s Vol %d Iss %d", journal_name, vol, iss)
+        filter_journal_to_md(
+            journal_name=journal_name,
+            journal_slug=journal_slug,
+            volume=str(vol),
+            issue=str(iss),
+            issn=issn,
+            md_folder=md_folder,
+            zotero=zotero,
+            acs_code=acs_code,
+        )
+        processed.add(key)
+        new_count += 1
+
+        if not backfill:
+            break  # only process the single latest issue in normal mode
+
+    journal_state["processed"] = [[v, i] for v, i in sorted(processed)]
+    state[journal_slug] = journal_state
+    _save_state(md_folder, state)
+
+    if new_count == 0:
+        logger.info("%s: no new issues", journal_name)
+    else:
+        logger.info("%s: %d new issues processed", journal_name, new_count)

@@ -35,26 +35,29 @@ quant_ph: dict[str, str] = {
 
 
 def _load_toml_categories() -> dict[str, dict[str, str]]:
-    """Load category query parameters from the packaged categories.toml.
+    """Load arXiv query parameters from the [arxiv.*] sections of categories.toml.
 
-    Returns an empty dict if the file is missing or malformed, which
-    signals the caller to fall back to hardcoded defaults. This ensures
-    the tool still works even if the TOML file is somehow deleted.
+    Returns a flat dict keyed by category name (e.g. 'quant-ph'), not
+    by the full TOML path.  Returns empty dict on failure so the caller
+    falls back to hardcoded defaults.
     """
     try:
         with open(_TOML_PATH, "rb") as f:
             data = tomllib.load(f)
-        result: dict[str, dict[str, str]] = {}
-        for name, section in data.items():
-            result[name] = {str(k): str(v) for k, v in section.items()}
-        logger.info("Loaded %d categories from %s", len(result), _TOML_PATH)
-        return result
     except FileNotFoundError:
         logger.warning("categories.toml not found at %s, using hardcoded defaults", _TOML_PATH)
         return {}
     except Exception:
         logger.exception("Failed to load categories.toml, using defaults")
         return {}
+
+    arxiv = data.get("arxiv", {})
+    result: dict[str, dict[str, str]] = {}
+    for name, section in arxiv.items():
+        result[name] = {str(k): str(v) for k, v in section.items()}
+    if result:
+        logger.info("Loaded %d arXiv categories from %s", len(result), _TOML_PATH)
+    return result
 
 
 def build_query_args() -> dict[str, dict[str, str]]:
@@ -97,7 +100,7 @@ def build_query_args() -> dict[str, dict[str, str]]:
     }
 
 
-# Categories are lazily loaded so that importing ArXiv_Tools.codex (e.g. for
+# Categories are lazily loaded so that importing papertrack.codex (e.g. for
 # tests or utility functions) doesn't trigger filesystem I/O. The proxy
 # preserves backwards-compatible query_args[cat_] dict-like access.
 _query_args: dict[str, dict[str, str]] | None = None
@@ -134,3 +137,53 @@ class _QueryArgsProxy:
 
 
 query_args = _QueryArgsProxy()
+
+
+# ── Journal configs ────────────────────────────────────────────────────
+
+
+def _load_toml_journals() -> dict[str, dict[str, str]]:
+    """Load journal entries from the [journals] section of categories.toml."""
+    try:
+        with open(_TOML_PATH, "rb") as f:
+            data = tomllib.load(f)
+    except (FileNotFoundError, Exception):
+        return {}
+
+    journals = data.get("journals", {})
+    result: dict[str, dict[str, str]] = {}
+    for name, section in journals.items():
+        result[name] = {str(k): str(v) for k, v in section.items()}
+    if result:
+        logger.info("Loaded %d journals from %s", len(result), _TOML_PATH)
+    return result
+
+
+_journals: dict[str, dict[str, str]] | None = None
+
+
+def get_journals() -> dict[str, dict[str, str]]:
+    global _journals
+    if _journals is None:
+        _journals = _load_toml_journals()
+    return _journals
+
+
+class _JournalProxy:
+    def __getitem__(self, key: str) -> dict[str, str]:
+        return get_journals()[key]
+
+    def keys(self):
+        return get_journals().keys()
+
+    def values(self):
+        return get_journals().values()
+
+    def items(self):
+        return get_journals().items()
+
+    def __iter__(self):
+        return iter(get_journals())
+
+
+journal_configs = _JournalProxy()

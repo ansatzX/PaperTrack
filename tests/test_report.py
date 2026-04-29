@@ -2,13 +2,13 @@
 import pytest
 from bs4 import BeautifulSoup
 
-from ArXiv_Tools.arxiv_entry import ArxivEntry
-from ArXiv_Tools.arxiv_index_fetch import _parse_arxiv_result
-from ArXiv_Tools.report import (
+from papertrack.arxiv_entry import ArxivEntry
+from papertrack.arxiv_index_fetch import _parse_arxiv_result
+from papertrack.report import (
     parse_old_report,
     _gen_oneday_markdown,
 )
-from ArXiv_Tools.zotero_query import ZoteroQuery
+from papertrack.zotero_query import ZoteroQuery
 
 
 class TestArxivEntry:

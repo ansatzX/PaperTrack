@@ -1,0 +1,29 @@
+# {{ journal_name }} Vol. {{ volume }}, Iss. {{ issue }} — {{ date }}
+
+---
+tags:
+  - #{{ journal_slug }}-v{{ volume }}-i{{ issue }}
+---
+
+```dataview
+TASK
+from #{{ journal_slug }}-v{{ volume }}-i{{ issue }}
+
+WHERE completed
+
+```
+
+## collected
+
+{% for paper in collected_papers %}
+{{ paper }}{% endfor %}
+## not collected
+
+{% for paper in not_collected_papers %}
+{{ paper }}{% endfor %}{% if new_data %}
+## update
+
+{% for key in new_data %}
+- [ ] [[#{{ key }}]]
+{%- endfor %}
+{% endif %}

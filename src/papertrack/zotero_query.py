@@ -89,3 +89,13 @@ class ZoteroQuery:
             return True
 
         return False
+
+    def find_by_doi(self, doi: str) -> bool:
+        """Check if a DOI exists in the Zotero library.
+
+        Direct DOI lookup for journal articles that already have a publisher DOI.
+        """
+        self._ensure_index()
+        if self._doi_index is None:
+            return False
+        return bool(doi and doi in self._doi_index)

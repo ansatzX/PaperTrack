@@ -1,7 +1,7 @@
 [project]
-name = "arxiv-reading"
+name = "papertrack"
 version = "0.1.0"
-description = "Auto-fetch arXiv to Markdown"
+description = "Track papers from arXiv and journals, cross-check Zotero, generate Obsidian reports"
 readme = "README.md"
 requires-python = ">=3.8"
 authors = [
@@ -14,6 +14,8 @@ dependencies = [
     'feedparser',
     'jinja2>=3.0',
     'tomli>=1.0; python_version < "3.11"',
+    'cloudscraper>=1.2',
+    'requests>=2.20',
 ]
 
 [project.optional-dependencies]
@@ -22,14 +24,14 @@ dev = [
 ]
 
 [project.scripts]
-arxiv-update = "ArXiv_Tools.cli:main"
+papertrack = "papertrack.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/ansatzX/arxiv_tools"
+Homepage = "https://github.com/ansatzX/PaperTrack"
 
 [tool.setuptools]
-packages = ["ArXiv_Tools"]
+packages = ["papertrack"]
 package-dir = {"" = "src"}
 
 [tool.setuptools.package-data]
-ArXiv_Tools = ["templates/*.j2", "categories.toml"]
+papertrack = ["templates/*.j2", "categories.toml"]

@@ -1,6 +1,6 @@
 import logging
 
-from ArXiv_Tools.cli import main
+from papertrack.cli import main
 
 logging.basicConfig(
     level=logging.INFO,

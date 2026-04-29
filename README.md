@@ -1,164 +1,150 @@
-# arXiv Tools — Literature Workflow Manager
+# PaperTrack — Literature Workflow Manager
 
-Query arXiv daily submissions, match against a Zotero reference library, and generate Markdown reports for Obsidian.
+Query arXiv daily submissions and journal issues, match against a Zotero reference library, and generate Markdown reports for Obsidian.
 
-## How It Works
+## Quick Start
 
+```bash
+# arXiv — daily submissions for current month
+python main.py --category chem-ph,quant-ph --data_dir /path/to/output
+
+# Journal — auto-detect and process latest issue
+python main.py --source journal --journal jctc --data_dir /path/to/output
+
+# Journal — backfill from a specific year
+python main.py --source journal --journal jctc --backfill --from_year 2018 --data_dir /path/to/output
+
+# Journal — explicit volume/issue
+python main.py --source journal --journal jctc --volume 22 --issue 8 --data_dir /path/to/output
 ```
-arXiv advanced search  ──→  ArxivEntry (dataclass)  ──→  ZoteroQuery (3-layer match)
-                                                              │
-                                   ┌──────────────────────────┘
-                                   ▼
-                              Markdown report (Jinja2)
-                                   │
-                                   ▼
-                              Obsidian vault
-```
-
-### Zotero Matching Strategy
-
-Each arXiv paper is checked against the local Zotero library using three fallback layers:
-
-1. **arXiv DOI** — `10.48550/arXiv.XXXX.YYYYY` exact match on Zotero `DOI` field
-2. **External DOI** — publisher DOI (e.g. `10.1103/PhysRevLett.134.010201`) extracted from arXiv metadata
-3. **arXiv ID from URL** — extract `XXXX.YYYYY` from Zotero `url` field (catches papers saved as `webpage` type without DOI)
-
-Only top-level Zotero items are indexed (via `zot.top()`), excluding attachments and notes.
-
-### Per-Day Re-fetch Design
-
-The tool re-queries each day individually within a month. This is intentional: arXiv updates metadata after publication — external DOIs and journal references are added later. Re-running historical dates catches these updates.
 
 ## Installation
 
 ```bash
 pip install .
+# or
+conda run -n arxiv pip install .
 ```
 
-Dependencies: `pyzotero`, `bs4`, `lxml`, `feedparser`, `jinja2` (all handled by `pyproject.toml`).
+Dependencies: `pyzotero`, `bs4`, `lxml`, `feedparser`, `jinja2`, `cloudscraper`, `requests`.
 
 ### Zotero Setup
 
-Enable local API access: **Zotero → Settings → Advanced → Miscellaneous → "Allow other applications on this computer to communicate with Zotero"**
+Enable local API: **Zotero → Settings → Advanced → Miscellaneous → "Allow other applications on this computer to communicate with Zotero"**
 
-### Obsidian Setup (Optional)
+### Obsidian Setup
 
-Install and enable the `Dataview` plugin. Generated reports use Dataview queries to track read/completed papers.
+Install the `Dataview` plugin. Generated reports use Dataview queries to track read/completed papers.
 
-## Configuration
+## Output Structure
 
-### Categories (`categories.toml`)
-
-Category query parameters are in `categories.toml` at the repo root. Six categories are pre-configured: `quant-ph`, `hep-ex`, `hep-lat`, `hep-ph`, `hep-th`, `chem-ph`.
-
-To add a new category, add a section to `categories.toml`:
-
-```toml
-[cs.AI]
-advanced = ""
-terms-0-term = ""
-terms-0-operator = "AND"
-terms-0-field = "title"
-classification-computer_science = "y"
-classification-computer_science_archives = "cs.AI"
-classification-include_cross_list = "include"
-date-filter_by = "date_range"
-date-year = ""
-date-from_date = "2025-02-01"
-date-to_date = "2025-02-02"
-date-date_type = "submitted_date_first"
-abstracts = "show"
-size = "200"
-order = "submitted_date"
+```
+papertrack_datas/
+├── arxiv/
+│   ├── quant-ph/
+│   │   └── 2026/04/01.md
+│   └── chem-ph/
+│       └── 2026/04/01.md
+└── acs/
+    └── jctc/
+        ├── 22/8/report.md
+        └── 22/7/report.md
 ```
 
-If `categories.toml` is missing, hardcoded defaults in `codex.py` are used as fallback.
+## Journal Pipeline
 
-## Usage
+For ACS journals (e.g. JCTC), the tool scrapes the TOC page with `cloudscraper` (Cloudflare bypass) and extracts full metadata including abstracts and TOC graphics.
 
-### CLI
+### Auto-Discovery
 
-```bash
-# Installed entry point
-arxiv-update --category quant-ph --arxiv_folder /path/to/obsidian/arxiv_datas
+When `--volume` and `--issue` are omitted, the tool scrapes the ACS List-of-Issues page to find the latest issue. A state file (`.papertrack_state.json`) tracks processed issues so repeated runs only pick up newly published ones.
 
-# Or run directly
-python arxiv_update.py --category quant-ph --arxiv_folder /path/to/obsidian/arxiv_datas
+### Backfill
 
-# Multiple categories and months
-arxiv-update --category chem-ph,quant-ph --time 2026.04,2026.03 --arxiv_folder /path/to/folder
+`--backfill` processes all historical issues from oldest to newest. Use `--from_year` to limit how far back to go.
 
-# Custom output format
-arxiv-update --category hep-ex --output_format year/month/category/day --arxiv_folder /path/to/folder
-```
+## CLI Reference
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--time` | `1949.10` | `YYYY.MM` format. The sentinel `1949.10` means "current date" |
-| `--category` | `quant-ph` | Comma-separated arXiv categories |
-| `--arxiv_folder` | — | Output base directory |
-| `--output_format` | `category/year/month/day` | Directory structure under base |
+| `--source` | `arxiv` | `arxiv` or `journal` |
+| `--data_dir` | — | Output base directory |
+| **arXiv mode** | | |
+| `--time` | `1949.10` | `YYYY.MM`. `1949.10` = current month |
+| `--category` | `quant-ph` | Comma-separated categories |
+| `--output_format` | `category/year/month/day` | Directory layout |
+| **Journal mode** | | |
+| `--journal` | — | Journal key (e.g. `jctc`) |
+| `--volume` / `--issue` | — | Explicit issue; omit for auto-detect |
+| `--backfill` | `false` | Process all historical issues |
+| `--from_year` | `0` | Limit backfill from this year |
 
-### crontab
+## Configuration
+
+### arXiv Categories (`categories.toml`)
+
+```toml
+[arxiv.quant-ph]
+advanced = ""
+terms-0-term = ""
+classification-physics_archives = "quant-ph"
+# ...
+```
+
+### Journals (`categories.toml`)
+
+```toml
+[journals.jctc]
+name = "Journal of Chemical Theory and Computation"
+issn = "1549-9618"
+slug = "jctc"
+acs_code = "jctcce"
+```
+
+To add a journal, add its config to `categories.toml` with `issn`, `slug`, and `acs_code` (for ACS journals).
+
+## crontab
 
 ```crontab
 30 7 * * * bash /home/ansatz/data/code/arxiv_reading/run.sh
 ```
 
-### Conda (recommended)
-
-```bash
-conda run -n arxiv python arxiv_update.py --category quant-ph --arxiv_folder /path/to/folder
-```
-
-## Output
-
-Reports are written as `{arxiv_folder}/{category}/{year}/{month}/{day}.md` (default format). Each report contains:
-
-- **Frontmatter** with `#category-date` tag for Dataview queries
-- **collected** section — papers found in Zotero
-- **not collected** section — papers not yet in Zotero (with checkboxes)
-- **update** section — newly appeared papers since last run (compares against previous report)
-
 ## Architecture
 
 ```
-src/ArXiv_Tools/
-├── arxiv_entry.py      # ArxivEntry dataclass
+src/papertrack/
+├── arxiv_entry.py       # ArxivEntry dataclass
 ├── arxiv_index_fetch.py # arXiv advanced search → ArxivEntry dicts
-├── zotero_query.py     # Zotero interface, DOI/URL index, 3-layer match
-├── codex.py            # Category config loader (TOML + fallback)
-├── report.py           # Report orchestration, Jinja2 rendering, old-report diffing
-├── cli.py              # CLI entry point
+├── journal_entry.py     # JournalEntry dataclass
+├── journal_fetch.py     # CrossRef query (fallback)
+├── acs_fetch.py         # ACS TOC scraper (cloudscraper + BeautifulSoup)
+├── acs_loi.py           # ACS List-of-Issues discovery
+├── zotero_query.py      # Zotero interface, DOI/URL index, 3-layer match
+├── codex.py             # TOML config loader (categories + journals)
+├── report.py            # Report orchestration, Jinja2 rendering, state tracking
+├── cli.py               # CLI entry point
+├── categories.toml      # arXiv categories + journal configs
 └── templates/
-    ├── paper.md.j2     # Single paper Markdown template
-    └── report.md.j2    # Full day report template
+    ├── paper.md.j2          # arXiv paper template
+    ├── report.md.j2         # arXiv daily report template
+    ├── journal_paper.md.j2  # Journal paper template (TOC image, abstract)
+    └── journal_report.md.j2 # Journal issue report template
 ```
 
-### Key data model
+### Zotero Matching
 
-```python
-@dataclass
-class ArxivEntry:
-    arxiv_id: str       # "arXiv:2502.07673"
-    title: str
-    authors: list[str]
-    abstract: str
-    external_doi: str   # publisher DOI from arXiv metadata
-    journal_ref: str    # "Phys. Rev. Lett. 134, 010201 (2025)"
-    comments: str       # "18 pages, 6 figures"
-    subjects: list[str] # ["quant-ph", "cond-mat.mes-hall"]
-```
+Three-layer fallback per paper:
 
-## Metadata Fields Extracted from arXiv
+1. **arXiv DOI** — `10.48550/arXiv.XXXX.YYYYY` exact match on Zotero `DOI` field
+2. **External DOI** — publisher DOI from arXiv metadata (populated after publication)
+3. **arXiv ID from URL** — extracted from Zotero `url` field (webpage-type items without DOI)
 
-| HTML source | Field |
-|---|---|
-| `<p class="list-title">` | `arxiv_id` |
-| `<p class="title">` | `title` |
-| `<p class="authors">` | `authors` |
-| `<span class="abstract-full">` | `abstract` |
-| `<span class="tag is-light">` | `external_doi` |
-| `<p class="comments">` ("Comments:") | `comments` |
-| `<p class="comments">` ("Journal ref:") | `journal_ref` |
-| `<span class="tag is-link/is-grey">` | `subjects` |
+Journal articles are matched by direct publisher DOI lookup.
+
+### Per-Day Re-fetch (arXiv)
+
+Each calendar day is queried individually. Re-running a date catches newly cross-listed papers and updated metadata (external DOIs, journal references added after publication).
+
+### Issue State Tracking (Journal)
+
+`.papertrack_state.json` records processed `(volume, issue)` pairs. Once an issue is generated, it won't be re-fetched unless the state file is deleted.
