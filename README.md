@@ -1,97 +1,105 @@
-# PaperTrack — Literature Workflow Manager
+# PaperTrack
 
-Query arXiv daily submissions and journal issues, match against a Zotero reference library, and generate Markdown reports for Obsidian.
+PaperTrack builds Obsidian-friendly Markdown reports for arXiv daily submissions
+and journal issues, then marks papers already present in a local Zotero library.
+
+The current journal workflow is source-conscious:
+
+- ACS journals such as JCTC use ACS issue pages as the primary source.
+- AIP journals such as JCP use AIP issue pages as the primary source.
+- CrossRef is a fallback only. For JCP, it can fill missing abstracts by DOI, but
+  it does not decide which articles belong to an issue.
+
+## Requirements
+
+- Python 3.10+
+- Zotero desktop, optional but recommended
+- Obsidian with the Dataview plugin, if you want the generated task queries
+
+Install locally:
+
+```bash
+pip install -e ".[dev]"
+```
+
+The project depends on `curl_cffi` for publisher pages, plus `pyzotero`,
+`beautifulsoup4`, `lxml`, `feedparser`, `jinja2`, and `requests`.
 
 ## Quick Start
 
-```bash
-# arXiv — daily submissions for current month
-python main.py --category chem-ph,quant-ph --data_dir /path/to/output
-
-# Journal — auto-detect and process latest issue
-python main.py --source journal --journal jctc --data_dir /path/to/output
-
-# Journal — backfill from a specific year
-python main.py --source journal --journal jctc --backfill --from_year 2018 --data_dir /path/to/output
-
-# Journal — explicit volume/issue
-python main.py --source journal --journal jctc --volume 22 --issue 8 --data_dir /path/to/output
-```
-
-## Installation
+arXiv reports:
 
 ```bash
-pip install .
-# or
-conda run -n arxiv pip install .
+python main.py \
+  --category chem-ph,quant-ph \
+  --time 2026.04,2026.03 \
+  --data_dir /home/ansatz/data/obsidian/1/papertrack_datas
 ```
 
-Dependencies: `pyzotero`, `bs4`, `lxml`, `feedparser`, `jinja2`, `cloudscraper`, `requests`.
+Latest journal issue:
 
-### Zotero Setup
-
-Enable local API: **Zotero → Settings → Advanced → Miscellaneous → "Allow other applications on this computer to communicate with Zotero"**
-
-### Obsidian Setup
-
-Install the `Dataview` plugin. Generated reports use Dataview queries to track read/completed papers.
-
-## Output Structure
-
+```bash
+python main.py \
+  --source journal \
+  --journal jcp \
+  --data_dir /home/ansatz/data/obsidian/1/papertrack_datas
 ```
+
+Backfill journal issues:
+
+```bash
+python main.py \
+  --source journal \
+  --journal jcp \
+  --backfill \
+  --from_year 2018 \
+  --data_dir /home/ansatz/data/obsidian/1/papertrack_datas
+```
+
+Explicit issue:
+
+```bash
+python main.py \
+  --source journal \
+  --journal jcp \
+  --volume 164 \
+  --issue 16 \
+  --year 2026 \
+  --data_dir /home/ansatz/data/obsidian/1/papertrack_datas
+```
+
+`run.sh` uses the local conda environment:
+
+```bash
+/home/ansatz/soft/miniconda3/bin/conda run -n arxiv python main.py ...
+```
+
+## Output Layout
+
+`--data_dir` is the root. PaperTrack separates sources under that root:
+
+```text
 papertrack_datas/
 ├── arxiv/
-│   ├── quant-ph/
-│   │   └── 2026/04/01.md
-│   └── chem-ph/
-│       └── 2026/04/01.md
-└── acs/
-    └── jctc/
-        ├── 22/8/report.md
-        └── 22/7/report.md
+│   ├── chem-ph/2026/04/01.md
+│   └── quant-ph/2026/04/01.md
+├── acs/
+│   └── jctc/22/8.md
+└── aip/
+    └── jcp/164/16.md
 ```
 
-## Journal Pipeline
+Journal output is always:
 
-For ACS journals (e.g. JCTC), the tool scrapes the TOC page with `cloudscraper` (Cloudflare bypass) and extracts full metadata including abstracts and TOC graphics.
-
-### Auto-Discovery
-
-When `--volume` and `--issue` are omitted, the tool scrapes the ACS List-of-Issues page to find the latest issue. A state file (`.papertrack_state.json`) tracks processed issues so repeated runs only pick up newly published ones.
-
-### Backfill
-
-`--backfill` processes all historical issues from oldest to newest. Use `--from_year` to limit how far back to go.
-
-## CLI Reference
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--source` | `arxiv` | `arxiv` or `journal` |
-| `--data_dir` | — | Output base directory |
-| **arXiv mode** | | |
-| `--time` | `1949.10` | `YYYY.MM`. `1949.10` = current month |
-| `--category` | `quant-ph` | Comma-separated categories |
-| `--output_format` | `category/year/month/day` | Directory layout |
-| **Journal mode** | | |
-| `--journal` | — | Journal key (e.g. `jctc`) |
-| `--volume` / `--issue` | — | Explicit issue; omit for auto-detect |
-| `--backfill` | `false` | Process all historical issues |
-| `--from_year` | `0` | Limit backfill from this year |
-
-## Configuration
-
-### arXiv Categories (`categories.toml`)
-
-```toml
-[arxiv.quant-ph]
-advanced = ""
-terms-0-term = ""
-classification-physics_archives = "quant-ph"
-# ...
+```text
+{data_dir}/{provider}/{journal_slug}/{volume}/{issue}.md
 ```
 
-### Journals (`categories.toml`)
+## Journal Source Policy
+
+### JCTC / ACS
+
+JCTC is configured as an ACS journal:
 
 ```toml
 [journals.jctc]
@@ -101,50 +109,147 @@ slug = "jctc"
 acs_code = "jctcce"
 ```
 
-To add a journal, add its config to `categories.toml` with `issn`, `slug`, and `acs_code` (for ACS journals).
+Auto-discovery uses ACS list-of-issues pages. Article metadata comes from the
+ACS issue TOC page.
 
-## crontab
+### JCP / AIP
 
-```crontab
-30 7 * * * bash /home/ansatz/data/code/arxiv_reading/run.sh
+JCP is configured as an AIP journal:
+
+```toml
+[journals.jcp]
+name = "Journal of Chemical Physics"
+issn = "0021-9606"
+slug = "jcp"
+provider = "aip"
 ```
 
-## Architecture
+For each issue, PaperTrack:
 
+1. Fetches the AIP issue page, for example
+   `https://pubs.aip.org/aip/jcp/issue/164/16`.
+2. Extracts the official issue article list, DOI, title, authors, page, year,
+   TOC image, and `data-articleid`.
+3. Fetches abstracts from AIP's official issue-page AJAX endpoint:
+   `https://pubs.aip.org/PlatformArticle/ArticleAbstractAjax`.
+4. If any AIP article still lacks an abstract, fills only that missing
+   `abstract` field from CrossRef by matching the DOI.
+
+PaperTrack does not visit each AIP article page. CrossRef is never allowed to
+add articles to an AIP issue or replace AIP metadata.
+
+## CLI Reference
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--source` | `arxiv` | `arxiv` or `journal` |
+| `--data_dir` | `/home/ansatz/data/obsidian/1/papertrack_datas/` | Output root |
+| `--debug` | false | Enable debug logging |
+| `--time` | `1949.10` | arXiv month list, `YYYY.MM`; sentinel means current month |
+| `--category` | `quant-ph` | Comma-separated arXiv categories |
+| `--output_format` | `category/year/month/day` | arXiv directory layout |
+| `--journal` | empty | Journal key from `categories.toml`, e.g. `jctc` or `jcp` |
+| `--volume` | empty | Explicit journal volume |
+| `--issue` | empty | Explicit journal issue |
+| `--year` | `0` | Publication year for explicit journal issue mode |
+| `--backfill` | false | Process all discovered journal issues |
+| `--from_year` | `0` | Start year for backfill/discovery |
+
+## State And Rebuilds
+
+Journal auto mode stores processed `(volume, issue)` pairs in
+`.papertrack_state.json` in the current working directory.
+
+On every journal auto run, PaperTrack checks previously processed issue files by
+relative path:
+
+```text
+{journal_slug}/{volume}/{issue}.md
 ```
-src/papertrack/
-├── arxiv_entry.py       # ArxivEntry dataclass
-├── arxiv_index_fetch.py # arXiv advanced search → ArxivEntry dicts
-├── journal_entry.py     # JournalEntry dataclass
-├── journal_fetch.py     # CrossRef query (fallback)
-├── acs_fetch.py         # ACS TOC scraper (cloudscraper + BeautifulSoup)
-├── acs_loi.py           # ACS List-of-Issues discovery
-├── zotero_query.py      # Zotero interface, DOI/URL index, 3-layer match
-├── codex.py             # TOML config loader (categories + journals)
-├── report.py            # Report orchestration, Jinja2 rendering, state tracking
-├── cli.py               # CLI entry point
-├── categories.toml      # arXiv categories + journal configs
-└── templates/
-    ├── paper.md.j2          # arXiv paper template
-    ├── report.md.j2         # arXiv daily report template
-    ├── journal_paper.md.j2  # Journal paper template (TOC image, abstract)
-    └── journal_report.md.j2 # Journal issue report template
+
+If a processed file is missing or the generated report structure is damaged,
+that issue is rebuilt even if it is not the latest issue.
+
+The format check intentionally ignores Obsidian task edits. Marking a paper as
+complete, changing task state, or editing the Dataview task block does not count
+as corruption. The required skeleton is:
+
+- `## collected`
+- `## not collected`
+- at least one `### ...` paper entry
+
+arXiv reports are queried one calendar day at a time. Re-running a month
+re-fetches each day and rewrites the day file; if an old file is missing or its
+generated skeleton is broken, that day is rebuilt without trying to preserve old
+IDs.
+
+## Zotero Matching
+
+Zotero is optional. If Zotero is unavailable, all papers are rendered under
+`not collected`.
+
+For arXiv entries, matching uses three layers:
+
+1. arXiv DOI, such as `10.48550/arXiv.2502.07673`
+2. External publisher DOI from arXiv metadata
+3. arXiv ID extracted from a Zotero URL
+
+For journal entries, matching uses the publisher DOI.
+
+Enable Zotero local API:
+
+```text
+Zotero -> Settings -> Advanced -> Miscellaneous
+-> Allow other applications on this computer to communicate with Zotero
 ```
 
-### Zotero Matching
+## Configuration
 
-Three-layer fallback per paper:
+Configuration lives in:
 
-1. **arXiv DOI** — `10.48550/arXiv.XXXX.YYYYY` exact match on Zotero `DOI` field
-2. **External DOI** — publisher DOI from arXiv metadata (populated after publication)
-3. **arXiv ID from URL** — extracted from Zotero `url` field (webpage-type items without DOI)
+```text
+src/papertrack/categories.toml
+```
 
-Journal articles are matched by direct publisher DOI lookup.
+Add arXiv categories under `[arxiv.<key>]`.
 
-### Per-Day Re-fetch (arXiv)
+Add ACS journals with `acs_code`:
 
-Each calendar day is queried individually. Re-running a date catches newly cross-listed papers and updated metadata (external DOIs, journal references added after publication).
+```toml
+[journals.example_acs]
+name = "Example ACS Journal"
+issn = "0000-0000"
+slug = "example"
+acs_code = "abcd"
+```
 
-### Issue State Tracking (Journal)
+Add AIP-style journals with `provider = "aip"`:
 
-`.papertrack_state.json` records processed `(volume, issue)` pairs. Once an issue is generated, it won't be re-fetched unless the state file is deleted.
+```toml
+[journals.example_aip]
+name = "Example AIP Journal"
+issn = "0000-0000"
+slug = "example"
+provider = "aip"
+```
+
+## Development
+
+Run tests:
+
+```bash
+pytest -q
+```
+
+Run syntax checks:
+
+```bash
+python -m compileall -q src tests
+```
+
+Current verification commands used during development:
+
+```bash
+/home/ansatz/soft/miniconda3/bin/conda run -n arxiv pytest -q
+/home/ansatz/soft/miniconda3/bin/conda run -n arxiv python -m compileall -q src tests
+```

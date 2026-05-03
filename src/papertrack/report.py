@@ -119,6 +119,10 @@ def parse_old_report(file_path: str) -> list[str] | None:
     with open(file_path, "r", encoding="utf-8") as f:
         content = f.read()
 
+    if not _has_report_skeleton(content):
+        logger.warning("Existing arXiv report looks corrupt, rebuilding: %s", file_path)
+        return None
+
     old_ids: list[str] = []
 
     arxiv_pattern = r"^###\s*(arXiv:\S+)"
@@ -130,6 +134,10 @@ def parse_old_report(file_path: str) -> list[str] | None:
         old_ids.append(match.group(1))
 
     return old_ids
+
+
+def _has_report_skeleton(content: str) -> bool:
+    return "## collected" in content and "## not collected" in content and "### " in content
 
 
 def filter_arxiv_to_md(year: int, month: int, md_folder: str,
@@ -285,6 +293,10 @@ def parse_journal_report(file_path: str) -> list[str] | None:
     with open(file_path, "r", encoding="utf-8") as f:
         content = f.read()
 
+    if not _has_report_skeleton(content):
+        logger.warning("Existing journal report looks corrupt, rebuilding: %s", file_path)
+        return None
+
     old_ids: list[str] = []
 
     doi_pattern = r"^###\s*(10\.\S+)"
@@ -298,15 +310,32 @@ def parse_journal_report(file_path: str) -> list[str] | None:
     return old_ids
 
 
+def _journal_report_file(md_folder: str, journal_slug: str, volume: str, issue: str) -> str:
+    return os.path.join(md_folder, journal_slug, str(volume), f"{issue}.md")
+
+
+def _is_missing_or_corrupt_journal_report(md_folder: str,
+                                          journal_slug: str,
+                                          volume: str,
+                                          issue: str) -> bool:
+    report_file = _journal_report_file(md_folder, journal_slug, volume, issue)
+    if not os.path.exists(report_file):
+        return True
+    return parse_journal_report(report_file) is None
+
+
 def filter_journal_to_md(journal_name: str, journal_slug: str,
                          volume: str, issue: str, issn: str,
                          md_folder: str, zotero: ZoteroQuery | None = None,
-                         year: int | None = None, acs_code: str = ""):
+                         year: int | None = None, acs_code: str = "",
+                         provider: str = ""):
     """Fetch journal articles for a volume/issue and write a Markdown report.
 
     The report goes to {md_folder}/{journal_slug}/{volume}/{issue}.md
     """
-    entries = query_journal_issue_full(issn, volume, issue, journal_name, year, acs_code)
+    entries = query_journal_issue_full(
+        issn, volume, issue, journal_name, year, acs_code, provider, journal_slug
+    )
 
     if not entries:
         logger.warning("No articles found for %s Vol.%s Iss.%s", journal_name, volume, issue)
@@ -318,9 +347,9 @@ def filter_journal_to_md(journal_name: str, journal_slug: str,
 
     logger.info("processing %s Vol.%s Iss.%s, papers: %d", journal_name, volume, issue, len(entries))
 
-    file_dir = os.path.join(md_folder, journal_slug, f"{volume}", f"{issue}")
+    report_file = _journal_report_file(md_folder, journal_slug, volume, issue)
+    file_dir = os.path.dirname(report_file)
     os.makedirs(file_dir, exist_ok=True)
-    report_file = os.path.join(file_dir, "report.md")
 
     parse_old = parse_journal_report(report_file)
     collected, not_collected = _classify_journal_papers(entries, zotero)
@@ -344,7 +373,7 @@ def filter_journal_to_md(journal_name: str, journal_slug: str,
 
 
 def _state_path(md_folder: str) -> str:
-    return os.path.join(md_folder, ".papertrack_state.json")
+    return os.path.join(os.getcwd(), ".papertrack_state.json")
 
 
 def _load_state(md_folder: str) -> dict:
@@ -358,53 +387,35 @@ def _load_state(md_folder: str) -> dict:
 
 def _save_state(md_folder: str, state: dict):
     import json
-    os.makedirs(md_folder, exist_ok=True)
     with open(_state_path(md_folder), "w") as f:
         json.dump(state, f, indent=2)
 
 
 # ── Auto-discover journal pipeline ──────────────────────────────────────
 
-
 def filter_journal_auto(journal_name: str, journal_slug: str,
                         issn: str, acs_code: str,
                         md_folder: str, zotero: ZoteroQuery | None = None,
-                        backfill: bool = False, from_year: int = 0):
-    """Auto-discover new issues for an ACS journal and process them.
+                        backfill: bool = False, from_year: int = 0,
+                        provider: str = "acs"):
+    """Auto-discover new issues for a journal and process them.
 
-    Scrapes the ACS LOI page to find issues.  In normal mode only the
-    latest unseen issue is processed; with backfill=True all historical
-    issues are processed.
+    For ACS journals (provider="acs"), scrapes the ACS LOI page.
+    For AIP/other journals (provider="aip"), discovers issues via CrossRef API.
 
-    State is persisted in {md_folder}/.papertrack_state.json so that
-    repeated runs only pick up newly published issues.
+    State is persisted in .papertrack_state.json in the current working directory.
+    Repeated runs only pick up newly published issues.
     """
-    from .acs_loi import discover_issues, get_latest_issue
-
     state = _load_state(md_folder)
     journal_state = state.get(journal_slug, {})
     processed = set(tuple(p) for p in journal_state.get("processed", []))
-
-    if backfill:
-        issues = discover_issues(acs_code, from_year=from_year)
-        if not issues:
-            logger.warning("No issues discovered for %s", journal_name)
-            return
-        issues.reverse()  # oldest-first for backfill
-    else:
-        latest = get_latest_issue(acs_code)
-        if latest is None:
-            logger.warning("Could not determine latest issue for %s", journal_name)
-            return
-        issues = [latest]
-
     new_count = 0
-    for vol, iss, url in issues:
-        key = (int(vol), int(iss))
-        if key in processed:
-            continue
+    rebuilt_keys: set[tuple[int, int]] = set()
 
-        logger.info("New issue: %s Vol %d Iss %d", journal_name, vol, iss)
+    for vol, iss in sorted(processed):
+        if not _is_missing_or_corrupt_journal_report(md_folder, journal_slug, str(vol), str(iss)):
+            continue
+        logger.info("Rebuilding missing/corrupt issue: %s Vol %d Iss %d", journal_name, vol, iss)
         filter_journal_to_md(
             journal_name=journal_name,
             journal_slug=journal_slug,
@@ -414,12 +425,92 @@ def filter_journal_auto(journal_name: str, journal_slug: str,
             md_folder=md_folder,
             zotero=zotero,
             acs_code=acs_code,
+            provider=provider,
         )
-        processed.add(key)
+        rebuilt_keys.add((vol, iss))
         new_count += 1
 
-        if not backfill:
-            break  # only process the single latest issue in normal mode
+    if acs_code:
+        # ── ACS path: scrape LOI page ──
+        from .acs_loi import discover_issues, get_latest_issue
+
+        if backfill:
+            issues = discover_issues(acs_code, from_year=from_year)
+            if not issues:
+                logger.warning("No issues discovered for %s", journal_name)
+                return
+            issues.reverse()  # oldest-first for backfill
+        else:
+            latest = get_latest_issue(acs_code)
+            if latest is None:
+                logger.warning("Could not determine latest issue for %s", journal_name)
+                return
+            issues = [latest]
+
+        for vol, iss, url in issues:
+            key = (int(vol), int(iss))
+            if key in rebuilt_keys:
+                continue
+            if key in processed and not _is_missing_or_corrupt_journal_report(
+                md_folder, journal_slug, str(vol), str(iss)
+            ):
+                continue
+            logger.info("New issue: %s Vol %d Iss %d", journal_name, vol, iss)
+            filter_journal_to_md(
+                journal_name=journal_name,
+                journal_slug=journal_slug,
+                volume=str(vol),
+                issue=str(iss),
+                issn=issn,
+                md_folder=md_folder,
+                zotero=zotero,
+                acs_code=acs_code,
+                provider=provider,
+            )
+            processed.add(key)
+            new_count += 1
+            if not backfill:
+                break
+
+    else:
+        # ── CrossRef/AIP path: discover via CrossRef API ──
+        from .crossref_loi import discover_issues_crossref
+
+        triples = discover_issues_crossref(issn, from_year=from_year)
+        if not triples:
+            logger.warning("No issues discovered for %s via CrossRef", journal_name)
+            return
+
+        if backfill:
+            triples.reverse()  # oldest-first for backfill
+        else:
+            triples = triples[:1]  # latest only
+
+        for yr, vol, iss in triples:
+            key = (int(vol), int(iss))
+            if key in rebuilt_keys:
+                continue
+            if key in processed and not _is_missing_or_corrupt_journal_report(
+                md_folder, journal_slug, str(vol), str(iss)
+            ):
+                continue
+            logger.info("New issue: %s Vol %d Iss %d (year %d)", journal_name, vol, iss, yr)
+            filter_journal_to_md(
+                journal_name=journal_name,
+                journal_slug=journal_slug,
+                volume=str(vol),
+                issue=str(iss),
+                issn=issn,
+                md_folder=md_folder,
+                zotero=zotero,
+                acs_code=acs_code,
+                year=yr,
+                provider=provider,
+            )
+            processed.add(key)
+            new_count += 1
+            if not backfill:
+                break
 
     journal_state["processed"] = [[v, i] for v, i in sorted(processed)]
     state[journal_slug] = journal_state

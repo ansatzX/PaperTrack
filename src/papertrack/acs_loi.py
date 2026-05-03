@@ -4,7 +4,7 @@ import logging
 import re
 import time
 
-import cloudscraper
+from curl_cffi import requests
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
@@ -12,29 +12,25 @@ logger = logging.getLogger(__name__)
 ACS_BASE = "https://pubs.acs.org"
 ACS_LOI_URL = ACS_BASE + "/loi/{acs_code}"
 
-MAX_RETRIES = 3
-RETRY_BACKOFF = (1, 2, 4)
-
 
 def _scrape(url: str) -> str:
-    """Fetch a page via cloudscraper with retries, return HTML text."""
-    scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "linux"})
+    """Fetch a page via curl_cffi (Chrome impersonation), return HTML text."""
     last_exc = None
-    for attempt in range(MAX_RETRIES):
+    for attempt in range(3):
         try:
-            resp = scraper.get(url, timeout=30)
+            resp = requests.get(url, impersonate="chrome124", timeout=30)
             if "Just a moment" in resp.text:
                 logger.warning("Cloudflare block on %s attempt %d/3", url, attempt + 1)
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_BACKOFF[attempt])
+                if attempt < 2:
+                    time.sleep((1, 2, 4)[attempt])
                 continue
             return resp.text
         except Exception as e:
             last_exc = e
             logger.warning("Fetch %s attempt %d/3 failed: %s", url, attempt + 1, e)
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_BACKOFF[attempt])
-    raise RuntimeError(f"Failed to fetch {url} after {MAX_RETRIES} attempts: {last_exc}")
+            if attempt < 2:
+                time.sleep((1, 2, 4)[attempt])
+    raise RuntimeError(f"Failed to fetch {url} after 3 attempts: {last_exc}")
 
 
 def _extract_year(url: str) -> int:

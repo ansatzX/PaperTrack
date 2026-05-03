@@ -1,10 +1,10 @@
-"""Direct ACS journal TOC scraper using cloudscraper for Cloudflare bypass."""
+"""Direct ACS journal TOC scraper using curl_cffi for Cloudflare bypass."""
 
 import logging
 import re
 import time
 
-import cloudscraper
+from curl_cffi import requests
 from bs4 import BeautifulSoup
 
 from .journal_entry import JournalEntry
@@ -12,8 +12,6 @@ from .journal_entry import JournalEntry
 logger = logging.getLogger(__name__)
 
 ACS_TOC_URL = "https://pubs.acs.org/toc/{journal_code}/{volume}/{issue}"
-MAX_RETRIES = 3
-RETRY_BACKOFF = (1, 2, 4)
 
 # Per-issue cache to avoid re-scraping on repeated runs.
 _cache: dict[str, dict[str, JournalEntry]] = {}
@@ -84,7 +82,7 @@ def _parse_acs_toc(html: str, journal_name: str) -> dict[str, JournalEntry]:
             if vol_match:
                 issue = vol_match.group(1)
             # Pages
-            page_match = re.search(r"(\d+[-–]\d+)", info_text)
+            page_match = re.search(r"(\d+[-\u2013]\d+)", info_text)
             if page_match:
                 pages = page_match.group(1)
             # Publication date
@@ -140,24 +138,23 @@ def query_acs_issue(journal_code: str, volume: str, issue: str,
         journal_name: Display name for the journal.
 
     Returns:
-        Dict mapping DOI → JournalEntry, with abstracts and TOC images.
+        Dict mapping DOI -> JournalEntry, with abstracts and TOC images.
     """
     cache_key = f"{journal_code}:{volume}:{issue}"
     if cache_key in _cache:
         return _cache[cache_key]
 
     url = ACS_TOC_URL.format(journal_code=journal_code, volume=volume, issue=issue)
-    scraper = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "linux"})
 
     last_exc = None
-    for attempt in range(MAX_RETRIES):
+    for attempt in range(3):
         try:
             logger.info("Scraping ACS TOC: %s", url)
-            resp = scraper.get(url, timeout=30)
+            resp = requests.get(url, impersonate="chrome124", timeout=30)
             if "Just a moment" in resp.text:
                 logger.warning("Cloudflare block on attempt %d/3", attempt + 1)
-                if attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_BACKOFF[attempt])
+                if attempt < 2:
+                    time.sleep((1, 2, 4)[attempt])
                 continue
             entries = _parse_acs_toc(resp.text, journal_name)
             _cache[cache_key] = entries
@@ -167,8 +164,8 @@ def query_acs_issue(journal_code: str, volume: str, issue: str,
         except Exception as e:
             last_exc = e
             logger.warning("ACS fetch attempt %d/3 failed: %s", attempt + 1, e)
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_BACKOFF[attempt])
+            if attempt < 2:
+                time.sleep((1, 2, 4)[attempt])
 
-    logger.error("ACS fetch failed after %d attempts: %s", MAX_RETRIES, last_exc)
+    logger.error("ACS fetch failed after 3 attempts: %s", last_exc)
     return {}

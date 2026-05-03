@@ -1,4 +1,5 @@
 import re
+from html import unescape
 from dataclasses import dataclass
 
 
@@ -38,7 +39,7 @@ class JournalEntry:
             if name:
                 authors.append(name)
 
-        abstract = item.get("abstract", "") or ""
+        abstract = cls._clean_crossref_abstract(item.get("abstract", "") or "")
 
         volume = item.get("volume", "") or ""
         issue = item.get("issue", "") or ""
@@ -65,6 +66,15 @@ class JournalEntry:
         )
 
     @staticmethod
-    def is_non_article(doi: str) -> bool:
-        """Filter out issue publication info and editorial masthead DOIs."""
-        return bool(re.search(r"ctv\d{3}i\d{3}", doi))
+    def is_non_article(doi: str, title: str = "") -> bool:
+        """Filter out issue metadata and correction notices."""
+        if re.search(r"ctv\d{3}i\d{3}", doi):
+            return True
+        return bool(re.match(r"\s*erratum\b", title, re.IGNORECASE))
+
+    @staticmethod
+    def _clean_crossref_abstract(raw: str) -> str:
+        """Convert CrossRef JATS/HTML abstracts into plain text."""
+        text = re.sub(r"</?jats:p[^>]*>", " ", raw)
+        text = re.sub(r"<[^>]+>", " ", text)
+        return re.sub(r"\s+", " ", unescape(text)).strip()

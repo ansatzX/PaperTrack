@@ -16,3 +16,10 @@ $my_conda_bin run -n arxiv python main.py \
     --journal jctc \
     --backfill --from_year 2018 \
     --data_dir /home/ansatz/data/obsidian/1/papertrack_datas
+
+# JCP — backfill oldest-first, then auto new issues
+$my_conda_bin run -n arxiv python main.py \
+    --source journal \
+    --journal jcp \
+    --backfill --from_year 2018 \
+    --data_dir /home/ansatz/data/obsidian/1/papertrack_datas

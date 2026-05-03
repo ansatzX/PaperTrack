@@ -1,5 +1,4 @@
 """Unit tests for arxiv_entry, report, and arxiv_index_fetch modules"""
-import pytest
 from bs4 import BeautifulSoup
 
 from papertrack.arxiv_entry import ArxivEntry
@@ -7,6 +6,9 @@ from papertrack.arxiv_index_fetch import _parse_arxiv_result
 from papertrack.report import (
     parse_old_report,
     _gen_oneday_markdown,
+    parse_journal_report,
+    _is_missing_or_corrupt_journal_report,
+    filter_journal_auto,
 )
 from papertrack.zotero_query import ZoteroQuery
 
@@ -64,6 +66,167 @@ Authors:  Author 3
         result = parse_old_report(str(test_file))
         assert "arXiv:2502.07673" in result
         assert "arXiv:2502.07674" in result
+
+    def test_parse_corrupt_report_returns_none(self, tmp_path):
+        test_file = tmp_path / "bad.md"
+        test_file.write_text("# broken\n\nno generated sections here", encoding="utf-8")
+
+        assert parse_old_report(str(test_file)) is None
+
+
+class TestJournalReportValidation:
+    def test_missing_journal_report_is_rebuild_candidate(self, tmp_path):
+        assert _is_missing_or_corrupt_journal_report(str(tmp_path), "jcp", "164", "16") is True
+
+    def test_corrupt_journal_report_is_rebuild_candidate(self, tmp_path):
+        report_file = tmp_path / "jcp" / "164" / "16.md"
+        report_file.parent.mkdir(parents=True)
+        report_file.write_text("# broken\n", encoding="utf-8")
+
+        assert _is_missing_or_corrupt_journal_report(str(tmp_path), "jcp", "164", "16") is True
+
+    def test_task_edits_do_not_make_journal_report_corrupt(self, tmp_path):
+        report_file = tmp_path / "jcp" / "164" / "16.md"
+        report_file.parent.mkdir(parents=True)
+        report_file.write_text(
+            """# Journal of Chemical Physics Vol. 164, Iss. 16 — 2026
+
+---
+tags:
+  - #jcp-v164-i16
+---
+
+```dataview
+TASK
+from #jcp-v164-i16
+
+WHERE completed
+
+```
+
+## collected
+
+## not collected
+
+### 10.1063/example
+
+Links:
+
+- [x] [10.1063/example](https://doi.org/10.1063/example)
+
+Title:  Test article
+""",
+            encoding="utf-8",
+        )
+
+        assert parse_journal_report(str(report_file)) == ["10.1063/example"]
+        assert _is_missing_or_corrupt_journal_report(str(tmp_path), "jcp", "164", "16") is False
+
+    def test_auto_rebuilds_processed_issue_when_file_missing(self, tmp_path, monkeypatch):
+        from papertrack import crossref_loi, report
+
+        state = {"jcp": {"processed": [[164, 16]]}}
+        rebuilt = []
+
+        monkeypatch.setattr(report, "_load_state", lambda md_folder: state)
+        monkeypatch.setattr(report, "_save_state", lambda md_folder, new_state: state.update(new_state))
+        monkeypatch.setattr(crossref_loi, "discover_issues_crossref", lambda issn, from_year=0: [(2026, 164, 16)])
+        monkeypatch.setattr(
+            report,
+            "filter_journal_to_md",
+            lambda **kwargs: rebuilt.append((kwargs["volume"], kwargs["issue"])),
+        )
+
+        filter_journal_auto(
+            journal_name="Journal of Chemical Physics",
+            journal_slug="jcp",
+            issn="0021-9606",
+            acs_code="",
+            md_folder=str(tmp_path),
+            provider="aip",
+        )
+
+        assert rebuilt == [("164", "16")]
+
+    def test_auto_rebuilds_missing_older_processed_issue_in_normal_mode(self, tmp_path, monkeypatch):
+        from papertrack import crossref_loi, report
+
+        valid_latest = tmp_path / "jcp" / "164" / "16.md"
+        valid_latest.parent.mkdir(parents=True)
+        valid_latest.write_text(
+            """# Journal of Chemical Physics Vol. 164, Iss. 16 — 2026
+
+## collected
+
+## not collected
+
+### 10.1063/latest
+
+Title:  Latest article
+""",
+            encoding="utf-8",
+        )
+        rebuilt = []
+
+        monkeypatch.setattr(report, "_load_state", lambda md_folder: {"jcp": {"processed": [[163, 24], [164, 16]]}})
+        monkeypatch.setattr(report, "_save_state", lambda md_folder, new_state: None)
+        monkeypatch.setattr(crossref_loi, "discover_issues_crossref", lambda issn, from_year=0: [(2026, 164, 16)])
+        monkeypatch.setattr(
+            report,
+            "filter_journal_to_md",
+            lambda **kwargs: rebuilt.append((kwargs["volume"], kwargs["issue"])),
+        )
+
+        filter_journal_auto(
+            journal_name="Journal of Chemical Physics",
+            journal_slug="jcp",
+            issn="0021-9606",
+            acs_code="",
+            md_folder=str(tmp_path),
+            provider="aip",
+        )
+
+        assert rebuilt == [("163", "24")]
+
+    def test_auto_skips_processed_issue_when_file_is_valid(self, tmp_path, monkeypatch):
+        from papertrack import crossref_loi, report
+
+        report_file = tmp_path / "jcp" / "164" / "16.md"
+        report_file.parent.mkdir(parents=True)
+        report_file.write_text(
+            """# Journal of Chemical Physics Vol. 164, Iss. 16 — 2026
+
+## collected
+
+## not collected
+
+### 10.1063/example
+
+Title:  Test article
+""",
+            encoding="utf-8",
+        )
+        rebuilt = []
+
+        monkeypatch.setattr(report, "_load_state", lambda md_folder: {"jcp": {"processed": [[164, 16]]}})
+        monkeypatch.setattr(report, "_save_state", lambda md_folder, new_state: None)
+        monkeypatch.setattr(crossref_loi, "discover_issues_crossref", lambda issn, from_year=0: [(2026, 164, 16)])
+        monkeypatch.setattr(
+            report,
+            "filter_journal_to_md",
+            lambda **kwargs: rebuilt.append((kwargs["volume"], kwargs["issue"])),
+        )
+
+        filter_journal_auto(
+            journal_name="Journal of Chemical Physics",
+            journal_slug="jcp",
+            issn="0021-9606",
+            acs_code="",
+            md_folder=str(tmp_path),
+            provider="aip",
+        )
+
+        assert rebuilt == []
 
 
 class TestGenOnedayMarkdown:

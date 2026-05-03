@@ -3,7 +3,7 @@ name = "papertrack"
 version = "0.1.0"
 description = "Track papers from arXiv and journals, cross-check Zotero, generate Obsidian reports"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 authors = [
     { name="Cunxi Gong", email="ansatzMe@outlook.com" },
 ]
@@ -14,7 +14,7 @@ dependencies = [
     'feedparser',
     'jinja2>=3.0',
     'tomli>=1.0; python_version < "3.11"',
-    'cloudscraper>=1.2',
+    'curl_cffi>=0.7',
     'requests>=2.20',
 ]
 

@@ -10,6 +10,16 @@ from .codex import query_args, journal_configs
 logger = logging.getLogger(__name__)
 
 
+def _journal_output_root(base_dir: str, cfg: dict[str, str]) -> str:
+    """Return the provider-specific journal output root."""
+    provider = cfg.get("provider", "")
+    if not provider and cfg.get("acs_code"):
+        provider = "acs"
+    if not provider:
+        provider = "journals"
+    return os.path.join(base_dir, provider)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true",
@@ -34,6 +44,8 @@ def main():
                         help="[journal] volume number (omit for auto-detect)", type=str)
     parser.add_argument("--issue", default="",
                         help="[journal] issue number (omit for auto-detect)", type=str)
+    parser.add_argument("--year", default=0, type=int,
+                        help="[journal] publication year for explicit volume/issue mode")
     parser.add_argument("--backfill", action="store_true",
                         help="[journal] process all historical issues")
     parser.add_argument("--from_year", default=0, type=int,
@@ -102,7 +114,7 @@ def _run_journal(args, zotero: ZoteroQuery | None):
         logger.error("Journal '%s' not supported. Available: %s", args.journal, list(journal_configs.keys()))
         raise RuntimeError(f"Journal '{args.journal}' not supported") from None
 
-    md_folder = os.path.join(args.data_dir, "acs")
+    md_folder = _journal_output_root(args.data_dir, cfg)
 
     if args.volume and args.issue:
         # Explicit mode
@@ -114,7 +126,9 @@ def _run_journal(args, zotero: ZoteroQuery | None):
             issn=cfg["issn"],
             md_folder=md_folder,
             zotero=zotero,
+            year=args.year or None,
             acs_code=cfg.get("acs_code", ""),
+            provider=cfg.get("provider", ""),
         )
     else:
         # Auto-discover mode
@@ -125,6 +139,7 @@ def _run_journal(args, zotero: ZoteroQuery | None):
             acs_code=cfg.get("acs_code", ""),
             md_folder=md_folder,
             zotero=zotero,
+            provider=cfg.get("provider", "acs"),
             backfill=args.backfill,
             from_year=args.from_year,
         )
