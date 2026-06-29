@@ -108,44 +108,99 @@ def query_arxiv_result(date_from_date: str = "2025-02-01",
 
     query_args["date-from_date"] = date_from_date
     query_args["date-to_date"] = date_to_date
+    query_args.pop("start", None)
 
-    url_args = re.sub("%2B", "+", urlencode(query_args))
-    url = SEARCH_URL + url_args
+    page_size = _page_size(query_args)
+    result: dict[str, ArxivEntry] = {}
+    urls: list[str] = []
+    start = 0
 
+    while True:
+        url = _advanced_search_url(query_args, start)
+        urls.append(url)
+        results = _fetch_arxiv_page(url)
+        if results is None:
+            return AdapterResult(
+                entries={},
+                outcome=FETCH_FAILED,
+                provider="arxiv",
+                source="arxiv",
+                message=f"arXiv advanced search fetch failed at start={start}",
+                metadata={"url": url, "urls": urls, "start": start},
+            )
+
+        page_entries = _parse_arxiv_page(results, url)
+        if page_entries is None:
+            return AdapterResult(
+                entries={},
+                outcome=PARSE_FAILED,
+                provider="arxiv",
+                source="arxiv",
+                message=f"arXiv advanced search parse failed at start={start}",
+                metadata={"url": url, "urls": urls, "start": start},
+            )
+
+        before_count = len(result)
+        result.update(page_entries)
+        page_count = len(page_entries)
+        if page_count < page_size:
+            break
+        if len(result) == before_count:
+            logger.warning("arXiv pagination produced no new entries at start=%d; stopping", start)
+            break
+        start += page_size
+
+    return AdapterResult(
+        entries=result,
+        outcome=SUCCESS,
+        provider="arxiv",
+        source="arxiv",
+        metadata={"url": urls[0] if urls else "", "urls": urls},
+    )
+
+
+def _advanced_search_url(query_args: dict, start: int = 0) -> str:
+    page_args = deepcopy(query_args)
+    if start:
+        page_args["start"] = str(start)
+    url_args = re.sub("%2B", "+", urlencode(page_args))
+    return SEARCH_URL + url_args
+
+
+def _page_size(query_args: dict) -> int:
+    try:
+        page_size = int(query_args.get("size", 200))
+    except (TypeError, ValueError):
+        return 200
+    return page_size if page_size > 0 else 200
+
+
+def _fetch_arxiv_page(url: str):
     # arXiv sometimes returns transient errors under load; retry with backoff.
     last_exc = None
     for attempt in range(MAX_RETRIES):
         try:
-            results = feedparser.parse(url)
-            break
+            return feedparser.parse(url)
         except Exception as e:
             last_exc = e
             if attempt < MAX_RETRIES - 1:
                 delay = RETRY_BACKOFF[attempt]
                 logger.warning("arXiv fetch attempt %d/3 failed: %s. Retrying in %ds...", attempt + 1, e, delay)
                 time.sleep(delay)
-    else:
-        logger.error("arXiv fetch failed after %d attempts: %s", MAX_RETRIES, last_exc)
-        record_fetch_attempt({
-            "source_role": "authoritative",
-            "source": "arxiv",
-            "provider": "arxiv",
-            "url": url,
-            "stage": "advanced_search_fetch",
-            "outcome": "fetch_failed",
-            "exception": repr(last_exc),
-        })
-        return AdapterResult(
-            entries={},
-            outcome=FETCH_FAILED,
-            provider="arxiv",
-            source="arxiv",
-            message=repr(last_exc),
-            metadata={"url": url},
-        )
+    logger.error("arXiv fetch failed after %d attempts: %s", MAX_RETRIES, last_exc)
+    record_fetch_attempt({
+        "source_role": "authoritative",
+        "source": "arxiv",
+        "provider": "arxiv",
+        "url": url,
+        "stage": "advanced_search_fetch",
+        "outcome": "fetch_failed",
+        "exception": repr(last_exc),
+    })
+    return None
 
-    result: dict[str, ArxivEntry] = {}
 
+def _parse_arxiv_page(results, url: str) -> dict[str, ArxivEntry] | None:
     if "feed" not in results or "summary" not in results["feed"]:
         record_fetch_attempt({
             "source_role": "authoritative",
@@ -156,15 +211,9 @@ def query_arxiv_result(date_from_date: str = "2025-02-01",
             "outcome": "parse_failed",
             "message": "feedparser result missing feed summary",
         })
-        return AdapterResult(
-            entries=result,
-            outcome=PARSE_FAILED,
-            provider="arxiv",
-            source="arxiv",
-            message="feedparser result missing feed summary",
-            metadata={"url": url},
-        )
+        return None
 
+    result: dict[str, ArxivEntry] = {}
     summary_text = results["feed"]["summary"]
     soup = BeautifulSoup(summary_text, "lxml")
     find_results = soup.find_all(class_="arxiv-result")
@@ -174,13 +223,7 @@ def query_arxiv_result(date_from_date: str = "2025-02-01",
         if entry is not None:
             result[entry.arxiv_id] = entry
 
-    return AdapterResult(
-        entries=result,
-        outcome=SUCCESS,
-        provider="arxiv",
-        source="arxiv",
-        metadata={"url": url},
-    )
+    return result
 
 
 def query_arxiv_dict(date_from_date: str = "2025-02-01",

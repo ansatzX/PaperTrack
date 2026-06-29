@@ -2,6 +2,7 @@ from papertrack.adapter_result import (
     FETCH_FAILED,
     OFFICIAL_EMPTY_SUSPICIOUS,
     PARSE_FAILED,
+    SUCCESS,
 )
 
 
@@ -50,3 +51,68 @@ def test_arxiv_result_distinguishes_parse_failure(monkeypatch):
     assert result.outcome == PARSE_FAILED
     assert result.entries == {}
     assert result.provider == "arxiv"
+
+
+def test_arxiv_result_paginates_when_first_page_is_full(monkeypatch):
+    from papertrack import arxiv_index_fetch
+
+    seen_urls = []
+
+    def fake_parse(url):
+        seen_urls.append(url)
+        if "start=200" in url:
+            return {"feed": {"summary": _arxiv_summary(200, 1)}}
+        return {"feed": {"summary": _arxiv_summary(0, 200)}}
+
+    monkeypatch.setattr(arxiv_index_fetch.feedparser, "parse", fake_parse)
+
+    result = arxiv_index_fetch.query_arxiv_result(
+        "2026-06-01",
+        "2026-06-02",
+        query_args={"size": "200"},
+    )
+
+    assert result.outcome == SUCCESS
+    assert len(result.entries) == 201
+    assert len(seen_urls) == 2
+    assert "start=" not in seen_urls[0]
+    assert "start=200" in seen_urls[1]
+
+
+def test_arxiv_result_parse_failure_on_second_page_is_not_partial_success(monkeypatch):
+    from papertrack import arxiv_index_fetch
+
+    def fake_parse(url):
+        if "start=200" in url:
+            return {}
+        return {"feed": {"summary": _arxiv_summary(0, 200)}}
+
+    monkeypatch.setattr(arxiv_index_fetch.feedparser, "parse", fake_parse)
+
+    result = arxiv_index_fetch.query_arxiv_result(
+        "2026-06-01",
+        "2026-06-02",
+        query_args={"size": "200"},
+    )
+
+    assert result.outcome == PARSE_FAILED
+    assert result.entries == {}
+
+
+def _arxiv_summary(start: int, count: int) -> str:
+    items = []
+    for i in range(start, start + count):
+        items.append(
+            f"""
+            <li class="arxiv-result">
+              <p class="list-title is-inline-block">
+                <a href="https://arxiv.org/abs/2606.{i:05d}">arXiv:2606.{i:05d}</a>
+              </p>
+              <p class="title is-5 mathjax">Paper {i}</p>
+              <p class="authors"><a>Author {i}</a></p>
+              <p class="abstract mathjax"><span class="abstract-full">Abstract {i}</span></p>
+              <span class="tag is-small is-link tooltip is-tooltip-top">cs.AI</span>
+            </li>
+            """
+        )
+    return "<ol>" + "\n".join(items) + "</ol>"
