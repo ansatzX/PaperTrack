@@ -4,10 +4,24 @@ from typing import TYPE_CHECKING
 
 from pyzotero import zotero as zotero_lib
 
+from .identity import (
+    Identity,
+    MatchResult,
+    WorkIdentitySet,
+    identities_for_arxiv_entry,
+    identities_for_journal_entry,
+    normalize_doi,
+)
+
 if TYPE_CHECKING:
     from .arxiv_entry import ArxivEntry
+    from .journal_entry import JournalEntry
 
 logger = logging.getLogger(__name__)
+
+
+DOI_IDENTITY_KINDS = {"arxiv_doi", "external_doi", "publisher_doi", "doi"}
+ARXIV_IDENTITY_KINDS = {"arxiv_url", "arxiv_id"}
 
 
 class ZoteroQuery:
@@ -26,6 +40,7 @@ class ZoteroQuery:
         # produces no arXiv results for any day.
         self._doi_index: dict[str, str] | None = None
         self._url_arxiv_index: dict[str, str] | None = None
+        self._item_type_index: dict[str, str] = {}
 
     def _ensure_index(self):
         """Build in-memory lookup indexes from Zotero top-level items.
@@ -42,6 +57,7 @@ class ZoteroQuery:
         logger.info("Building Zotero index from top-level items...")
         self._doi_index = {}
         self._url_arxiv_index = {}
+        self._item_type_index = {}
         try:
             items = self.zot.everything(self.zot.top())
         except Exception:
@@ -50,9 +66,11 @@ class ZoteroQuery:
         for item in items:
             data = item.get("data", {})
             key = item.get("key", "")
+            if key:
+                self._item_type_index[key] = data.get("itemType", "")
             doi = data.get("DOI", "")
             if doi:
-                self._doi_index[doi] = key
+                self._doi_index[normalize_doi(doi)] = key
             url = data.get("url", "")
             if url:
                 from .arxiv_entry import ArxivEntry
@@ -61,6 +79,72 @@ class ZoteroQuery:
                     self._url_arxiv_index[bare_id] = key
         logger.info("Zotero index built: %d DOIs, %d arXiv URLs",
                     len(self._doi_index), len(self._url_arxiv_index))
+
+    def match_entry(self, entry: "ArxivEntry | JournalEntry") -> MatchResult:
+        """Match a source entry against Zotero by exact work identities."""
+        from .arxiv_entry import ArxivEntry
+        from .journal_entry import JournalEntry
+
+        if isinstance(entry, ArxivEntry):
+            identity_set = identities_for_arxiv_entry(entry)
+        elif isinstance(entry, JournalEntry):
+            identity_set = identities_for_journal_entry(entry)
+        else:
+            return MatchResult()
+        return self.match_identity_set(identity_set)
+
+    def match_identity_set(self, identity_set: WorkIdentitySet) -> MatchResult:
+        """Match exact identities against Zotero indexes.
+
+        Evidence hints are deliberately not used for automatic classification.
+        """
+        self._ensure_index()
+        if self._doi_index is None or self._url_arxiv_index is None:
+            return MatchResult()
+
+        for identity in identity_set.exact_identities:
+            match = self._match_identity(identity)
+            if match.is_collected:
+                return match
+
+        return MatchResult()
+
+    def _match_identity(self, identity: Identity) -> MatchResult:
+        if identity.kind in DOI_IDENTITY_KINDS:
+            value = normalize_doi(identity.value)
+            key = self._doi_index.get(value) if self._doi_index is not None else ""
+            if key:
+                return self._exact_match(identity.kind, value, key)
+
+        if identity.kind in ARXIV_IDENTITY_KINDS:
+            bare_id = self._bare_arxiv_id(identity.value)
+            key = self._url_arxiv_index.get(bare_id) if self._url_arxiv_index is not None else ""
+            if key:
+                return self._exact_match(identity.kind, bare_id, key)
+
+        return MatchResult()
+
+    def _exact_match(self, kind: str, canonical_value: str, key: str) -> MatchResult:
+        return MatchResult(
+            matched=True,
+            auto_classifiable=True,
+            confidence="exact",
+            match_kind=kind,
+            zotero_key=key,
+            zotero_item_type=self._item_type_index.get(key, ""),
+            canonical_identity_used=canonical_value,
+        )
+
+    @staticmethod
+    def _bare_arxiv_id(value: str) -> str:
+        from .arxiv_entry import ArxivEntry
+        return ArxivEntry.bare_id_from_url(value) or value.replace("arXiv:", "").strip()
+
+    def match_doi(self, doi: str, kind: str = "publisher_doi") -> MatchResult:
+        """Match a DOI against Zotero and return a structured result."""
+        return self.match_identity_set(
+            WorkIdentitySet(exact_identities=[Identity(kind, doi)])
+        )
 
     def find_by_entry(self, entry: "ArxivEntry") -> bool:
         """Check if an arXiv paper exists in the Zotero library.
@@ -75,27 +159,11 @@ class ZoteroQuery:
 
         Returns True if any layer matches, False otherwise.
         """
-        self._ensure_index()
-        if self._doi_index is None:
-            return False
-
-        if entry.arxiv_doi and entry.arxiv_doi in self._doi_index:
-            return True
-
-        if entry.external_doi and entry.external_doi in self._doi_index:
-            return True
-
-        if entry.bare_id and entry.bare_id in self._url_arxiv_index:
-            return True
-
-        return False
+        return self.match_entry(entry).is_collected
 
     def find_by_doi(self, doi: str) -> bool:
         """Check if a DOI exists in the Zotero library.
 
         Direct DOI lookup for journal articles that already have a publisher DOI.
         """
-        self._ensure_index()
-        if self._doi_index is None:
-            return False
-        return bool(doi and doi in self._doi_index)
+        return self.match_doi(doi).is_collected

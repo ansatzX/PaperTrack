@@ -317,16 +317,37 @@ class TestParseArxivResult:
 class TestZoteroQuery:
     """Test ZoteroQuery index building and matching logic"""
 
-    def test_find_by_entry_three_layer_match(self, monkeypatch):
+    def test_match_entry_reports_three_layer_exact_matches(self, monkeypatch):
         class FakeZotero:
             def everything(self, items):
                 return items
 
             def top(self):
                 return [
-                    {"key": "A1", "data": {"DOI": "10.48550/arXiv.2502.07673", "url": ""}},
-                    {"key": "B2", "data": {"DOI": "10.1103/PhysRevLett.134.010201", "url": ""}},
-                    {"key": "C3", "data": {"DOI": "", "url": "https://arxiv.org/abs/2502.99999"}},
+                    {
+                        "key": "A1",
+                        "data": {
+                            "itemType": "preprint",
+                            "DOI": "10.48550/ARXIV.2502.07673",
+                            "url": "",
+                        },
+                    },
+                    {
+                        "key": "B2",
+                        "data": {
+                            "itemType": "journalArticle",
+                            "DOI": "10.1103/PhysRevLett.134.010201",
+                            "url": "",
+                        },
+                    },
+                    {
+                        "key": "C3",
+                        "data": {
+                            "itemType": "webpage",
+                            "DOI": "",
+                            "url": "https://arxiv.org/abs/2502.99999",
+                        },
+                    },
                 ]
 
         zq = ZoteroQuery()
@@ -335,20 +356,64 @@ class TestZoteroQuery:
 
         # Layer 1: arXiv DOI match
         e1 = ArxivEntry(arxiv_id="arXiv:2502.07673", title="T", authors=[], abstract="")
-        assert zq.find_by_entry(e1) is True
+        m1 = zq.match_entry(e1)
+        assert m1.is_collected is True
+        assert m1.match_kind == "arxiv_doi"
+        assert m1.zotero_key == "A1"
+        assert m1.zotero_item_type == "preprint"
 
         # Layer 2: external DOI match
         e2 = ArxivEntry(arxiv_id="arXiv:9999.99999", title="T", authors=[], abstract="",
-                        external_doi="10.1103/PhysRevLett.134.010201")
-        assert zq.find_by_entry(e2) is True
+                        external_doi="10.1103/physrevlett.134.010201")
+        m2 = zq.match_entry(e2)
+        assert m2.is_collected is True
+        assert m2.match_kind == "external_doi"
+        assert m2.zotero_key == "B2"
+        assert m2.zotero_item_type == "journalArticle"
 
         # Layer 3: arXiv ID from URL match (webpage-type item without DOI)
         e3 = ArxivEntry(arxiv_id="arXiv:2502.99999", title="T", authors=[], abstract="")
-        assert zq.find_by_entry(e3) is True
+        m3 = zq.match_entry(e3)
+        assert m3.is_collected is True
+        assert m3.match_kind == "arxiv_url"
+        assert m3.zotero_key == "C3"
+        assert m3.zotero_item_type == "webpage"
 
         # No match
         e4 = ArxivEntry(arxiv_id="arXiv:8888.88888", title="T", authors=[], abstract="")
-        assert zq.find_by_entry(e4) is False
+        assert zq.match_entry(e4).is_collected is False
+
+        # Backwards-compatible bool wrapper
+        assert zq.find_by_entry(e1) is True
+
+    def test_match_doi_reports_publisher_doi_match(self, monkeypatch):
+        class FakeZotero:
+            def everything(self, items):
+                return items
+
+            def top(self):
+                return [
+                    {
+                        "key": "J1",
+                        "data": {
+                            "itemType": "journalArticle",
+                            "DOI": "10.1063/5.0323573",
+                            "url": "",
+                        },
+                    }
+                ]
+
+        zq = ZoteroQuery()
+        zq.zot = FakeZotero()
+        zq._ensure_index()
+
+        match = zq.match_doi("10.1063/5.0323573")
+
+        assert match.is_collected is True
+        assert match.match_kind == "publisher_doi"
+        assert match.zotero_key == "J1"
+        assert match.zotero_item_type == "journalArticle"
+        assert zq.find_by_doi("10.1063/5.0323573") is True
 
     def test_index_not_built_when_zotero_unavailable(self, monkeypatch):
         class BrokenZotero:
@@ -361,6 +426,7 @@ class TestZoteroQuery:
 
         e = ArxivEntry(arxiv_id="arXiv:2502.07673", title="T", authors=[], abstract="")
         assert zq.find_by_entry(e) is False
+        assert zq.match_entry(e).is_collected is False
 
 
 from datetime import date

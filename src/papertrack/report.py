@@ -61,7 +61,7 @@ def _classify_papers(arxiv_dict: dict[str, ArxivEntry],
     for arxiv_id, entry in arxiv_dict.items():
         if zotero is not None:
             try:
-                found = zotero.find_by_entry(entry)
+                found = zotero.match_entry(entry).is_collected
             except Exception:
                 logger.exception("Zotero lookup failed for %s", arxiv_id)
                 found = False
@@ -300,7 +300,7 @@ def _classify_journal_papers(entries: dict[str, JournalEntry],
     for doi, entry in entries.items():
         if zotero is not None:
             try:
-                found = zotero.find_by_doi(doi)
+                found = zotero.match_entry(entry).is_collected
             except Exception:
                 logger.exception("Zotero lookup failed for %s", doi)
                 found = False
