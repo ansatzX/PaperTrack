@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 import feedparser
 from bs4 import BeautifulSoup
 
+from .adapter_result import AdapterResult, FETCH_FAILED, PARSE_FAILED, SUCCESS
 from .arxiv_entry import ArxivEntry
 from .diagnostics import record_fetch_attempt
 
@@ -88,12 +89,12 @@ def _parse_arxiv_result(res) -> ArxivEntry | None:
     )
 
 
-def query_arxiv_dict(date_from_date: str = "2025-02-01",
-                     date_to_date: str = "2025-02-02",
-                     query_args: dict | None = None) -> dict[str, ArxivEntry]:
+def query_arxiv_result(date_from_date: str = "2025-02-01",
+                       date_to_date: str = "2025-02-02",
+                       query_args: dict | None = None) -> AdapterResult[dict[str, ArxivEntry]]:
     """Query arXiv advanced search for papers submitted on a date range.
 
-    Returns a dict mapping arxiv_id (e.g. 'arXiv:2502.07673') to ArxivEntry.
+    Returns an AdapterResult whose entries map arxiv_id to ArxivEntry.
 
     The query_args dict is deep-copied before mutation to avoid corrupting
     the module-level template dict (quant_ph in codex.py).
@@ -134,7 +135,14 @@ def query_arxiv_dict(date_from_date: str = "2025-02-01",
             "outcome": "fetch_failed",
             "exception": repr(last_exc),
         })
-        return {}
+        return AdapterResult(
+            entries={},
+            outcome=FETCH_FAILED,
+            provider="arxiv",
+            source="arxiv",
+            message=repr(last_exc),
+            metadata={"url": url},
+        )
 
     result: dict[str, ArxivEntry] = {}
 
@@ -148,7 +156,14 @@ def query_arxiv_dict(date_from_date: str = "2025-02-01",
             "outcome": "parse_failed",
             "message": "feedparser result missing feed summary",
         })
-        return result
+        return AdapterResult(
+            entries=result,
+            outcome=PARSE_FAILED,
+            provider="arxiv",
+            source="arxiv",
+            message="feedparser result missing feed summary",
+            metadata={"url": url},
+        )
 
     summary_text = results["feed"]["summary"]
     soup = BeautifulSoup(summary_text, "lxml")
@@ -159,4 +174,16 @@ def query_arxiv_dict(date_from_date: str = "2025-02-01",
         if entry is not None:
             result[entry.arxiv_id] = entry
 
-    return result
+    return AdapterResult(
+        entries=result,
+        outcome=SUCCESS,
+        provider="arxiv",
+        source="arxiv",
+        metadata={"url": url},
+    )
+
+
+def query_arxiv_dict(date_from_date: str = "2025-02-01",
+                     date_to_date: str = "2025-02-02",
+                     query_args: dict | None = None) -> dict[str, ArxivEntry]:
+    return query_arxiv_result(date_from_date, date_to_date, query_args).entries

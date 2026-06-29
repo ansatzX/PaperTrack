@@ -7,9 +7,9 @@ from datetime import date, timedelta
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from .arxiv_entry import ArxivEntry
-from .arxiv_index_fetch import query_arxiv_dict
+from .arxiv_index_fetch import query_arxiv_result
 from .journal_entry import JournalEntry
-from .journal_fetch import query_journal_issue_full
+from .journal_fetch import query_journal_issue_full_result
 from .migration import preserve_task_state, write_report_file
 from .zotero_query import ZoteroQuery
 
@@ -157,7 +157,16 @@ def _filter_one_arxiv_day_to_md(day_date: date, md_folder: str,
     next_date = day_date + timedelta(days=1)
     date_to_date = next_date.strftime("%Y-%m-%d")
 
-    arxiv_dict = query_arxiv_dict(date_string, date_to_date, query_args)
+    arxiv_fetch = query_arxiv_result(date_string, date_to_date, query_args)
+    if not arxiv_fetch.ok:
+        logger.warning(
+            "Skipping arXiv %s %s because fetch outcome was %s",
+            category,
+            date_string,
+            arxiv_fetch.outcome,
+        )
+        return
+    arxiv_dict = arxiv_fetch.entries
     if not arxiv_dict:
         return
 
@@ -371,18 +380,28 @@ def filter_journal_to_md(journal_name: str, journal_slug: str,
                          volume: str, issue: str, issn: str,
                          md_folder: str, zotero: ZoteroQuery | None = None,
                          year: int | None = None, acs_code: str = "",
-                         provider: str = ""):
+                         provider: str = "") -> bool:
     """Fetch journal articles for a volume/issue and write a Markdown report.
 
     The report goes to {md_folder}/{journal_slug}/{volume}/{issue}.md
     """
-    entries = query_journal_issue_full(
+    fetch_result = query_journal_issue_full_result(
         issn, volume, issue, journal_name, year, acs_code, provider, journal_slug
     )
+    if not fetch_result.ok:
+        logger.warning(
+            "Skipping %s Vol.%s Iss.%s because fetch outcome was %s",
+            journal_name,
+            volume,
+            issue,
+            fetch_result.outcome,
+        )
+        return False
+    entries = fetch_result.entries
 
     if not entries:
         logger.warning("No articles found for %s Vol.%s Iss.%s", journal_name, volume, issue)
-        return
+        return False
 
     # Infer date from first entry
     first = next(iter(entries.values()))
@@ -412,6 +431,7 @@ def filter_journal_to_md(journal_name: str, journal_slug: str,
     markdown_str = preserve_task_state(markdown_str, old_content)
 
     write_report_file(report_file, markdown_str, source="journal")
+    return True
 
 
 # ── State file helpers ──────────────────────────────────────────────────
@@ -461,7 +481,7 @@ def filter_journal_auto(journal_name: str, journal_slug: str,
         if not _is_missing_or_corrupt_journal_report(md_folder, journal_slug, str(vol), str(iss)):
             continue
         logger.info("Rebuilding missing/corrupt issue: %s Vol %d Iss %d", journal_name, vol, iss)
-        filter_journal_to_md(
+        written = filter_journal_to_md(
             journal_name=journal_name,
             journal_slug=journal_slug,
             volume=str(vol),
@@ -473,7 +493,8 @@ def filter_journal_auto(journal_name: str, journal_slug: str,
             provider=provider,
         )
         rebuilt_keys.add((vol, iss))
-        new_count += 1
+        if written:
+            new_count += 1
 
     if acs_code:
         # ── ACS path: scrape LOI page ──
@@ -501,7 +522,7 @@ def filter_journal_auto(journal_name: str, journal_slug: str,
             ):
                 continue
             logger.info("New issue: %s Vol %d Iss %d", journal_name, vol, iss)
-            filter_journal_to_md(
+            written = filter_journal_to_md(
                 journal_name=journal_name,
                 journal_slug=journal_slug,
                 volume=str(vol),
@@ -512,8 +533,9 @@ def filter_journal_auto(journal_name: str, journal_slug: str,
                 acs_code=acs_code,
                 provider=provider,
             )
-            processed.add(key)
-            new_count += 1
+            if written:
+                processed.add(key)
+                new_count += 1
             if not backfill:
                 break
 
@@ -540,7 +562,7 @@ def filter_journal_auto(journal_name: str, journal_slug: str,
             ):
                 continue
             logger.info("New issue: %s Vol %d Iss %d (year %d)", journal_name, vol, iss, yr)
-            filter_journal_to_md(
+            written = filter_journal_to_md(
                 journal_name=journal_name,
                 journal_slug=journal_slug,
                 volume=str(vol),
@@ -552,8 +574,9 @@ def filter_journal_auto(journal_name: str, journal_slug: str,
                 year=yr,
                 provider=provider,
             )
-            processed.add(key)
-            new_count += 1
+            if written:
+                processed.add(key)
+                new_count += 1
             if not backfill:
                 break
 

@@ -259,6 +259,7 @@ def test_crossref_abstract_is_plain_text():
 
 def test_aip_provider_uses_official_source_before_crossref(monkeypatch):
     from papertrack import aip_fetch, journal_fetch
+    from papertrack.adapter_result import AdapterResult, SUCCESS
 
     official_entry = JournalEntry(
         doi="10.1063/official",
@@ -269,12 +270,17 @@ def test_aip_provider_uses_official_source_before_crossref(monkeypatch):
 
     def fake_aip_issue(journal_slug, volume, issue, journal_name):
         assert journal_slug == "jcp"
-        return {official_entry.doi: official_entry}
+        return AdapterResult(
+            entries={official_entry.doi: official_entry},
+            outcome=SUCCESS,
+            provider="aip",
+            source="journal",
+        )
 
     def fake_crossref_issue(*args, **kwargs):
         raise AssertionError("CrossRef should not be called when AIP returns entries")
 
-    monkeypatch.setattr(aip_fetch, "query_aip_issue", fake_aip_issue)
+    monkeypatch.setattr(aip_fetch, "query_aip_issue_result", fake_aip_issue)
     monkeypatch.setattr(journal_fetch, "query_journal_issue", fake_crossref_issue)
 
     entries = journal_fetch.query_journal_issue_full(
@@ -292,6 +298,7 @@ def test_aip_provider_uses_official_source_before_crossref(monkeypatch):
 
 def test_aip_provider_uses_crossref_only_to_fill_missing_official_abstracts(monkeypatch):
     from papertrack import aip_fetch, journal_fetch
+    from papertrack.adapter_result import AdapterResult, SUCCESS
 
     with_abstract = JournalEntry(
         doi="10.1063/with-abstract",
@@ -308,11 +315,11 @@ def test_aip_provider_uses_crossref_only_to_fill_missing_official_abstracts(monk
 
     monkeypatch.setattr(
         aip_fetch,
-        "query_aip_issue",
-        lambda *args, **kwargs: {
+        "query_aip_issue_result",
+        lambda *args, **kwargs: AdapterResult(entries={
             with_abstract.doi: with_abstract,
             missing_abstract.doi: missing_abstract,
-        },
+        }, outcome=SUCCESS, provider="aip", source="journal"),
     )
 
     def fake_crossref_year(issn, year):
@@ -365,6 +372,7 @@ def test_aip_provider_uses_crossref_only_to_fill_missing_official_abstracts(monk
 
 def test_aip_crossref_abstract_fallback_infers_year_from_official_metadata(monkeypatch):
     from papertrack import aip_fetch, journal_fetch
+    from papertrack.adapter_result import AdapterResult, SUCCESS
 
     missing_abstract = JournalEntry(
         doi="10.1063/missing-abstract",
@@ -377,8 +385,13 @@ def test_aip_crossref_abstract_fallback_infers_year_from_official_metadata(monke
 
     monkeypatch.setattr(
         aip_fetch,
-        "query_aip_issue",
-        lambda *args, **kwargs: {missing_abstract.doi: missing_abstract},
+        "query_aip_issue_result",
+        lambda *args, **kwargs: AdapterResult(
+            entries={missing_abstract.doi: missing_abstract},
+            outcome=SUCCESS,
+            provider="aip",
+            source="journal",
+        ),
     )
 
     def fake_crossref_year(issn, year):
@@ -407,6 +420,7 @@ def test_aip_crossref_abstract_fallback_infers_year_from_official_metadata(monke
 
 def test_aip_provider_falls_back_to_crossref_when_official_empty(monkeypatch):
     from papertrack import aip_fetch, journal_fetch
+    from papertrack.adapter_result import AdapterResult, OFFICIAL_EMPTY_SUSPICIOUS
 
     crossref_entry = JournalEntry(
         doi="10.1063/crossref",
@@ -415,7 +429,16 @@ def test_aip_provider_falls_back_to_crossref_when_official_empty(monkeypatch):
         abstract="CrossRef abstract",
     )
 
-    monkeypatch.setattr(aip_fetch, "query_aip_issue", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        aip_fetch,
+        "query_aip_issue_result",
+        lambda *args, **kwargs: AdapterResult(
+            entries={},
+            outcome=OFFICIAL_EMPTY_SUSPICIOUS,
+            provider="aip",
+            source="journal",
+        ),
+    )
     monkeypatch.setattr(
         journal_fetch,
         "query_journal_issue",

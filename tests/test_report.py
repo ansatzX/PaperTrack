@@ -232,6 +232,27 @@ Title:  Test article
 
         assert rebuilt == []
 
+    def test_auto_does_not_mark_new_issue_processed_when_report_write_fails(self, tmp_path, monkeypatch):
+        from papertrack import crossref_loi, report
+
+        state = {}
+
+        monkeypatch.setattr(report, "_load_state", lambda md_folder: state)
+        monkeypatch.setattr(report, "_save_state", lambda md_folder, new_state: state.update(new_state))
+        monkeypatch.setattr(crossref_loi, "discover_issues_crossref", lambda issn, from_year=0: [(2026, 164, 16)])
+        monkeypatch.setattr(report, "filter_journal_to_md", lambda **kwargs: False)
+
+        filter_journal_auto(
+            journal_name="Journal of Chemical Physics",
+            journal_slug="jcp",
+            issn="0021-9606",
+            acs_code="",
+            md_folder=str(tmp_path),
+            provider="aip",
+        )
+
+        assert state == {"jcp": {"processed": []}}
+
 
 class TestJournalRendering:
     def test_journal_rendering_uses_schema_and_omits_toc_image(self):
@@ -262,6 +283,7 @@ class TestJournalRendering:
 
     def test_filter_journal_to_md_preserves_existing_task_state(self, tmp_path, monkeypatch):
         from papertrack import report
+        from papertrack.adapter_result import AdapterResult, SUCCESS
 
         report_file = tmp_path / "jcp" / "164" / "16.md"
         report_file.parent.mkdir(parents=True)
@@ -291,8 +313,13 @@ Title:  Old title
         )
         monkeypatch.setattr(
             report,
-            "query_journal_issue_full",
-            lambda *args, **kwargs: {entry.doi: entry},
+            "query_journal_issue_full_result",
+            lambda *args, **kwargs: AdapterResult(
+                entries={entry.doi: entry},
+                outcome=SUCCESS,
+                provider="aip",
+                source="journal",
+            ),
         )
 
         filter_journal_to_md(
@@ -312,6 +339,7 @@ Title:  Old title
 
     def test_filter_journal_to_md_infers_acs_provider_for_schema(self, tmp_path, monkeypatch):
         from papertrack import report
+        from papertrack.adapter_result import AdapterResult, SUCCESS
 
         entry = JournalEntry(
             doi="10.1021/example",
@@ -322,8 +350,13 @@ Title:  Old title
         )
         monkeypatch.setattr(
             report,
-            "query_journal_issue_full",
-            lambda *args, **kwargs: {entry.doi: entry},
+            "query_journal_issue_full_result",
+            lambda *args, **kwargs: AdapterResult(
+                entries={entry.doi: entry},
+                outcome=SUCCESS,
+                provider="acs",
+                source="journal",
+            ),
         )
 
         filter_journal_to_md(
@@ -545,22 +578,23 @@ from datetime import date
 
 def test_filter_arxiv_days_to_md_processes_exact_days(tmp_path, monkeypatch):
     from papertrack import report
+    from papertrack.adapter_result import AdapterResult, SUCCESS
     from papertrack.arxiv_entry import ArxivEntry
 
     calls = []
 
     def fake_query(date_from_date, date_to_date, query_args):
         calls.append((date_from_date, date_to_date))
-        return {
+        return AdapterResult(entries={
             "arXiv:2606.00001": ArxivEntry(
                 arxiv_id="arXiv:2606.00001",
                 title=f"Paper for {date_from_date}",
                 authors=["A Author"],
                 abstract="Abstract text",
             )
-        }
+        }, outcome=SUCCESS, provider="arxiv", source="arxiv")
 
-    monkeypatch.setattr(report, "query_arxiv_dict", fake_query)
+    monkeypatch.setattr(report, "query_arxiv_result", fake_query)
 
     report.filter_arxiv_days_to_md(
         days=[date(2026, 6, 8), date(2026, 6, 9)],
@@ -580,8 +614,18 @@ def test_filter_arxiv_days_to_md_processes_exact_days(tmp_path, monkeypatch):
 
 def test_filter_arxiv_days_to_md_skips_empty_days(tmp_path, monkeypatch):
     from papertrack import report
+    from papertrack.adapter_result import AdapterResult, SUCCESS
 
-    monkeypatch.setattr(report, "query_arxiv_dict", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        report,
+        "query_arxiv_result",
+        lambda *args, **kwargs: AdapterResult(
+            entries={},
+            outcome=SUCCESS,
+            provider="arxiv",
+            source="arxiv",
+        ),
+    )
 
     report.filter_arxiv_days_to_md(
         days=[date(2026, 6, 9)],

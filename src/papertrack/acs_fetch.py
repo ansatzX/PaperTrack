@@ -7,6 +7,13 @@ import time
 from curl_cffi import requests
 from bs4 import BeautifulSoup
 
+from .adapter_result import (
+    AdapterResult,
+    BLOCKED,
+    FETCH_FAILED,
+    OFFICIAL_EMPTY_SUSPICIOUS,
+    SUCCESS,
+)
 from .diagnostics import record_fetch_attempt
 from .journal_entry import JournalEntry
 
@@ -128,8 +135,8 @@ def _normalize_date(raw: str) -> str:
     return cleaned
 
 
-def query_acs_issue(journal_code: str, volume: str, issue: str,
-                    journal_name: str = "") -> dict[str, JournalEntry]:
+def query_acs_issue_result(journal_code: str, volume: str, issue: str,
+                           journal_name: str = "") -> AdapterResult[dict[str, JournalEntry]]:
     """Scrape ACS TOC page for a specific volume/issue.
 
     Args:
@@ -139,21 +146,30 @@ def query_acs_issue(journal_code: str, volume: str, issue: str,
         journal_name: Display name for the journal.
 
     Returns:
-        Dict mapping DOI -> JournalEntry, with abstracts and TOC images.
+        AdapterResult containing DOI -> JournalEntry mappings.
     """
     cache_key = f"{journal_code}:{volume}:{issue}"
     if cache_key in _cache:
-        return _cache[cache_key]
+        return AdapterResult(
+            entries=_cache[cache_key],
+            outcome=SUCCESS,
+            provider="acs",
+            source="journal",
+        )
 
     url = ACS_TOC_URL.format(journal_code=journal_code, volume=volume, issue=issue)
 
     last_exc = None
+    last_outcome = FETCH_FAILED
+    last_message = "ACS issue page could not be fetched"
     for attempt in range(3):
         try:
             logger.info("Scraping ACS TOC: %s", url)
             resp = requests.get(url, impersonate="chrome124", timeout=30)
             if "Just a moment" in resp.text:
                 logger.warning("Cloudflare block on attempt %d/3", attempt + 1)
+                last_outcome = BLOCKED
+                last_message = "ACS issue page returned a block page"
                 record_fetch_attempt(
                     {
                         "source_role": "authoritative",
@@ -190,13 +206,28 @@ def query_acs_issue(journal_code: str, volume: str, issue: str,
                     },
                     html=resp.text,
                 )
-                return {}
+                return AdapterResult(
+                    entries={},
+                    outcome=OFFICIAL_EMPTY_SUSPICIOUS,
+                    provider="acs",
+                    source="journal",
+                    message="ACS issue page parsed to zero official articles",
+                    metadata={"url": url},
+                )
             _cache[cache_key] = entries
             logger.info("ACS %s v%s i%s: %d articles scraped",
                         journal_code, volume, issue, len(entries))
-            return entries
+            return AdapterResult(
+                entries=entries,
+                outcome=SUCCESS,
+                provider="acs",
+                source="journal",
+                metadata={"url": url},
+            )
         except Exception as e:
             last_exc = e
+            last_outcome = FETCH_FAILED
+            last_message = repr(e)
             logger.warning("ACS fetch attempt %d/3 failed: %s", attempt + 1, e)
             if attempt == 2:
                 record_fetch_attempt({
@@ -215,4 +246,16 @@ def query_acs_issue(journal_code: str, volume: str, issue: str,
                 time.sleep((1, 2, 4)[attempt])
 
     logger.error("ACS fetch failed after 3 attempts: %s", last_exc)
-    return {}
+    return AdapterResult(
+        entries={},
+        outcome=last_outcome,
+        provider="acs",
+        source="journal",
+        message=last_message,
+        metadata={"url": url},
+    )
+
+
+def query_acs_issue(journal_code: str, volume: str, issue: str,
+                    journal_name: str = "") -> dict[str, JournalEntry]:
+    return query_acs_issue_result(journal_code, volume, issue, journal_name).entries

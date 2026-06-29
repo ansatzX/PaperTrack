@@ -5,6 +5,7 @@ from urllib.error import URLError
 from urllib.parse import urlencode
 import json
 
+from .adapter_result import AdapterResult, SUCCESS
 from .diagnostics import record_fetch_attempt
 from .journal_entry import JournalEntry
 
@@ -137,6 +138,19 @@ def query_journal_issue(issn: str, volume: str, issue: str,
     return result
 
 
+def query_journal_issue_result(issn: str, volume: str, issue: str,
+                               journal_name: str = "",
+                               year: int | None = None) -> AdapterResult[dict[str, JournalEntry]]:
+    entries = query_journal_issue(issn, volume, issue, journal_name, year)
+    return AdapterResult(
+        entries=entries,
+        outcome=SUCCESS,
+        provider="crossref",
+        source="journal",
+        source_role="fallback",
+    )
+
+
 def _fill_missing_abstracts_from_crossref(entries: dict[str, JournalEntry],
                                           issn: str,
                                           year: int | None = None) -> int:
@@ -171,21 +185,21 @@ def _fill_missing_abstracts_from_crossref(entries: dict[str, JournalEntry],
     return filled
 
 
-def query_journal_issue_full(issn: str, volume: str, issue: str,
-                            journal_name: str = "", year: int | None = None,
-                            acs_code: str = "", provider: str = "",
-                            journal_slug: str = "") -> dict[str, JournalEntry]:
+def query_journal_issue_full_result(issn: str, volume: str, issue: str,
+                                    journal_name: str = "", year: int | None = None,
+                                    acs_code: str = "", provider: str = "",
+                                    journal_slug: str = "") -> AdapterResult[dict[str, JournalEntry]]:
     """Fetch articles for a journal volume/issue, preferring ACS direct scraping.
 
     Falls back to CrossRef when ACS scraping fails or acs_code is not provided.
     """
     if acs_code:
         try:
-            from .acs_fetch import query_acs_issue
-            entries = query_acs_issue(acs_code, volume, issue, journal_name)
-            if entries:
-                return entries
-            logger.info("ACS scraping returned empty, falling back to CrossRef")
+            from .acs_fetch import query_acs_issue_result
+            official = query_acs_issue_result(acs_code, volume, issue, journal_name)
+            if official.entries:
+                return official
+            logger.info("ACS scraping returned %s, falling back to CrossRef", official.outcome)
             record_fetch_attempt({
                 "source_role": "fallback",
                 "source": "journal",
@@ -196,7 +210,8 @@ def query_journal_issue_full(issn: str, volume: str, issue: str,
                 "stage": "issue_membership_fallback",
                 "outcome": "success",
                 "fallback_used": ["crossref_issue_membership"],
-                "message": "ACS official source returned empty; using CrossRef fallback",
+                "official_outcome": official.outcome,
+                "message": "ACS official source did not produce entries; using CrossRef fallback",
             })
         except ImportError:
             logger.warning("curl_cffi not available for ACS scraping, falling back to CrossRef")
@@ -229,10 +244,10 @@ def query_journal_issue_full(issn: str, volume: str, issue: str,
 
     if provider == "aip" and journal_slug:
         try:
-            from .aip_fetch import query_aip_issue
-            entries = query_aip_issue(journal_slug, volume, issue, journal_name)
-            if entries:
-                filled = _fill_missing_abstracts_from_crossref(entries, issn, year)
+            from .aip_fetch import query_aip_issue_result
+            official = query_aip_issue_result(journal_slug, volume, issue, journal_name)
+            if official.entries:
+                filled = _fill_missing_abstracts_from_crossref(official.entries, issn, year)
                 if filled:
                     record_fetch_attempt({
                         "source_role": "third_party_metadata",
@@ -246,8 +261,9 @@ def query_journal_issue_full(issn: str, volume: str, issue: str,
                         "fallback_used": ["crossref_abstract_fill"],
                         "filled_abstracts": filled,
                     })
-                return entries
-            logger.info("AIP scraping returned empty, falling back to CrossRef")
+                    official.metadata["crossref_filled_abstracts"] = filled
+                return official
+            logger.info("AIP scraping returned %s, falling back to CrossRef", official.outcome)
             record_fetch_attempt({
                 "source_role": "fallback",
                 "source": "journal",
@@ -258,7 +274,8 @@ def query_journal_issue_full(issn: str, volume: str, issue: str,
                 "stage": "issue_membership_fallback",
                 "outcome": "success",
                 "fallback_used": ["crossref_issue_membership"],
-                "message": "AIP official source returned empty; using CrossRef fallback",
+                "official_outcome": official.outcome,
+                "message": "AIP official source did not produce entries; using CrossRef fallback",
             })
         except ImportError:
             logger.warning("curl_cffi not available, falling back to CrossRef")
@@ -289,7 +306,23 @@ def query_journal_issue_full(issn: str, volume: str, issue: str,
                 "message": "AIP scraper failed; using CrossRef fallback",
             })
 
-    return query_journal_issue(issn, volume, issue, journal_name, year)
+    return query_journal_issue_result(issn, volume, issue, journal_name, year)
+
+
+def query_journal_issue_full(issn: str, volume: str, issue: str,
+                            journal_name: str = "", year: int | None = None,
+                            acs_code: str = "", provider: str = "",
+                            journal_slug: str = "") -> dict[str, JournalEntry]:
+    return query_journal_issue_full_result(
+        issn,
+        volume,
+        issue,
+        journal_name,
+        year,
+        acs_code,
+        provider,
+        journal_slug,
+    ).entries
 
 
 def clear_cache():

@@ -8,6 +8,7 @@ import time
 from bs4 import BeautifulSoup
 from curl_cffi import requests
 
+from .adapter_result import AdapterResult, FETCH_FAILED, OFFICIAL_EMPTY_SUSPICIOUS, SUCCESS
 from .diagnostics import record_fetch_attempt
 from .journal_entry import JournalEntry
 
@@ -197,12 +198,17 @@ def _parse_aip_toc(
     return entries, abstract_ids
 
 
-def query_aip_issue(journal_slug: str, volume: str, issue: str,
-                    journal_name: str = "") -> dict[str, JournalEntry]:
+def query_aip_issue_result(journal_slug: str, volume: str, issue: str,
+                           journal_name: str = "") -> AdapterResult[dict[str, JournalEntry]]:
     """Scrape a specific AIP issue page without visiting article pages."""
     cache_key = f"{journal_slug}:{volume}:{issue}"
     if cache_key in _cache:
-        return _cache[cache_key]
+        return AdapterResult(
+            entries=_cache[cache_key],
+            outcome=SUCCESS,
+            provider="aip",
+            source="journal",
+        )
 
     html = ""
     final_url = ""
@@ -226,7 +232,14 @@ def query_aip_issue(journal_slug: str, volume: str, issue: str,
             "outcome": "fetch_failed",
             "message": "AIP issue page could not be fetched with required selector",
         })
-        return {}
+        return AdapterResult(
+            entries={},
+            outcome=FETCH_FAILED,
+            provider="aip",
+            source="journal",
+            message="AIP issue page could not be fetched with required selector",
+            metadata={"url": final_url},
+        )
 
     entries, abstract_ids = _parse_aip_toc(html, journal_name)
     if not entries:
@@ -250,14 +263,32 @@ def query_aip_issue(journal_slug: str, volume: str, issue: str,
             },
             html=html,
         )
-        return {}
+        return AdapterResult(
+            entries={},
+            outcome=OFFICIAL_EMPTY_SUSPICIOUS,
+            provider="aip",
+            source="journal",
+            message="AIP issue page parsed to zero official articles",
+            metadata={"url": final_url},
+        )
 
     for doi, article_id in abstract_ids.items():
-        abstract = _fetch_aip_abstract(article_id, url)
+        abstract = _fetch_aip_abstract(article_id, final_url)
         if abstract:
             entries[doi].abstract = abstract
 
     _cache[cache_key] = entries
     logger.info("AIP %s v%s i%s: %d articles scraped",
                 journal_slug, volume, issue, len(entries))
-    return entries
+    return AdapterResult(
+        entries=entries,
+        outcome=SUCCESS,
+        provider="aip",
+        source="journal",
+        metadata={"url": final_url},
+    )
+
+
+def query_aip_issue(journal_slug: str, volume: str, issue: str,
+                    journal_name: str = "") -> dict[str, JournalEntry]:
+    return query_aip_issue_result(journal_slug, volume, issue, journal_name).entries
