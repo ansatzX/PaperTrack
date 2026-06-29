@@ -7,6 +7,7 @@ import time
 from curl_cffi import requests
 from bs4 import BeautifulSoup
 
+from .diagnostics import record_fetch_attempt
 from .journal_entry import JournalEntry
 
 logger = logging.getLogger(__name__)
@@ -153,10 +154,43 @@ def query_acs_issue(journal_code: str, volume: str, issue: str,
             resp = requests.get(url, impersonate="chrome124", timeout=30)
             if "Just a moment" in resp.text:
                 logger.warning("Cloudflare block on attempt %d/3", attempt + 1)
+                record_fetch_attempt(
+                    {
+                        "source_role": "authoritative",
+                        "source": "journal",
+                        "provider": "acs",
+                        "journal": journal_code,
+                        "volume": volume,
+                        "issue": issue,
+                        "url": url,
+                        "stage": "issue_page_fetch",
+                        "outcome": "blocked",
+                        "http_status": getattr(resp, "status_code", None),
+                        "block_markers": ["Just a moment"],
+                    },
+                    html=resp.text,
+                )
                 if attempt < 2:
                     time.sleep((1, 2, 4)[attempt])
                 continue
             entries = _parse_acs_toc(resp.text, journal_name)
+            if not entries:
+                record_fetch_attempt(
+                    {
+                        "source_role": "authoritative",
+                        "source": "journal",
+                        "provider": "acs",
+                        "journal": journal_code,
+                        "volume": volume,
+                        "issue": issue,
+                        "url": url,
+                        "stage": "issue_page_parse",
+                        "outcome": "official_empty_suspicious",
+                        "article_count": 0,
+                    },
+                    html=resp.text,
+                )
+                return {}
             _cache[cache_key] = entries
             logger.info("ACS %s v%s i%s: %d articles scraped",
                         journal_code, volume, issue, len(entries))
@@ -164,6 +198,19 @@ def query_acs_issue(journal_code: str, volume: str, issue: str,
         except Exception as e:
             last_exc = e
             logger.warning("ACS fetch attempt %d/3 failed: %s", attempt + 1, e)
+            if attempt == 2:
+                record_fetch_attempt({
+                    "source_role": "authoritative",
+                    "source": "journal",
+                    "provider": "acs",
+                    "journal": journal_code,
+                    "volume": volume,
+                    "issue": issue,
+                    "url": url,
+                    "stage": "issue_page_fetch",
+                    "outcome": "fetch_failed",
+                    "exception": repr(e),
+                })
             if attempt < 2:
                 time.sleep((1, 2, 4)[attempt])
 

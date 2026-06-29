@@ -11,6 +11,7 @@ from .calendar_plan import (
     rolling_refresh_days,
 )
 from .codex import journal_configs, query_args
+from .diagnostics import configure_diagnostics
 from .report import filter_arxiv_days_to_md, filter_journal_auto, filter_journal_to_md
 from .zotero_query import ZoteroQuery
 
@@ -33,6 +34,12 @@ def _journal_output_root(base_dir: str, cfg: dict[str, str]) -> str:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="papertrack")
     parser.add_argument("--debug", action="store_true", help="enable debug logging")
+    parser.add_argument("--diagnostics-dir", default="",
+                        help="directory for diagnostics JSONL and snapshots")
+    parser.add_argument("--diagnostics-all-attempts", action="store_true",
+                        help="record successful fetch attempts as well as abnormal ones")
+    parser.add_argument("--no-failure-snapshots", action="store_true",
+                        help="disable full HTML snapshots for abnormal fetch attempts")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     arxiv = subparsers.add_parser("arxiv", help="arXiv reading ledger commands")
@@ -148,6 +155,11 @@ def main() -> None:
     args = parser.parse_args()
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
+    configure_diagnostics(
+        diagnostics_dir=args.diagnostics_dir or None,
+        all_attempts=args.diagnostics_all_attempts,
+        failure_snapshots=not args.no_failure_snapshots,
+    )
     zotero = _build_zotero()
     args.handler(args, zotero)
 

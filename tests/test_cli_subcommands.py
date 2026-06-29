@@ -120,6 +120,46 @@ def test_arxiv_backfill_date_range_dispatches_exact_range(monkeypatch, tmp_path)
     ]
 
 
+def test_global_diagnostics_options_configure_diagnostics(monkeypatch, tmp_path):
+    from papertrack import cli
+
+    captured = {}
+    diagnostics_dir = tmp_path / "diag"
+
+    monkeypatch.setattr(cli, "ZoteroQuery", lambda: None)
+    monkeypatch.setattr(cli, "query_args", {"quant-ph": {"size": "200"}})
+    monkeypatch.setattr(cli, "filter_arxiv_days_to_md", lambda **kwargs: None)
+    monkeypatch.setattr(cli, "configure_diagnostics", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "papertrack",
+            "--diagnostics-dir",
+            str(diagnostics_dir),
+            "--diagnostics-all-attempts",
+            "--no-failure-snapshots",
+            "arxiv",
+            "refresh",
+            "--category",
+            "quant-ph",
+            "--anchor-date",
+            "2026-06-09",
+            "--refresh-days",
+            "0",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    cli.main()
+
+    assert captured == {
+        "diagnostics_dir": str(diagnostics_dir),
+        "all_attempts": True,
+        "failure_snapshots": False,
+    }
+
+
 def test_arxiv_backfill_rejects_missing_range(monkeypatch, tmp_path):
     from papertrack import cli
 

@@ -8,6 +8,7 @@ import feedparser
 from bs4 import BeautifulSoup
 
 from .arxiv_entry import ArxivEntry
+from .diagnostics import record_fetch_attempt
 
 logger = logging.getLogger(__name__)
 
@@ -124,11 +125,29 @@ def query_arxiv_dict(date_from_date: str = "2025-02-01",
                 time.sleep(delay)
     else:
         logger.error("arXiv fetch failed after %d attempts: %s", MAX_RETRIES, last_exc)
+        record_fetch_attempt({
+            "source_role": "authoritative",
+            "source": "arxiv",
+            "provider": "arxiv",
+            "url": url,
+            "stage": "advanced_search_fetch",
+            "outcome": "fetch_failed",
+            "exception": repr(last_exc),
+        })
         return {}
 
     result: dict[str, ArxivEntry] = {}
 
     if "feed" not in results or "summary" not in results["feed"]:
+        record_fetch_attempt({
+            "source_role": "authoritative",
+            "source": "arxiv",
+            "provider": "arxiv",
+            "url": url,
+            "stage": "advanced_search_parse",
+            "outcome": "parse_failed",
+            "message": "feedparser result missing feed summary",
+        })
         return result
 
     summary_text = results["feed"]["summary"]

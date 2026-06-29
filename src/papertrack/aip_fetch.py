@@ -8,6 +8,7 @@ import time
 from bs4 import BeautifulSoup
 from curl_cffi import requests
 
+from .diagnostics import record_fetch_attempt
 from .journal_entry import JournalEntry
 
 logger = logging.getLogger(__name__)
@@ -204,16 +205,53 @@ def query_aip_issue(journal_slug: str, volume: str, issue: str,
         return _cache[cache_key]
 
     html = ""
+    final_url = ""
     for template in AIP_ISSUE_URLS:
         url = template.format(journal_slug=journal_slug, volume=volume, issue=issue)
+        final_url = url
         html = _fetch_html(url, ".al-article-items")
         if html:
             break
 
     if not html:
+        record_fetch_attempt({
+            "source_role": "authoritative",
+            "source": "journal",
+            "provider": "aip",
+            "journal": journal_slug,
+            "volume": volume,
+            "issue": issue,
+            "url": final_url,
+            "stage": "issue_page_fetch",
+            "outcome": "fetch_failed",
+            "message": "AIP issue page could not be fetched with required selector",
+        })
         return {}
 
     entries, abstract_ids = _parse_aip_toc(html, journal_name)
+    if not entries:
+        record_fetch_attempt(
+            {
+                "source_role": "authoritative",
+                "source": "journal",
+                "provider": "aip",
+                "journal": journal_slug,
+                "volume": volume,
+                "issue": issue,
+                "url": final_url,
+                "stage": "issue_page_parse",
+                "outcome": "official_empty_suspicious",
+                "article_count": 0,
+                "selector_counts": {
+                    ".al-article-items": 0,
+                    ".citation-label": 0,
+                    ".js-show-abstract": 0,
+                },
+            },
+            html=html,
+        )
+        return {}
+
     for doi, article_id in abstract_ids.items():
         abstract = _fetch_aip_abstract(article_id, url)
         if abstract:

@@ -330,6 +330,8 @@ def test_aip_provider_uses_crossref_only_to_fill_missing_official_abstracts(monk
         ]
 
     monkeypatch.setattr(journal_fetch, "_fetch_year", fake_crossref_year)
+    events = []
+    monkeypatch.setattr(journal_fetch, "record_fetch_attempt", lambda event, html=None: events.append(event))
 
     entries = journal_fetch.query_journal_issue_full(
         "0021-9606",
@@ -345,6 +347,20 @@ def test_aip_provider_uses_crossref_only_to_fill_missing_official_abstracts(monk
     assert entries["10.1063/with-abstract"].abstract == "Official abstract"
     assert entries["10.1063/missing-abstract"].title == "Official article missing abstract"
     assert entries["10.1063/missing-abstract"].abstract == "CrossRef fallback abstract."
+    assert events == [
+        {
+            "source_role": "third_party_metadata",
+            "source": "journal",
+            "provider": "crossref",
+            "journal": "jcp",
+            "volume": "163",
+            "issue": "24",
+            "stage": "abstract_fill",
+            "outcome": "success",
+            "fallback_used": ["crossref_abstract_fill"],
+            "filled_abstracts": 1,
+        }
+    ]
 
 
 def test_aip_crossref_abstract_fallback_infers_year_from_official_metadata(monkeypatch):
@@ -511,6 +527,27 @@ def test_query_aip_issue_does_not_cache_empty_fetch_failures(monkeypatch):
         "https://pubs.aip.org/aip/jcp/issue/164/16",
         "https://pubs.aip.org/jcp/issue/164/16",
     ]
+
+
+def test_query_aip_issue_records_official_empty_suspicious(monkeypatch, tmp_path):
+    from papertrack import aip_fetch
+    from papertrack.diagnostics import configure_diagnostics
+
+    aip_fetch._cache.clear()
+    configure_diagnostics(diagnostics_dir=str(tmp_path))
+    html = "<html><body><main>No article items today</main></body></html>"
+
+    monkeypatch.setattr(aip_fetch, "_fetch_html", lambda *args, **kwargs: html)
+
+    entries = aip_fetch.query_aip_issue("jcp", "164", "16", "Journal of Chemical Physics")
+
+    assert entries == {}
+    attempts = (tmp_path / "attempts.jsonl").read_text(encoding="utf-8")
+    assert '"outcome": "official_empty_suspicious"' in attempts
+    assert '"provider": "aip"' in attempts
+    snapshot_files = list((tmp_path / "snapshots" / "aip").glob("*.html"))
+    assert len(snapshot_files) == 1
+    assert snapshot_files[0].read_text(encoding="utf-8") == html
 
 
 def test_fetch_aip_abstract_uses_official_ajax_endpoint(monkeypatch):
