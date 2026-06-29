@@ -361,3 +361,57 @@ class TestZoteroQuery:
 
         e = ArxivEntry(arxiv_id="arXiv:2502.07673", title="T", authors=[], abstract="")
         assert zq.find_by_entry(e) is False
+
+
+from datetime import date
+
+
+def test_filter_arxiv_days_to_md_processes_exact_days(tmp_path, monkeypatch):
+    from papertrack import report
+    from papertrack.arxiv_entry import ArxivEntry
+
+    calls = []
+
+    def fake_query(date_from_date, date_to_date, query_args):
+        calls.append((date_from_date, date_to_date))
+        return {
+            "arXiv:2606.00001": ArxivEntry(
+                arxiv_id="arXiv:2606.00001",
+                title=f"Paper for {date_from_date}",
+                authors=["A Author"],
+                abstract="Abstract text",
+            )
+        }
+
+    monkeypatch.setattr(report, "query_arxiv_dict", fake_query)
+
+    report.filter_arxiv_days_to_md(
+        days=[date(2026, 6, 8), date(2026, 6, 9)],
+        md_folder=str(tmp_path / "arxiv" / "quant-ph"),
+        query_args={"size": "200"},
+        category="quant-ph",
+        zotero=None,
+    )
+
+    assert calls == [
+        ("2026-06-08", "2026-06-09"),
+        ("2026-06-09", "2026-06-10"),
+    ]
+    assert (tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "08.md").exists()
+    assert (tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "09.md").exists()
+
+
+def test_filter_arxiv_days_to_md_skips_empty_days(tmp_path, monkeypatch):
+    from papertrack import report
+
+    monkeypatch.setattr(report, "query_arxiv_dict", lambda *args, **kwargs: {})
+
+    report.filter_arxiv_days_to_md(
+        days=[date(2026, 6, 9)],
+        md_folder=str(tmp_path / "arxiv" / "quant-ph"),
+        query_args={"size": "200"},
+        category="quant-ph",
+        zotero=None,
+    )
+
+    assert not (tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "09.md").exists()

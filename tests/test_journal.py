@@ -19,24 +19,136 @@ def test_explicit_journal_cli_passes_year(monkeypatch, tmp_path):
 
     captured = {}
 
-    class Args:
-        journal = "jcp"
-        data_dir = str(tmp_path)
-        volume = "163"
-        issue = "24"
-        year = 2025
-        backfill = False
-        from_year = 0
-
+    monkeypatch.setattr(cli, "ZoteroQuery", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "journal_configs",
+        {
+            "jcp": {
+                "name": "Journal of Chemical Physics",
+                "issn": "0021-9606",
+                "slug": "jcp",
+                "provider": "aip",
+            }
+        },
+    )
     monkeypatch.setattr(
         cli,
         "filter_journal_to_md",
         lambda **kwargs: captured.update(kwargs),
     )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "papertrack",
+            "journal",
+            "issue",
+            "--journal",
+            "jcp",
+            "--volume",
+            "163",
+            "--issue",
+            "24",
+            "--year",
+            "2025",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
 
-    cli._run_journal(Args(), zotero=None)
+    cli.main()
 
+    assert captured["journal_name"] == "Journal of Chemical Physics"
+    assert captured["journal_slug"] == "jcp"
+    assert captured["volume"] == "163"
+    assert captured["issue"] == "24"
     assert captured["year"] == 2025
+    assert captured["provider"] == "aip"
+    assert captured["md_folder"] == str(tmp_path / "aip")
+
+
+def test_journal_latest_dispatches_auto_without_backfill(monkeypatch, tmp_path):
+    from papertrack import cli
+
+    captured = {}
+
+    monkeypatch.setattr(cli, "ZoteroQuery", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "journal_configs",
+        {
+            "jctc": {
+                "name": "Journal of Chemical Theory and Computation",
+                "issn": "1549-9618",
+                "slug": "jctc",
+                "acs_code": "jctcce",
+            }
+        },
+    )
+    monkeypatch.setattr(cli, "filter_journal_auto", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "papertrack",
+            "journal",
+            "latest",
+            "--journal",
+            "jctc",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    cli.main()
+
+    assert captured["journal_slug"] == "jctc"
+    assert captured["acs_code"] == "jctcce"
+    assert captured["md_folder"] == str(tmp_path / "acs")
+    assert captured["backfill"] is False
+    assert captured["from_year"] == 0
+
+
+def test_journal_backfill_dispatches_auto_with_from_year(monkeypatch, tmp_path):
+    from papertrack import cli
+
+    captured = {}
+
+    monkeypatch.setattr(cli, "ZoteroQuery", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "journal_configs",
+        {
+            "jcp": {
+                "name": "Journal of Chemical Physics",
+                "issn": "0021-9606",
+                "slug": "jcp",
+                "provider": "aip",
+            }
+        },
+    )
+    monkeypatch.setattr(cli, "filter_journal_auto", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "papertrack",
+            "journal",
+            "backfill",
+            "--journal",
+            "jcp",
+            "--from-year",
+            "2018",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    cli.main()
+
+    assert captured["journal_slug"] == "jcp"
+    assert captured["provider"] == "aip"
+    assert captured["md_folder"] == str(tmp_path / "aip")
+    assert captured["backfill"] is True
+    assert captured["from_year"] == 2018
 
 
 def test_parse_aip_toc_extracts_journal_entries():

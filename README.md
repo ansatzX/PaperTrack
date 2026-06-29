@@ -30,42 +30,37 @@ The project depends on `curl_cffi` for publisher pages, plus `pyzotero`,
 arXiv reports:
 
 ```bash
-python main.py \
+python main.py arxiv refresh \
   --category chem-ph,quant-ph \
-  --time 2026.04,2026.03 \
-  --data_dir /home/ansatz/data/obsidian/1/papertrack_datas
+  --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
 ```
 
 Latest journal issue:
 
 ```bash
-python main.py \
-  --source journal \
+python main.py journal latest \
   --journal jcp \
-  --data_dir /home/ansatz/data/obsidian/1/papertrack_datas
+  --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
 ```
 
 Backfill journal issues:
 
 ```bash
-python main.py \
-  --source journal \
+python main.py journal backfill \
   --journal jcp \
-  --backfill \
-  --from_year 2018 \
-  --data_dir /home/ansatz/data/obsidian/1/papertrack_datas
+  --from-year 2018 \
+  --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
 ```
 
 Explicit issue:
 
 ```bash
-python main.py \
-  --source journal \
+python main.py journal issue \
   --journal jcp \
   --volume 164 \
   --issue 16 \
   --year 2026 \
-  --data_dir /home/ansatz/data/obsidian/1/papertrack_datas
+  --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
 ```
 
 `run.sh` uses the local conda environment:
@@ -76,7 +71,7 @@ python main.py \
 
 ## Output Layout
 
-`--data_dir` is the root. PaperTrack separates sources under that root:
+`--data-dir` is the root. PaperTrack separates sources under that root:
 
 ```text
 papertrack_datas/
@@ -140,28 +135,50 @@ add articles to an AIP issue or replace AIP metadata.
 
 ## CLI Reference
 
-| Flag | Default | Description |
-| --- | --- | --- |
-| `--source` | `arxiv` | `arxiv` or `journal` |
-| `--data_dir` | `/home/ansatz/data/obsidian/1/papertrack_datas/` | Output root |
-| `--debug` | false | Enable debug logging |
-| `--time` | `1949.10` | arXiv month list, `YYYY.MM`; sentinel means current month |
-| `--category` | `quant-ph` | Comma-separated arXiv categories |
-| `--output_format` | `category/year/month/day` | arXiv directory layout |
-| `--journal` | empty | Journal key from `categories.toml`, e.g. `jctc` or `jcp` |
-| `--volume` | empty | Explicit journal volume |
-| `--issue` | empty | Explicit journal issue |
-| `--year` | `0` | Publication year for explicit journal issue mode |
-| `--backfill` | false | Process all discovered journal issues |
-| `--from_year` | `0` | Start year for backfill/discovery |
+### arXiv refresh
+
+```bash
+python main.py arxiv refresh --category quant-ph --refresh-days 30
+```
+
+Refreshes every day from local today minus `--refresh-days` through local today.
+Use `--anchor-date YYYY-MM-DD` for reproducible reruns.
+
+### arXiv backfill
+
+```bash
+python main.py arxiv backfill --category quant-ph --month 2026-04
+python main.py arxiv backfill --category quant-ph --from-date 2026-04-01 --to-date 2026-04-30
+```
+
+Backfill is explicit historical processing. It replaces the old `--time`
+sentinel behavior.
+
+### journal latest
+
+```bash
+python main.py journal latest --journal jcp
+```
+
+### journal backfill
+
+```bash
+python main.py journal backfill --journal jcp --from-year 2018
+```
+
+### journal issue
+
+```bash
+python main.py journal issue --journal jcp --volume 164 --issue 16 --year 2026
+```
 
 ## State And Rebuilds
 
-Journal auto mode stores processed `(volume, issue)` pairs in
+`journal latest` and `journal backfill` store processed `(volume, issue)` pairs in
 `.papertrack_state.json` in the current working directory.
 
-On every journal auto run, PaperTrack checks previously processed issue files by
-relative path:
+On every `journal latest` or `journal backfill` run, PaperTrack checks
+previously processed issue files by relative path:
 
 ```text
 {journal_slug}/{volume}/{issue}.md
@@ -178,10 +195,11 @@ as corruption. The required skeleton is:
 - `## not collected`
 - at least one `### ...` paper entry
 
-arXiv reports are queried one calendar day at a time. Re-running a month
-re-fetches each day and rewrites the day file; if an old file is missing or its
-generated skeleton is broken, that day is rebuilt without trying to preserve old
-IDs.
+arXiv production refresh uses a rolling calendar window. By default it queries
+every day from local today minus 30 days through local today. This keeps recent
+day buckets converged as arXiv category assignments, external DOIs, and journal
+references settle. Historical processing uses explicit `arxiv backfill` months
+or date ranges.
 
 ## Zotero Matching
 

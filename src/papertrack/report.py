@@ -2,7 +2,7 @@ import os
 import re
 import calendar
 import logging
-from datetime import datetime, timedelta
+from datetime import date, timedelta
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -140,6 +140,63 @@ def _has_report_skeleton(content: str) -> bool:
     return "## collected" in content and "## not collected" in content and "### " in content
 
 
+def _filter_one_arxiv_day_to_md(day_date: date, md_folder: str,
+                                query_args: dict | None,
+                                category: str,
+                                zotero: ZoteroQuery | None,
+                                output_format: str = "category/year/month/day"):
+    date_string = day_date.strftime("%Y-%m-%d")
+    next_date = day_date + timedelta(days=1)
+    date_to_date = next_date.strftime("%Y-%m-%d")
+
+    arxiv_dict = query_arxiv_dict(date_string, date_to_date, query_args)
+    if not arxiv_dict:
+        return
+
+    logger.info("processing %s, papers: %d", date_string, len(arxiv_dict))
+
+    year_str = f"{day_date.year:04d}"
+    month_str = f"{day_date.month:02d}"
+    day_str = f"{day_date.day:02d}"
+    if output_format == "category/year/month/day":
+        file_dir = os.path.join(md_folder, year_str, month_str)
+    elif output_format == "year/month/day/category":
+        file_dir = os.path.join(md_folder, year_str, month_str, day_str, category)
+    elif output_format == "year/month/category/day":
+        file_dir = os.path.join(md_folder, year_str, month_str, category, day_str)
+    else:
+        file_dir = os.path.join(md_folder, year_str, month_str)
+
+    os.makedirs(file_dir, exist_ok=True)
+    oneday_report_file = os.path.join(file_dir, f"{day_str}.md")
+
+    parse_old = parse_old_report(oneday_report_file)
+    markdown_str = _gen_oneday_markdown(
+        date_string,
+        category,
+        arxiv_dict,
+        zotero,
+        parse_old,
+    )
+
+    with open(oneday_report_file, "w", encoding="utf-8") as f:
+        f.write(markdown_str)
+
+
+def filter_arxiv_days_to_md(days: list[date], md_folder: str,
+                            query_args: dict | None = None,
+                            category: str = "quant-ph",
+                            zotero: ZoteroQuery | None = None):
+    """Fetch exact arXiv day buckets and write Markdown reports.
+
+    This is the production path for rolling refresh. The caller owns calendar
+    planning; this function owns per-day fetch, old-report parsing, rendering,
+    and writing.
+    """
+    for day_date in days:
+        _filter_one_arxiv_day_to_md(day_date, md_folder, query_args, category, zotero)
+
+
 def filter_arxiv_to_md(year: int, month: int, md_folder: str,
                        query_args: dict | None = None,
                        category: str = "quant-ph",
@@ -154,42 +211,17 @@ def filter_arxiv_to_md(year: int, month: int, md_folder: str,
     against the previously written report detects these changes.
     """
     _, num_days = calendar.monthrange(year, month)
-    year_str = str(year)
-    month_str = f"{month:02}"
 
     for day in range(1, num_days + 1):
-        date_string = f"{year_str}-{month_str}-{day:02}"
-        try:
-            datetime(year, month, day)
-        except ValueError:
-            continue
-        next_date = datetime(year, month, day) + timedelta(days=1)
-        date_to_date = next_date.strftime("%Y-%m-%d")
-        arxiv_dict = query_arxiv_dict(date_string, date_to_date, query_args)
-
-        if not arxiv_dict:
-            continue
-
-        logger.info("processing %s, papers: %d", date_string, len(arxiv_dict))
-
-        day_str = f"{day:02}"
-        if output_format == "category/year/month/day":
-            file_dir = os.path.join(md_folder, year_str, month_str)
-        elif output_format == "year/month/day/category":
-            file_dir = os.path.join(md_folder, year_str, month_str, day_str, category)
-        elif output_format == "year/month/category/day":
-            file_dir = os.path.join(md_folder, year_str, month_str, category, day_str)
-        else:
-            file_dir = os.path.join(md_folder, year_str, month_str)
-
-        os.makedirs(file_dir, exist_ok=True)
-        oneday_report_file = os.path.join(file_dir, f"{day_str}.md")
-
-        parse_old = parse_old_report(oneday_report_file)
-        markdown_str = _gen_oneday_markdown(date_string, category, arxiv_dict, zotero, parse_old)
-
-        with open(oneday_report_file, "w", encoding="utf-8") as f:
-            f.write(markdown_str)
+        day_date = date(year, month, day)
+        _filter_one_arxiv_day_to_md(
+            day_date,
+            md_folder,
+            query_args,
+            category,
+            zotero,
+            output_format,
+        )
 
 
 def parse_md_to_arxiv_dict(md_file: str) -> dict[str, list]:
