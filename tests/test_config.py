@@ -7,9 +7,11 @@ def test_arxiv_config_includes_computer_science_categories():
     query_args = get_query_args()
 
     assert query_args["cs.AI"]["classification-computer_science"] == "y"
-    assert query_args["cs.AI"]["classification-computer_science_archives"] == "cs.AI"
+    assert query_args["cs.AI"]["terms-1-term"] == "cs.AI"
+    assert query_args["cs.AI"]["terms-1-field"] == "all"
     assert query_args["cs.LG"]["classification-computer_science"] == "y"
-    assert query_args["cs.LG"]["classification-computer_science_archives"] == "cs.LG"
+    assert query_args["cs.LG"]["terms-1-term"] == "cs.LG"
+    assert query_args["cs.LG"]["terms-1-field"] == "all"
     assert query_args["cs.AI"]["date-date_type"] == "submitted_date_first"
     assert query_args["cs.LG"]["date-date_type"] == "submitted_date_first"
 
