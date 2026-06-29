@@ -176,6 +176,52 @@ def migrate_report_file(path: str, data_dir: str = "") -> MigrationResult:
     )
 
 
+def classify_report_file(path: str, data_dir: str = "") -> MigrationResult:
+    """Classify one report without modifying it."""
+    report_path = Path(path)
+    if not report_path.exists():
+        source = _detect_source("", report_path, data_dir)
+        return MigrationResult(path=path, status="missing", source=source)
+
+    content = report_path.read_text(encoding="utf-8")
+    fmt = report_format(content)
+    source = _detect_source(content, report_path, data_dir)
+    if fmt in {CURRENT_ARXIV_FORMAT, CURRENT_JOURNAL_FORMAT}:
+        if validate_report_content(content, source=source):
+            return MigrationResult(
+                path=path,
+                status="current",
+                source=source,
+                from_format=fmt,
+                to_format=fmt,
+            )
+        return MigrationResult(
+            path=path,
+            status="corrupt",
+            source=source,
+            from_format=fmt,
+            to_format=fmt,
+            message="current report failed format validation",
+        )
+    if not source:
+        return MigrationResult(path=path, status="unsupported", message="not a PaperTrack report")
+    if _legacy_skeleton_ok(content, source):
+        return MigrationResult(
+            path=path,
+            status="migratable",
+            source=source,
+            from_format="legacy",
+            to_format=CURRENT_JOURNAL_FORMAT if source == "journal" else CURRENT_ARXIV_FORMAT,
+        )
+    return MigrationResult(
+        path=path,
+        status="corrupt",
+        source=source,
+        from_format="legacy",
+        message="missing generated report skeleton",
+    )
+
+
 def report_format(content: str) -> str:
     match = re.search(r"^papertrack_format:\s*([^\n]+)\s*$", content, re.MULTILINE)
     if not match:
@@ -194,6 +240,13 @@ def validate_report_content(content: str, source: str = "") -> bool:
     if source == "arxiv":
         return fmt == CURRENT_ARXIV_FORMAT and bool(re.search(r"^###\s*arXiv:\S+", content, re.MULTILINE))
     return fmt in {CURRENT_ARXIV_FORMAT, CURRENT_JOURNAL_FORMAT} and "### " in content
+
+
+def validate_report_file(path: str, source: str = "") -> bool:
+    report_path = Path(path)
+    if not report_path.exists():
+        return False
+    return validate_report_content(report_path.read_text(encoding="utf-8"), source=source)
 
 
 def _migrate_journal_legacy(content: str, path: Path, data_dir: str) -> str:

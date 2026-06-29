@@ -70,6 +70,13 @@ python main.py migrate \
   --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
 ```
 
+Collect damaged reports and decide whether to refetch authoritative sources:
+
+```bash
+python main.py repair \
+  --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
+```
+
 `run.sh` uses the local conda environment:
 
 ```bash
@@ -188,6 +195,18 @@ python main.py migrate --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
 Runs a local-only Markdown schema migration. It removes obsolete generated
 content such as old TOC image lines, adds PaperTrack format metadata, preserves
 supported Obsidian task edits, and writes through a `.bak` validation protocol.
+
+### repair
+
+```bash
+python main.py repair --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
+python main.py repair --data-dir /home/ansatz/data/obsidian/1/papertrack_datas --yes
+python main.py repair --data-dir /home/ansatz/data/obsidian/1/papertrack_datas --no-fetch
+```
+
+Collects corrupt or missing generated reports first, then asks before fetching
+authoritative sources. Outcomes are recorded as `fixed`, `unresolved`, or
+`deferred` in the diagnostics repair ledger.
 
 ## State And Rebuilds
 

@@ -13,6 +13,7 @@ from .calendar_plan import (
 from .codex import journal_configs, query_args
 from .diagnostics import configure_diagnostics
 from .migration import migrate_reports
+from .repair import collect_repair_candidates, repair_reports
 from .report import filter_arxiv_days_to_md, filter_journal_auto, filter_journal_to_md
 from .zotero_query import ZoteroQuery
 
@@ -126,6 +127,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     migrate.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="base folder for output")
     migrate.set_defaults(handler=_run_migrate)
+
+    repair = subparsers.add_parser(
+        "repair",
+        help="collect damaged reports and optionally refetch authoritative sources",
+    )
+    repair.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="base folder for output")
+    repair.add_argument("--yes", action="store_true", help="fetch without prompting")
+    repair.add_argument("--no-fetch", action="store_true", help="record repair candidates as deferred")
+    repair.set_defaults(handler=_run_repair)
 
     return parser
 
@@ -285,3 +295,25 @@ def _run_migrate(args, zotero: ZoteroQuery | None) -> None:
     failed = counts.get("failed", 0)
     if failed:
         raise RuntimeError(f"migration failed for {failed} report(s)")
+
+
+def _run_repair(args, zotero: ZoteroQuery | None) -> None:
+    candidates = collect_repair_candidates(args.data_dir)
+    if not candidates:
+        logger.info("No repair candidates found under %s", args.data_dir)
+        return
+    logger.warning("Found %d repair candidate(s) under %s", len(candidates), args.data_dir)
+    results = repair_reports(
+        args.data_dir,
+        candidates,
+        zotero=zotero,
+        assume_yes=args.yes,
+        no_fetch=args.no_fetch,
+    )
+    counts: dict[str, int] = {}
+    for result in results:
+        counts[result.outcome] = counts.get(result.outcome, 0) + 1
+    logger.info("Repair summary for %s: %s", args.data_dir, counts)
+    unresolved = counts.get("unresolved", 0)
+    if unresolved:
+        raise RuntimeError(f"repair unresolved for {unresolved} report(s)")
