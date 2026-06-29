@@ -306,6 +306,55 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
                 "message": "AIP scraper failed; using CrossRef fallback",
             })
 
+    if provider == "aps" and journal_slug:
+        try:
+            from .aps_fetch import query_aps_issue_result
+            official = query_aps_issue_result(journal_slug, volume, issue, journal_name)
+            if official.entries:
+                return official
+            logger.info("APS scraping returned %s, falling back to CrossRef", official.outcome)
+            record_fetch_attempt({
+                "source_role": "fallback",
+                "source": "journal",
+                "provider": "crossref",
+                "journal": journal_slug,
+                "volume": volume,
+                "issue": issue,
+                "stage": "issue_membership_fallback",
+                "outcome": "success",
+                "fallback_used": ["crossref_issue_membership"],
+                "official_outcome": official.outcome,
+                "message": "APS official source did not produce entries; using CrossRef fallback",
+            })
+        except ImportError:
+            logger.warning("APS scraper unavailable, falling back to CrossRef")
+            record_fetch_attempt({
+                "source_role": "fallback",
+                "source": "journal",
+                "provider": "crossref",
+                "journal": journal_slug or journal_name or issn,
+                "volume": volume,
+                "issue": issue,
+                "stage": "issue_membership_fallback",
+                "outcome": "success",
+                "fallback_used": ["crossref_issue_membership"],
+                "message": "APS scraper unavailable; using CrossRef fallback",
+            })
+        except Exception:
+            logger.exception("APS scraping failed, falling back to CrossRef")
+            record_fetch_attempt({
+                "source_role": "fallback",
+                "source": "journal",
+                "provider": "crossref",
+                "journal": journal_slug or journal_name or issn,
+                "volume": volume,
+                "issue": issue,
+                "stage": "issue_membership_fallback",
+                "outcome": "success",
+                "fallback_used": ["crossref_issue_membership"],
+                "message": "APS scraper failed; using CrossRef fallback",
+            })
+
     return query_journal_issue_result(issn, volume, issue, journal_name, year)
 
 
@@ -336,5 +385,10 @@ def clear_cache():
     try:
         from .aip_fetch import _cache as _aip_cache
         _aip_cache.clear()
+    except ImportError:
+        pass
+    try:
+        from .aps_fetch import _cache as _aps_cache
+        _aps_cache.clear()
     except ImportError:
         pass

@@ -207,6 +207,37 @@ def test_prl_journal_dispatches_as_aps_provider(monkeypatch, tmp_path):
     assert captured["md_folder"] == str(tmp_path / "aps")
 
 
+def test_filter_journal_auto_uses_aps_issue_discovery(monkeypatch, tmp_path):
+    from papertrack import aps_loi, report
+
+    state = {}
+    captured = []
+
+    monkeypatch.setattr(report, "_load_state", lambda md_folder: state)
+    monkeypatch.setattr(report, "_save_state", lambda md_folder, new_state: state.update(new_state))
+    monkeypatch.setattr(aps_loi, "discover_issues_aps", lambda journal_slug, from_year=0: [(2026, 136, 1)])
+    monkeypatch.setattr(
+        report,
+        "filter_journal_to_md",
+        lambda **kwargs: captured.append(kwargs) or True,
+    )
+
+    report.filter_journal_auto(
+        journal_name="Physical Review Letters",
+        journal_slug="prl",
+        issn="0031-9007",
+        acs_code="",
+        md_folder=str(tmp_path),
+        provider="aps",
+    )
+
+    assert captured[0]["journal_slug"] == "prl"
+    assert captured[0]["volume"] == "136"
+    assert captured[0]["issue"] == "1"
+    assert captured[0]["provider"] == "aps"
+    assert state == {"prl": {"processed": [[136, 1]]}}
+
+
 def test_parse_aip_toc_extracts_journal_entries():
     from papertrack.aip_fetch import _parse_aip_toc
 
@@ -251,6 +282,48 @@ def test_parse_aip_toc_extracts_journal_entries():
     assert entry.date == "2026"
     assert entry.toc_image_url == "https://example.test/toc.jpg"
     assert abstract_ids["10.1063/5.0323573"] == "3387571"
+
+
+def test_parse_aps_issue_extracts_journal_entries():
+    from papertrack.aps_fetch import _parse_aps_issue
+
+    html = """
+    <div class="browse-result-card issue">
+      <div class="content align-start w-full">
+        <section class="headline">
+          <h3 class="title">
+            <a href="/prl/abstract/10.1103/yp9h-sr2m">
+              Smaller Grains Are Not Stronger: Microcrystalline Metals at Ultrahigh Strain Rates
+            </a>
+          </h3>
+        </section>
+        <section class="citation-container font-normal">
+          <p>Laura Wu, Yuan Yao, Luyan Li, Qi Tang, and Mostafa Hassani</p>
+          <p><span>Phys. Rev. Lett. <b>136</b>, 016104 (2026)</span>
+             <span>- Published  9 January, 2026</span></p>
+        </section>
+        <section class="summary-container">
+          <div class="image-frame">
+            <img class="keyimage" src="//cdn.journals.aps.org/example.png" />
+          </div>
+          <p></p>
+          <div><p>A textbook rule breaks down for high-speed deformations.</p></div>
+        </section>
+      </div>
+    </div>
+    """
+
+    entries = _parse_aps_issue(html, "prl", "Physical Review Letters", "136", "1")
+
+    entry = entries["10.1103/yp9h-sr2m"]
+    assert entry.title == "Smaller Grains Are Not Stronger: Microcrystalline Metals at Ultrahigh Strain Rates"
+    assert entry.authors == ["Laura Wu", "Yuan Yao", "Luyan Li", "Qi Tang", "Mostafa Hassani"]
+    assert entry.journal_name == "Physical Review Letters"
+    assert entry.volume == "136"
+    assert entry.issue == "1"
+    assert entry.pages == "016104"
+    assert entry.date == "2026-01-09"
+    assert entry.abstract == "A textbook rule breaks down for high-speed deformations."
 
 
 def test_crossref_fetch_year_uses_cursor_pagination(monkeypatch):
@@ -347,6 +420,46 @@ def test_aip_provider_uses_official_source_before_crossref(monkeypatch):
         2025,
         provider="aip",
         journal_slug="jcp",
+    )
+
+    assert entries == {official_entry.doi: official_entry}
+
+
+def test_aps_provider_uses_official_source_before_crossref(monkeypatch):
+    from papertrack import aps_fetch, journal_fetch
+    from papertrack.adapter_result import AdapterResult, SUCCESS
+
+    official_entry = JournalEntry(
+        doi="10.1103/yp9h-sr2m",
+        title="Official PRL article",
+        authors=[],
+        abstract="Official issue summary",
+    )
+
+    monkeypatch.setattr(
+        aps_fetch,
+        "query_aps_issue_result",
+        lambda *args, **kwargs: AdapterResult(
+            entries={official_entry.doi: official_entry},
+            outcome=SUCCESS,
+            provider="aps",
+            source="journal",
+        ),
+    )
+
+    def fake_crossref_issue(*args, **kwargs):
+        raise AssertionError("CrossRef should not be called when APS returns entries")
+
+    monkeypatch.setattr(journal_fetch, "query_journal_issue", fake_crossref_issue)
+
+    entries = journal_fetch.query_journal_issue_full(
+        "0031-9007",
+        "136",
+        "1",
+        "Physical Review Letters",
+        2026,
+        provider="aps",
+        journal_slug="prl",
     )
 
     assert entries == {official_entry.doi: official_entry}

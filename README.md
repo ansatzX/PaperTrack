@@ -7,6 +7,7 @@ The current journal workflow is source-conscious:
 
 - ACS journals such as JCTC use ACS issue pages as the primary source.
 - AIP journals such as JCP use AIP issue pages as the primary source.
+- APS journals such as PRL use APS issue pages as the primary source.
 - CrossRef is a fallback only. For JCP, it can fill missing abstracts by DOI, but
   it does not decide which articles belong to an issue.
 
@@ -94,8 +95,10 @@ papertrack_datas/
 │   └── quant-ph/2026/04/01.md
 ├── acs/
 │   └── jctc/22/8.md
-└── aip/
-    └── jcp/164/16.md
+├── aip/
+│   └── jcp/164/16.md
+└── aps/
+    └── prl/136/1.md
 ```
 
 Journal output is always:
@@ -146,6 +149,28 @@ For each issue, PaperTrack:
 
 PaperTrack does not visit each AIP article page. CrossRef is never allowed to
 add articles to an AIP issue or replace AIP metadata.
+
+### PRL / APS
+
+PRL is configured as an APS journal:
+
+```toml
+[journals.prl]
+name = "Physical Review Letters"
+issn = "0031-9007"
+slug = "prl"
+provider = "aps"
+```
+
+Auto-discovery uses APS list-of-issues pages such as
+`https://journals.aps.org/prl/issues` and volume pages such as
+`https://journals.aps.org/prl/issues/136#v136`. Article membership and issue
+metadata come from official issue pages such as
+`https://journals.aps.org/prl/issues/136/1`.
+
+Partial APS issues are skipped in `journal latest` and `journal backfill` so the
+ledger does not mark an unstable issue as processed. Use `journal issue` with an
+explicit volume and issue if you intentionally want to process a partial issue.
 
 ## CLI Reference
 
@@ -285,6 +310,16 @@ name = "Example AIP Journal"
 issn = "0000-0000"
 slug = "example"
 provider = "aip"
+```
+
+Add APS-style journals with `provider = "aps"`:
+
+```toml
+[journals.example_aps]
+name = "Example APS Journal"
+issn = "0000-0000"
+slug = "example"
+provider = "aps"
 ```
 
 ## Development

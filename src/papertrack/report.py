@@ -466,7 +466,8 @@ def filter_journal_auto(journal_name: str, journal_slug: str,
     """Auto-discover new issues for a journal and process them.
 
     For ACS journals (provider="acs"), scrapes the ACS LOI page.
-    For AIP/other journals (provider="aip"), discovers issues via CrossRef API.
+    For APS journals (provider="aps"), discovers issues via APS issue pages.
+    For AIP/other journals, discovers issues via CrossRef API.
 
     State is persisted in .papertrack_state.json in the current working directory.
     Repeated runs only pick up newly published issues.
@@ -531,6 +532,45 @@ def filter_journal_auto(journal_name: str, journal_slug: str,
                 md_folder=md_folder,
                 zotero=zotero,
                 acs_code=acs_code,
+                provider=provider,
+            )
+            if written:
+                processed.add(key)
+                new_count += 1
+            if not backfill:
+                break
+
+    elif provider == "aps":
+        from .aps_loi import discover_issues_aps
+
+        triples = discover_issues_aps(journal_slug, from_year=from_year if backfill else 0)
+        if not triples:
+            logger.warning("No issues discovered for %s via APS", journal_name)
+            return
+
+        if backfill:
+            triples.reverse()
+        else:
+            triples = triples[:1]
+
+        for yr, vol, iss in triples:
+            key = (int(vol), int(iss))
+            if key in rebuilt_keys:
+                continue
+            if key in processed and not _is_missing_or_corrupt_journal_report(
+                md_folder, journal_slug, str(vol), str(iss)
+            ):
+                continue
+            logger.info("New APS issue: %s Vol %d Iss %d (year %d)", journal_name, vol, iss, yr)
+            written = filter_journal_to_md(
+                journal_name=journal_name,
+                journal_slug=journal_slug,
+                volume=str(vol),
+                issue=str(iss),
+                issn=issn,
+                md_folder=md_folder,
+                zotero=zotero,
+                year=yr,
                 provider=provider,
             )
             if written:
