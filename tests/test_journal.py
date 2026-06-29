@@ -14,6 +14,23 @@ def test_acs_journal_outputs_under_acs_folder(tmp_path):
     assert _journal_output_root(str(tmp_path), cfg) == str(tmp_path / "acs")
 
 
+def test_aps_journal_outputs_under_aps_folder(tmp_path):
+    cfg = {"name": "Physical Review Letters", "slug": "prl", "provider": "aps"}
+
+    assert _journal_output_root(str(tmp_path), cfg) == str(tmp_path / "aps")
+
+
+def test_builtin_journal_configs_include_jcim_jacs_and_prl():
+    from papertrack.codex import get_journals
+
+    journals = get_journals()
+
+    assert journals["jcim"]["acs_code"] == "jcisd8"
+    assert journals["jacs"]["acs_code"] == "jacsat"
+    assert journals["prl"]["provider"] == "aps"
+    assert journals["prl"]["issn"] == "0031-9007"
+
+
 def test_explicit_journal_cli_passes_year(monkeypatch, tmp_path):
     from papertrack import cli
 
@@ -149,6 +166,45 @@ def test_journal_backfill_dispatches_auto_with_from_year(monkeypatch, tmp_path):
     assert captured["md_folder"] == str(tmp_path / "aip")
     assert captured["backfill"] is True
     assert captured["from_year"] == 2018
+
+
+def test_prl_journal_dispatches_as_aps_provider(monkeypatch, tmp_path):
+    from papertrack import cli
+
+    captured = {}
+
+    monkeypatch.setattr(cli, "ZoteroQuery", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "journal_configs",
+        {
+            "prl": {
+                "name": "Physical Review Letters",
+                "issn": "0031-9007",
+                "slug": "prl",
+                "provider": "aps",
+            }
+        },
+    )
+    monkeypatch.setattr(cli, "filter_journal_auto", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "papertrack",
+            "journal",
+            "latest",
+            "--journal",
+            "prl",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    cli.main()
+
+    assert captured["journal_slug"] == "prl"
+    assert captured["provider"] == "aps"
+    assert captured["md_folder"] == str(tmp_path / "aps")
 
 
 def test_parse_aip_toc_extracts_journal_entries():

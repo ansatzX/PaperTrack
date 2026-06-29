@@ -109,8 +109,26 @@ issn = "1549-9618"
 slug = "jctc"
 acs_code = "jctcce"
 
+[journals.jcim]
+name = "Journal of Chemical Information and Modeling"
+issn = "1549-9596"
+slug = "jcim"
+acs_code = "jcisd8"
+
+[journals.jacs]
+name = "Journal of the American Chemical Society"
+issn = "0002-7863"
+slug = "jacs"
+acs_code = "jacsat"
+
 [journals.jcp]
 name = "Journal of Chemical Physics"
 issn = "0021-9606"
 slug = "jcp"
 provider = "aip"
+
+[journals.prl]
+name = "Physical Review Letters"
+issn = "0031-9007"
+slug = "prl"
+provider = "aps"
