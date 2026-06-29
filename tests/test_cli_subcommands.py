@@ -238,3 +238,29 @@ def test_arxiv_backfill_rejects_incomplete_range(monkeypatch, tmp_path):
         match="requires both --from-date and --to-date",
     ):
         cli.main()
+
+
+def test_migrate_dispatches_data_dir(monkeypatch, tmp_path):
+    from papertrack import cli
+
+    captured = {}
+
+    monkeypatch.setattr(cli, "ZoteroQuery", lambda: None)
+    def fake_migrate_reports(data_dir):
+        captured["data_dir"] = data_dir
+        return []
+
+    monkeypatch.setattr(cli, "migrate_reports", fake_migrate_reports)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "papertrack",
+            "migrate",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    cli.main()
+
+    assert captured["data_dir"] == str(tmp_path)

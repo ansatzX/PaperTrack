@@ -3,11 +3,15 @@ from bs4 import BeautifulSoup
 
 from papertrack.arxiv_entry import ArxivEntry
 from papertrack.arxiv_index_fetch import _parse_arxiv_result
+from papertrack.journal_entry import JournalEntry
 from papertrack.report import (
     parse_old_report,
     _gen_oneday_markdown,
+    _render_journal_paper,
+    _render_journal_report,
     parse_journal_report,
     _is_missing_or_corrupt_journal_report,
+    filter_journal_to_md,
     filter_journal_auto,
 )
 from papertrack.zotero_query import ZoteroQuery
@@ -227,6 +231,113 @@ Title:  Test article
         )
 
         assert rebuilt == []
+
+
+class TestJournalRendering:
+    def test_journal_rendering_uses_schema_and_omits_toc_image(self):
+        entry = JournalEntry(
+            doi="10.1063/example",
+            title="Dense report article",
+            authors=["A Author"],
+            abstract="Abstract text",
+            toc_image_url="https://example.test/toc.jpg",
+        )
+
+        paper = _render_journal_paper(entry)
+        report = _render_journal_report(
+            "Journal of Chemical Physics",
+            "jcp",
+            "164",
+            "16",
+            "2026",
+            "aip",
+            [],
+            [paper],
+            [],
+        )
+
+        assert report.startswith("---\npapertrack_format: journal-v2")
+        assert "papertrack_provider: aip" in report
+        assert "https://example.test/toc.jpg" not in report
+
+    def test_filter_journal_to_md_preserves_existing_task_state(self, tmp_path, monkeypatch):
+        from papertrack import report
+
+        report_file = tmp_path / "jcp" / "164" / "16.md"
+        report_file.parent.mkdir(parents=True)
+        report_file.write_text(
+            """# Journal of Chemical Physics Vol. 164, Iss. 16 — 2026
+
+## collected
+
+## not collected
+
+### 10.1063/example
+
+Links:
+
+- [x] [10.1063/example](https://doi.org/10.1063/example) ✅ 2026-06-09
+
+Title:  Old title
+""",
+            encoding="utf-8",
+        )
+        entry = JournalEntry(
+            doi="10.1063/example",
+            title="Updated title",
+            authors=["A Author"],
+            abstract="Abstract text",
+            date="2026",
+        )
+        monkeypatch.setattr(
+            report,
+            "query_journal_issue_full",
+            lambda *args, **kwargs: {entry.doi: entry},
+        )
+
+        filter_journal_to_md(
+            journal_name="Journal of Chemical Physics",
+            journal_slug="jcp",
+            volume="164",
+            issue="16",
+            issn="0021-9606",
+            md_folder=str(tmp_path),
+            provider="aip",
+        )
+
+        rendered = report_file.read_text(encoding="utf-8")
+        assert "- [x] [10.1063/example](https://doi.org/10.1063/example) ✅ 2026-06-09" in rendered
+        assert "Updated title" in rendered
+        assert not report_file.with_suffix(".md.bak").exists()
+
+    def test_filter_journal_to_md_infers_acs_provider_for_schema(self, tmp_path, monkeypatch):
+        from papertrack import report
+
+        entry = JournalEntry(
+            doi="10.1021/example",
+            title="ACS article",
+            authors=["A Author"],
+            abstract="Abstract text",
+            date="2026",
+        )
+        monkeypatch.setattr(
+            report,
+            "query_journal_issue_full",
+            lambda *args, **kwargs: {entry.doi: entry},
+        )
+
+        filter_journal_to_md(
+            journal_name="Journal of Chemical Theory and Computation",
+            journal_slug="jctc",
+            volume="22",
+            issue="8",
+            issn="1549-9618",
+            md_folder=str(tmp_path),
+            acs_code="jctcce",
+        )
+
+        rendered = (tmp_path / "jctc" / "22" / "8.md").read_text(encoding="utf-8")
+        assert "papertrack_provider: acs" in rendered
 
 
 class TestGenOnedayMarkdown:

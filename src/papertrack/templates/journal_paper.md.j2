@@ -6,9 +6,6 @@ Links:
 
 Title:  {{ entry.title }}
 
-{% if entry.toc_image_url %}
-![|700]({{ entry.toc_image_url }})
-{% endif %}
 Authors:  {% for author in entry.authors %}{{ author }}{% if not loop.last %}, {% endif %}{% endfor %}
 
 {% if entry.abstract %}

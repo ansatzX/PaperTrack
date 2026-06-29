@@ -1,9 +1,15 @@
-# {{ journal_name }} Vol. {{ volume }}, Iss. {{ issue }} — {{ date }}
-
 ---
+papertrack_format: journal-v2
+papertrack_source: journal
+papertrack_provider: {{ provider }}
+papertrack_journal: {{ journal_slug }}
+papertrack_volume: "{{ volume }}"
+papertrack_issue: "{{ issue }}"
 tags:
   - #{{ journal_slug }}-v{{ volume }}-i{{ issue }}
 ---
+
+# {{ journal_name }} Vol. {{ volume }}, Iss. {{ issue }} — {{ date }}
 
 ```dataview
 TASK

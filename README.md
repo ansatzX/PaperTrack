@@ -63,6 +63,13 @@ python main.py journal issue \
   --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
 ```
 
+Migrate existing generated reports to the current Markdown schema:
+
+```bash
+python main.py migrate \
+  --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
+```
+
 `run.sh` uses the local conda environment:
 
 ```bash
@@ -124,7 +131,7 @@ For each issue, PaperTrack:
 1. Fetches the AIP issue page, for example
    `https://pubs.aip.org/aip/jcp/issue/164/16`.
 2. Extracts the official issue article list, DOI, title, authors, page, year,
-   TOC image, and `data-articleid`.
+   and `data-articleid`.
 3. Fetches abstracts from AIP's official issue-page AJAX endpoint:
    `https://pubs.aip.org/PlatformArticle/ArticleAbstractAjax`.
 4. If any AIP article still lacks an abstract, fills only that missing
@@ -171,6 +178,16 @@ python main.py journal backfill --journal jcp --from-year 2018
 ```bash
 python main.py journal issue --journal jcp --volume 164 --issue 16 --year 2026
 ```
+
+### migrate
+
+```bash
+python main.py migrate --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
+```
+
+Runs a local-only Markdown schema migration. It removes obsolete generated
+content such as old TOC image lines, adds PaperTrack format metadata, preserves
+supported Obsidian task edits, and writes through a `.bak` validation protocol.
 
 ## State And Rebuilds
 

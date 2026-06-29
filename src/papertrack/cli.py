@@ -12,6 +12,7 @@ from .calendar_plan import (
 )
 from .codex import journal_configs, query_args
 from .diagnostics import configure_diagnostics
+from .migration import migrate_reports
 from .report import filter_arxiv_days_to_md, filter_journal_auto, filter_journal_to_md
 from .zotero_query import ZoteroQuery
 
@@ -118,6 +119,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="publication year for this issue",
     )
     journal_issue.set_defaults(handler=_run_journal_issue)
+
+    migrate = subparsers.add_parser(
+        "migrate",
+        help="migrate existing generated Markdown reports to the current schema",
+    )
+    migrate.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="base folder for output")
+    migrate.set_defaults(handler=_run_migrate)
 
     return parser
 
@@ -265,3 +273,15 @@ def _run_journal_issue(args, zotero: ZoteroQuery | None) -> None:
         acs_code=cfg.get("acs_code", ""),
         provider=cfg.get("provider", ""),
     )
+
+
+def _run_migrate(args, zotero: ZoteroQuery | None) -> None:
+    del zotero
+    results = migrate_reports(args.data_dir)
+    counts: dict[str, int] = {}
+    for result in results:
+        counts[result.status] = counts.get(result.status, 0) + 1
+    logger.info("Migration summary for %s: %s", args.data_dir, counts)
+    failed = counts.get("failed", 0)
+    if failed:
+        raise RuntimeError(f"migration failed for {failed} report(s)")

@@ -10,6 +10,7 @@ from .arxiv_entry import ArxivEntry
 from .arxiv_index_fetch import query_arxiv_dict
 from .journal_entry import JournalEntry
 from .journal_fetch import query_journal_issue_full
+from .migration import preserve_task_state, write_report_file
 from .zotero_query import ZoteroQuery
 
 logger = logging.getLogger(__name__)
@@ -140,6 +141,13 @@ def _has_report_skeleton(content: str) -> bool:
     return "## collected" in content and "## not collected" in content and "### " in content
 
 
+def _read_existing_report(file_path: str) -> str | None:
+    if not os.path.exists(file_path):
+        return None
+    with open(file_path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
 def _filter_one_arxiv_day_to_md(day_date: date, md_folder: str,
                                 query_args: dict | None,
                                 category: str,
@@ -171,6 +179,7 @@ def _filter_one_arxiv_day_to_md(day_date: date, md_folder: str,
     oneday_report_file = os.path.join(file_dir, f"{day_str}.md")
 
     parse_old = parse_old_report(oneday_report_file)
+    old_content = _read_existing_report(oneday_report_file)
     markdown_str = _gen_oneday_markdown(
         date_string,
         category,
@@ -178,9 +187,9 @@ def _filter_one_arxiv_day_to_md(day_date: date, md_folder: str,
         zotero,
         parse_old,
     )
+    markdown_str = preserve_task_state(markdown_str, old_content)
 
-    with open(oneday_report_file, "w", encoding="utf-8") as f:
-        f.write(markdown_str)
+    write_report_file(oneday_report_file, markdown_str, source="arxiv")
 
 
 def filter_arxiv_days_to_md(days: list[date], md_folder: str,
@@ -276,6 +285,7 @@ def _render_journal_paper(entry: JournalEntry) -> str:
 
 def _render_journal_report(journal_name: str, journal_slug: str,
                            volume: str, issue: str, date: str,
+                           provider: str,
                            collected_papers: list[str],
                            not_collected_papers: list[str],
                            new_data: list[str]) -> str:
@@ -286,6 +296,7 @@ def _render_journal_report(journal_name: str, journal_slug: str,
         volume=volume,
         issue=issue,
         date=date,
+        provider=provider,
         collected_papers=collected_papers,
         not_collected_papers=not_collected_papers,
         new_data=new_data,
@@ -384,6 +395,7 @@ def filter_journal_to_md(journal_name: str, journal_slug: str,
     os.makedirs(file_dir, exist_ok=True)
 
     parse_old = parse_journal_report(report_file)
+    old_content = _read_existing_report(report_file)
     collected, not_collected = _classify_journal_papers(entries, zotero)
 
     new_data: list[str] = []
@@ -392,13 +404,14 @@ def filter_journal_to_md(journal_name: str, journal_slug: str,
             if doi not in parse_old:
                 new_data.append(doi)
 
+    render_provider = provider or ("acs" if acs_code else "")
     markdown_str = _render_journal_report(
         journal_name, journal_slug, volume, issue,
-        date_str, collected, not_collected, new_data,
+        date_str, render_provider, collected, not_collected, new_data,
     )
+    markdown_str = preserve_task_state(markdown_str, old_content)
 
-    with open(report_file, "w", encoding="utf-8") as f:
-        f.write(markdown_str)
+    write_report_file(report_file, markdown_str, source="journal")
 
 
 # ── State file helpers ──────────────────────────────────────────────────
