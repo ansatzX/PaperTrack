@@ -102,6 +102,17 @@ def migrate_report_file(path: str, data_dir: str = "") -> MigrationResult:
     source = _detect_source(old_content, report_path, data_dir)
 
     if current_format in {CURRENT_ARXIV_FORMAT, CURRENT_JOURNAL_FORMAT}:
+        if _has_markdown_images(old_content):
+            new_content = _remove_markdown_images(old_content)
+            return _write_migrated_content(
+                report_path=report_path,
+                old_content=old_content,
+                new_content=new_content,
+                source=source,
+                from_format=current_format,
+                to_format=current_format,
+                status="cleaned",
+            )
         return MigrationResult(
             path=path,
             status="current",
@@ -127,52 +138,14 @@ def migrate_report_file(path: str, data_dir: str = "") -> MigrationResult:
         new_content = _migrate_arxiv_legacy(old_content, report_path, data_dir)
         to_format = CURRENT_ARXIV_FORMAT
 
-    backup_path = _backup_path(report_path)
-    shutil.copy2(report_path, backup_path)
-    try:
-        report_path.write_text(new_content, encoding="utf-8")
-        written = report_path.read_text(encoding="utf-8")
-        if not validate_report_content(written, source=source):
-            raise ValueError("migrated report failed format validation")
-    except Exception as exc:
-        if backup_path.exists():
-            shutil.move(str(backup_path), str(report_path))
-        record_migration_event({
-            "path": str(report_path),
-            "source": source,
-            "from_format": "legacy",
-            "to_format": to_format,
-            "outcome": "failed",
-            "exception": repr(exc),
-        })
-        return MigrationResult(
-            path=path,
-            status="failed",
-            source=source,
-            from_format="legacy",
-            to_format=to_format,
-            backup_path=str(backup_path),
-            message=str(exc),
-        )
-
-    if backup_path.exists():
-        backup_path.unlink()
-
-    if record_all_attempts():
-        record_migration_event({
-            "path": str(report_path),
-            "source": source,
-            "from_format": "legacy",
-            "to_format": to_format,
-            "outcome": "migrated",
-        })
-
-    return MigrationResult(
-        path=path,
-        status="migrated",
+    return _write_migrated_content(
+        report_path=report_path,
+        old_content=old_content,
+        new_content=new_content,
         source=source,
         from_format="legacy",
         to_format=to_format,
+        status="migrated",
     )
 
 
@@ -252,7 +225,7 @@ def validate_report_file(path: str, source: str = "") -> bool:
 def _migrate_journal_legacy(content: str, path: Path, data_dir: str) -> str:
     metadata = _journal_metadata(content, path, data_dir)
     body = _remove_legacy_frontmatter(content)
-    body = _remove_toc_images(body)
+    body = _remove_markdown_images(body)
     frontmatter = [
         "---",
         f"papertrack_format: {CURRENT_JOURNAL_FORMAT}",
@@ -368,8 +341,70 @@ def _remove_legacy_frontmatter(content: str) -> str:
     return "\n".join(new_lines).rstrip() + "\n"
 
 
-def _remove_toc_images(content: str) -> str:
-    return re.sub(r"(?m)^\s*!\[\|?\d*\]\([^\n]+\)\s*\n?", "", content)
+def _has_markdown_images(content: str) -> bool:
+    return bool(re.search(r"(?m)^\s*!\[[^\]\n]*\]\([^\n]*\)\s*$", content))
+
+
+def _remove_markdown_images(content: str) -> str:
+    return re.sub(r"(?m)^\s*!\[[^\]\n]*\]\([^\n]*\)\s*\n?", "", content)
+
+
+def _write_migrated_content(
+    report_path: Path,
+    old_content: str,
+    new_content: str,
+    source: str,
+    from_format: str,
+    to_format: str,
+    status: str,
+) -> MigrationResult:
+    backup_path = _backup_path(report_path)
+    shutil.copy2(report_path, backup_path)
+    try:
+        report_path.write_text(new_content, encoding="utf-8")
+        written = report_path.read_text(encoding="utf-8")
+        if not validate_report_content(written, source=source):
+            raise ValueError("migrated report failed format validation")
+    except Exception as exc:
+        report_path.write_text(old_content, encoding="utf-8")
+        if backup_path.exists():
+            backup_path.unlink()
+        record_migration_event({
+            "path": str(report_path),
+            "source": source,
+            "from_format": from_format,
+            "to_format": to_format,
+            "outcome": "failed",
+            "exception": repr(exc),
+        })
+        return MigrationResult(
+            path=str(report_path),
+            status="failed",
+            source=source,
+            from_format=from_format,
+            to_format=to_format,
+            message=str(exc),
+        )
+
+    if backup_path.exists():
+        backup_path.unlink()
+
+    if record_all_attempts():
+        record_migration_event({
+            "path": str(report_path),
+            "source": source,
+            "from_format": from_format,
+            "to_format": to_format,
+            "outcome": status,
+        })
+
+    return MigrationResult(
+        path=str(report_path),
+        status=status,
+        source=source,
+        from_format=from_format,
+        to_format=to_format,
+    )
 
 
 def _detect_source(content: str, path: Path, data_dir: str) -> str:
