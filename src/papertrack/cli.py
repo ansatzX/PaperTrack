@@ -15,6 +15,7 @@ from .diagnostics import configure_diagnostics
 from .migration import migrate_reports
 from .repair import collect_repair_candidates, repair_reports
 from .report import filter_arxiv_days_to_md, filter_journal_auto, filter_journal_to_md
+from .source_policy import SourcePolicy
 from .zotero_query import ZoteroQuery
 
 logger = logging.getLogger(__name__)
@@ -178,6 +179,8 @@ def main() -> None:
         all_attempts=args.diagnostics_all_attempts,
         failure_snapshots=not args.no_failure_snapshots,
     )
+    if args.command in {"journal", "repair"}:
+        args.source_policy = SourcePolicy.from_environment()
     zotero = _build_zotero()
     args.handler(args, zotero)
 
@@ -251,6 +254,7 @@ def _run_journal_latest(args, zotero: ZoteroQuery | None) -> None:
         provider=cfg.get("provider", "acs"),
         backfill=False,
         from_year=0,
+        source_policy=args.source_policy,
     )
 
 
@@ -266,6 +270,7 @@ def _run_journal_backfill(args, zotero: ZoteroQuery | None) -> None:
         provider=cfg.get("provider", "acs"),
         backfill=True,
         from_year=args.from_year,
+        source_policy=args.source_policy,
     )
 
 
@@ -282,6 +287,7 @@ def _run_journal_issue(args, zotero: ZoteroQuery | None) -> None:
         year=args.year or None,
         acs_code=cfg.get("acs_code", ""),
         provider=cfg.get("provider", ""),
+        source_policy=args.source_policy,
     )
 
 

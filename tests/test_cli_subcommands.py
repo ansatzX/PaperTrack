@@ -2,6 +2,8 @@ from datetime import date
 
 import pytest
 
+from papertrack.source_policy import CrossrefMode
+
 
 def test_arxiv_refresh_dispatches_rolling_days(monkeypatch, tmp_path):
     from papertrack import cli
@@ -46,6 +48,85 @@ def test_arxiv_refresh_dispatches_rolling_days(monkeypatch, tmp_path):
     assert captured["category"] == "quant-ph"
     assert captured["query_args"] == {"size": "200"}
     assert isinstance(captured["zotero"], FakeZotero)
+
+
+def test_journal_issue_passes_official_only_source_policy(monkeypatch, tmp_path):
+    from papertrack import cli
+
+    captured = {}
+    monkeypatch.delenv("PAPERTRACK_CROSSREF_MODE", raising=False)
+    monkeypatch.setattr(cli, "ZoteroQuery", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "journal_configs",
+        {
+            "jcp": {
+                "name": "Journal of Chemical Physics",
+                "slug": "jcp",
+                "issn": "0021-9606",
+                "provider": "aip",
+            }
+        },
+    )
+    monkeypatch.setattr(
+        cli,
+        "filter_journal_to_md",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "papertrack",
+            "journal",
+            "issue",
+            "--journal",
+            "jcp",
+            "--volume",
+            "164",
+            "--issue",
+            "16",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    cli.main()
+
+    assert captured["source_policy"].crossref_mode is CrossrefMode.DISABLED
+
+
+def test_invalid_source_policy_stops_before_journal_handler(monkeypatch, tmp_path):
+    from papertrack import cli
+
+    calls = []
+    monkeypatch.setenv("PAPERTRACK_CROSSREF_MODE", "membership")
+    monkeypatch.setattr(cli, "ZoteroQuery", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "filter_journal_to_md",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "papertrack",
+            "journal",
+            "issue",
+            "--journal",
+            "jcp",
+            "--volume",
+            "164",
+            "--issue",
+            "16",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="PAPERTRACK_CROSSREF_MODE"):
+        cli.main()
+
+    assert calls == []
 
 
 def test_arxiv_backfill_month_dispatches_month_days(monkeypatch, tmp_path):
