@@ -1,14 +1,19 @@
-from papertrack.adapter_result import BLOCKED
-from papertrack.http_fetch import fetch_html_resilient, is_blocked_response
+from papertrack.adapter_result import BLOCKED, FETCH_FAILED
+from papertrack.http_fetch import (
+    HttpRequestPolicy,
+    fetch_html_resilient,
+    is_blocked_response,
+)
 
 
 class Response:
-    def __init__(self, text: str, status_code: int = 200):
+    def __init__(self, text: str, status_code: int = 200, headers=None):
         self.text = text
         self.status_code = status_code
+        self.headers = headers or {}
 
 
-def test_fetch_html_resilient_tries_next_http_client(monkeypatch):
+def test_fetch_html_resilient_retries_transient_status_with_next_strategy(monkeypatch):
     from papertrack import http_fetch
 
     calls = []
@@ -16,16 +21,15 @@ def test_fetch_html_resilient_tries_next_http_client(monkeypatch):
     def fake_fetch_once(client, variant, url, headers, timeout):
         calls.append((client, variant))
         if client == "curl_cffi":
-            return Response("<html><title>Just a moment...</title><div>cf-chl</div></html>")
+            return Response("temporarily unavailable", 503)
         return Response('<html><div class="issue-item clearfix">Article</div></html>')
 
     monkeypatch.setattr(http_fetch, "_fetch_once", fake_fetch_once)
 
     result = fetch_html_resilient(
         "https://example.test/issue",
-        clients=("curl_cffi", "requests"),
-        curl_impersonations=("chrome136",),
-        rounds=1,
+        strategies=(("curl_cffi", "chrome136"), ("requests", "default")),
+        request_policy=HttpRequestPolicy(min_interval=0, max_attempts=2, backoff=(0,)),
         required_selector=".issue-item",
     )
 
@@ -34,24 +38,126 @@ def test_fetch_html_resilient_tries_next_http_client(monkeypatch):
     assert calls == [("curl_cffi", "chrome136"), ("requests", "default")]
 
 
-def test_fetch_html_resilient_reports_blocked_after_all_http_clients(monkeypatch):
+def test_fetch_html_resilient_stops_immediately_on_challenge(monkeypatch):
     from papertrack import http_fetch
+
+    calls = []
+
+    def fake_fetch(*args, **kwargs):
+        calls.append(args[:2])
+        return Response("<html>Attention Required! cf-chl</html>", 403)
 
     monkeypatch.setattr(
         http_fetch,
         "_fetch_once",
-        lambda *args, **kwargs: Response("<html>Attention Required! cf-chl</html>", 403),
+        fake_fetch,
     )
 
     result = fetch_html_resilient(
         "https://example.test/issue",
-        clients=("curl_cffi",),
-        curl_impersonations=("chrome136",),
-        rounds=1,
+        strategies=(("curl_cffi", "chrome136"), ("requests", "default")),
+        request_policy=HttpRequestPolicy(min_interval=0, max_attempts=2),
     )
 
     assert result.outcome == BLOCKED
     assert not result.ok
+    assert calls == [("curl_cffi", "chrome136")]
+
+
+def test_fetch_html_resilient_never_exceeds_max_attempts(monkeypatch):
+    from papertrack import http_fetch
+
+    calls = []
+
+    def fake_fetch(*args, **kwargs):
+        calls.append(args[:2])
+        return Response("temporarily unavailable", 503)
+
+    monkeypatch.setattr(http_fetch, "_fetch_once", fake_fetch)
+    result = fetch_html_resilient(
+        "https://example.test/issue",
+        strategies=(
+            ("curl_cffi", "chrome136"),
+            ("requests", "default"),
+            ("curl_cffi", "firefox"),
+        ),
+        request_policy=HttpRequestPolicy(
+            min_interval=0,
+            max_attempts=2,
+            backoff=(0,),
+        ),
+    )
+
+    assert result.outcome == FETCH_FAILED
+    assert calls == [
+        ("curl_cffi", "chrome136"),
+        ("requests", "default"),
+    ]
+
+
+def test_retry_after_overrides_policy_backoff(monkeypatch):
+    from papertrack import http_fetch
+
+    sleeps = []
+    responses = iter([
+        Response("rate limited", 429, {"Retry-After": "7"}),
+        Response("<html>ok</html>"),
+    ])
+    monkeypatch.setattr(http_fetch, "_fetch_once", lambda *args, **kwargs: next(responses))
+    monkeypatch.setattr(http_fetch.time, "sleep", sleeps.append)
+
+    result = fetch_html_resilient(
+        "https://example.test/issue",
+        strategies=(("requests", "default"), ("requests", "default")),
+        request_policy=HttpRequestPolicy(
+            min_interval=0,
+            max_attempts=2,
+            backoff=(2,),
+        ),
+    )
+
+    assert result.ok
+    assert sleeps == [7.0]
+    assert result.history[0]["retry_after"] == 7.0
+    assert result.history[0]["retry_delay"] == 7.0
+
+
+def test_provider_throttle_is_shared_across_fetch_calls(monkeypatch):
+    from papertrack import http_fetch
+
+    clock = [100.0]
+    sleeps = []
+
+    def fake_sleep(delay):
+        sleeps.append(delay)
+        clock[0] += delay
+
+    monkeypatch.setattr(http_fetch.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(http_fetch.time, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        http_fetch,
+        "_fetch_once",
+        lambda *args, **kwargs: Response("<html>ok</html>"),
+    )
+    http_fetch.clear_provider_throttles()
+    policy = HttpRequestPolicy(min_interval=10, max_attempts=1)
+
+    first = fetch_html_resilient(
+        "https://example.test/issue/1",
+        provider="aps",
+        strategies=(("requests", "default"),),
+        request_policy=policy,
+    )
+    second = fetch_html_resilient(
+        "https://example.test/issue/2",
+        provider="aps",
+        strategies=(("requests", "default"),),
+        request_policy=policy,
+    )
+
+    assert first.ok and second.ok
+    assert sleeps == [10.0]
+    assert second.history[0]["throttle_delay"] == 10.0
 
 
 def test_block_detector_does_not_treat_plain_cloudflare_word_as_block():

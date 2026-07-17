@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import importlib
 import logging
-import os
 import time
 from typing import Mapping, Sequence
 
 from bs4 import BeautifulSoup
 
-from .adapter_result import BLOCKED, FETCH_FAILED
+from .adapter_result import BLOCKED, FETCH_FAILED, RATE_LIMITED
 
 logger = logging.getLogger(__name__)
 
@@ -20,10 +21,7 @@ DEFAULT_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
-    "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": "PaperTrack/0.1 (mailto:ansatzMe@outlook.com)",
 }
 
 DEFAULT_HTTP_CLIENTS = (
@@ -87,94 +85,149 @@ class HttpFetchResult:
         return bool(self.html) and not self.outcome
 
 
+@dataclass(frozen=True)
+class HttpRequestPolicy:
+    min_interval: float
+    max_attempts: int = 3
+    backoff: tuple[float, ...] = (2.0, 5.0)
+
+    def __post_init__(self) -> None:
+        if self.min_interval < 0:
+            raise ValueError("min_interval must be non-negative")
+        if self.max_attempts < 1:
+            raise ValueError("max_attempts must be at least one")
+
+
+DEFAULT_STRATEGIES = (
+    ("curl_cffi", "chrome136"),
+    ("requests", "default"),
+)
+
+_last_request_at: dict[str, float] = {}
+
+
+def clear_provider_throttles() -> None:
+    """Clear process-local provider timing state (primarily for tests)."""
+    _last_request_at.clear()
+
+
 def fetch_html_resilient(
     url: str,
     *,
     required_selector: str = "",
-    clients: Sequence[str] = DEFAULT_HTTP_CLIENTS,
+    clients: Sequence[str] | None = None,
     curl_impersonations: Sequence[str] = CURL_IMPERSONATIONS,
-    rounds: int = 3,
-    backoff: Sequence[int] = (2, 5),
+    rounds: int | None = None,
+    backoff: Sequence[float] | None = None,
+    strategies: Sequence[tuple[str, str]] | None = None,
+    request_policy: HttpRequestPolicy | None = None,
+    provider: str = "",
     timeout: int = 30,
     headers: Mapping[str, str] | None = None,
     log_label: str = "source",
 ) -> HttpFetchResult:
-    """Fetch HTML using HTTP/TLS-client strategies only.
-
-    This intentionally avoids browser automation. It tries a small strategy
-    chain and reports blocked/fetch_failed so callers can preserve old ledgers.
-    """
+    """Fetch HTML with a bounded, sequential list of HTTP strategies."""
     merged_headers = {**DEFAULT_HEADERS, **(dict(headers) if headers else {})}
-    client_order = _configured_clients(clients)
+    if strategies is None:
+        strategies = _legacy_strategies(clients, curl_impersonations)
+    if request_policy is None:
+        request_policy = HttpRequestPolicy(
+            min_interval=0,
+            max_attempts=rounds or 3,
+            backoff=tuple(backoff) if backoff is not None else (2.0, 5.0),
+        )
+    provider_key = (provider or log_label).strip().lower() or "source"
     history: list[dict] = []
     last_html = ""
     last_status = None
     last_error = ""
     last_client = ""
     last_variant = ""
-    last_blocked = False
+    last_outcome = FETCH_FAILED
 
-    for round_idx in range(rounds):
-        for client in client_order:
-            for variant in _variants_for_client(client, curl_impersonations):
-                last_client = client
-                last_variant = variant
-                event = {
-                    "client": client,
-                    "variant": variant,
-                    "round": round_idx + 1,
-                }
-                try:
-                    response = _fetch_once(client, variant, url, merged_headers, timeout)
-                    html = _response_text(response)
-                    status = _response_status(response)
-                    event["status_code"] = status
-                    history.append(event)
-                    last_html = html
-                    last_status = status
+    attempts = tuple(strategies)[:request_policy.max_attempts]
+    for attempt_idx, (client, variant) in enumerate(attempts):
+        last_client = client
+        last_variant = variant
+        event = {
+            "client": client,
+            "variant": variant,
+            "attempt": attempt_idx + 1,
+            "throttle_delay": _throttle(provider_key, request_policy.min_interval),
+        }
+        try:
+            response = _fetch_once(client, variant, url, merged_headers, timeout)
+            html = _response_text(response)
+            status = _response_status(response)
+            retry_after = _response_retry_after(response)
+            event["status_code"] = status
+            if retry_after is not None:
+                event["retry_after"] = retry_after
+            history.append(event)
+            last_html = html
+            last_status = status
 
-                    if status and status != 200:
-                        continue
-                    if is_blocked_response(html):
-                        last_blocked = True
-                        event["blocked"] = True
-                        continue
-                    if required_selector and not _has_selector(html, required_selector):
-                        event["missing_selector"] = required_selector
-                        continue
+            blocked = status == 403 or is_blocked_response(html)
+            if blocked:
+                event["blocked"] = True
+                last_outcome = BLOCKED
+                if retry_after is not None and attempt_idx + 1 < len(attempts):
+                    _sleep_for_retry(event, retry_after)
+                    continue
+                break
 
-                    logger.info("%s fetch succeeded via %s/%s: %s", log_label, client, variant, url)
-                    return HttpFetchResult(
-                        html=html,
-                        status_code=status,
-                        client=client,
-                        variant=variant,
-                        history=history,
-                    )
-                except ImportError as exc:
-                    event["missing_client"] = str(exc)
-                    history.append(event)
-                    logger.debug("%s fetch client unavailable: %s", client, exc)
+            if status in (None, 200):
+                if required_selector and not _has_selector(html, required_selector):
+                    event["missing_selector"] = required_selector
                     break
-                except Exception as exc:
-                    last_error = repr(exc)
-                    event["exception"] = last_error
-                    history.append(event)
-                    logger.debug("%s fetch via %s/%s failed for %s: %s",
-                                 log_label, client, variant, url, exc)
-                    time.sleep(1)
+                logger.info(
+                    "%s fetch succeeded via %s/%s: %s",
+                    log_label,
+                    client,
+                    variant,
+                    url,
+                )
+                return HttpFetchResult(
+                    html=html,
+                    status_code=status,
+                    client=client,
+                    variant=variant,
+                    history=history,
+                )
 
-        if round_idx < rounds - 1:
-            delay = backoff[min(round_idx, len(backoff) - 1)] if backoff else 0
-            logger.info("Retrying %s fetch round %d/%d in %ds: %s",
-                        log_label, round_idx + 2, rounds, delay, url)
-            if delay:
-                time.sleep(delay)
+            if status == 429:
+                last_outcome = RATE_LIMITED
+            if not _retryable_status(status) or attempt_idx + 1 >= len(attempts):
+                break
+            delay = retry_after
+            if delay is None:
+                delay = _backoff_delay(request_policy.backoff, attempt_idx)
+            _sleep_for_retry(event, delay)
+        except ImportError as exc:
+            event["missing_client"] = str(exc)
+            history.append(event)
+            logger.debug("%s fetch client unavailable: %s", client, exc)
+        except Exception as exc:
+            last_error = repr(exc)
+            event["exception"] = last_error
+            history.append(event)
+            logger.debug(
+                "%s fetch via %s/%s failed for %s: %s",
+                log_label,
+                client,
+                variant,
+                url,
+                exc,
+            )
+            if attempt_idx + 1 < len(attempts):
+                _sleep_for_retry(
+                    event,
+                    _backoff_delay(request_policy.backoff, attempt_idx),
+                )
 
-    outcome = BLOCKED if last_html and (last_blocked or is_blocked_response(last_html)) else FETCH_FAILED
     return HttpFetchResult(
         html=last_html,
-        outcome=outcome,
+        outcome=last_outcome,
         status_code=last_status,
         client=last_client,
         variant=last_variant,
@@ -188,12 +241,44 @@ def is_blocked_response(html: str) -> bool:
     return any(marker in head for marker in BLOCK_MARKERS)
 
 
-def _configured_clients(default_clients: Sequence[str]) -> tuple[str, ...]:
-    raw = os.environ.get("PAPERTRACK_HTTP_CLIENTS", "").strip()
-    if not raw:
-        return tuple(default_clients)
-    requested = tuple(item.strip() for item in raw.split(",") if item.strip())
-    return requested or tuple(default_clients)
+def _legacy_strategies(
+    clients: Sequence[str] | None,
+    curl_impersonations: Sequence[str],
+) -> tuple[tuple[str, str], ...]:
+    if clients is None:
+        return DEFAULT_STRATEGIES
+    strategies = []
+    for client in clients:
+        variants = _variants_for_client(client, curl_impersonations)
+        strategies.append((client, variants[0]))
+    return tuple(strategies)
+
+
+def _throttle(provider: str, min_interval: float) -> float:
+    now = time.monotonic()
+    previous = _last_request_at.get(provider)
+    delay = 0.0 if previous is None else max(0.0, previous + min_interval - now)
+    if delay:
+        time.sleep(delay)
+        now = time.monotonic()
+    _last_request_at[provider] = now
+    return delay
+
+
+def _backoff_delay(backoff: Sequence[float], attempt_idx: int) -> float:
+    if not backoff:
+        return 0.0
+    return float(backoff[min(attempt_idx, len(backoff) - 1)])
+
+
+def _sleep_for_retry(event: dict, delay: float) -> None:
+    event["retry_delay"] = float(delay)
+    if delay:
+        time.sleep(delay)
+
+
+def _retryable_status(status: int | None) -> bool:
+    return status in {408, 425, 429} or bool(status and 500 <= status <= 599)
 
 
 def _variants_for_client(client: str, curl_impersonations: Sequence[str]) -> tuple[str, ...]:
@@ -276,6 +361,27 @@ def _response_status(response) -> int | None:
     try:
         return int(status) if status is not None else None
     except (TypeError, ValueError):
+        return None
+
+
+def _response_retry_after(response) -> float | None:
+    headers = getattr(response, "headers", {}) or {}
+    raw = headers.get("Retry-After") or headers.get("retry-after")
+    if raw is None:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        pass
+    try:
+        retry_at = parsedate_to_datetime(str(raw))
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(
+            0.0,
+            (retry_at - datetime.now(timezone.utc)).total_seconds(),
+        )
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
