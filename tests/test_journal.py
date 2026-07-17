@@ -1,5 +1,6 @@
 from papertrack.cli import _journal_output_root
 from papertrack.journal_entry import JournalEntry
+from papertrack.source_policy import SourcePolicy
 
 
 def test_jcp_provider_outputs_under_aip_folder(tmp_path):
@@ -551,6 +552,9 @@ def test_aip_provider_uses_crossref_only_to_fill_missing_official_abstracts(monk
         2025,
         provider="aip",
         journal_slug="jcp",
+        source_policy=SourcePolicy.from_environment(
+            {"PAPERTRACK_CROSSREF_MODE": "metadata"}
+        ),
     )
 
     assert list(entries) == ["10.1063/with-abstract", "10.1063/missing-abstract"]
@@ -615,10 +619,55 @@ def test_aip_crossref_abstract_fallback_infers_year_from_official_metadata(monke
         "The Journal of Chemical Physics",
         provider="aip",
         journal_slug="jcp",
+        source_policy=SourcePolicy.from_environment(
+            {"PAPERTRACK_CROSSREF_MODE": "metadata"}
+        ),
     )
 
     assert seen_years == [2025]
     assert entries["10.1063/missing-abstract"].abstract == "CrossRef fallback abstract."
+
+
+def test_official_only_provider_does_not_request_crossref_abstracts(monkeypatch):
+    from papertrack import aip_fetch, journal_fetch
+    from papertrack.adapter_result import AdapterResult, SUCCESS
+
+    official_entry = JournalEntry(
+        doi="10.1063/official-only",
+        title="Official title",
+        authors=["Official Author"],
+        abstract="",
+    )
+    monkeypatch.setattr(
+        aip_fetch,
+        "query_aip_issue_result",
+        lambda *args, **kwargs: AdapterResult(
+            entries={official_entry.doi: official_entry},
+            outcome=SUCCESS,
+            provider="aip",
+            source="journal",
+        ),
+    )
+    monkeypatch.setattr(
+        journal_fetch,
+        "_fetch_year",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("official-only mode must not call CrossRef")
+        ),
+    )
+
+    entries = journal_fetch.query_journal_issue_full(
+        "0021-9606",
+        "163",
+        "24",
+        "The Journal of Chemical Physics",
+        provider="aip",
+        journal_slug="jcp",
+        source_policy=SourcePolicy.official_only(),
+    )
+
+    assert entries == {official_entry.doi: official_entry}
+    assert entries[official_entry.doi].abstract == ""
 
 
 def test_official_provider_does_not_use_crossref_for_issue_membership(monkeypatch):

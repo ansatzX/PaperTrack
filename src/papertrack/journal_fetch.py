@@ -8,6 +8,7 @@ import json
 from .adapter_result import AdapterResult, FETCH_FAILED, SUCCESS
 from .diagnostics import record_fetch_attempt
 from .journal_entry import JournalEntry
+from .source_policy import SourcePolicy
 
 logger = logging.getLogger(__name__)
 
@@ -224,20 +225,25 @@ def _official_fetch_failed(provider: str, journal: str, message: str) -> Adapter
 def query_journal_issue_full_result(issn: str, volume: str, issue: str,
                                     journal_name: str = "", year: int | None = None,
                                     acs_code: str = "", provider: str = "",
-                                    journal_slug: str = "") -> AdapterResult[dict[str, JournalEntry]]:
+                                    journal_slug: str = "",
+                                    source_policy: SourcePolicy | None = None,
+                                    ) -> AdapterResult[dict[str, JournalEntry]]:
     """Fetch articles for a journal volume/issue.
 
     Official journal providers define issue membership. CrossRef may fill
     missing abstracts by DOI, but only after an official issue fetch succeeds.
     """
+    policy = source_policy or SourcePolicy.official_only()
+
     if acs_code:
         try:
             from .acs_fetch import query_acs_issue_result
             official = query_acs_issue_result(acs_code, volume, issue, journal_name)
-            if official.entries:
+            if official.entries and policy.crossref_metadata_enabled:
                 _record_crossref_abstract_fill(
                     official, issn, year, journal_slug or journal_name or issn, volume, issue
                 )
+            if official.entries:
                 return official
             logger.warning("ACS scraping returned %s; not using CrossRef for issue membership", official.outcome)
             return official
@@ -252,8 +258,9 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
         try:
             from .aip_fetch import query_aip_issue_result
             official = query_aip_issue_result(journal_slug, volume, issue, journal_name)
-            if official.entries:
+            if official.entries and policy.crossref_metadata_enabled:
                 _record_crossref_abstract_fill(official, issn, year, journal_slug, volume, issue)
+            if official.entries:
                 return official
             logger.warning("AIP scraping returned %s; not using CrossRef for issue membership", official.outcome)
             return official
@@ -268,8 +275,9 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
         try:
             from .aps_fetch import query_aps_issue_result
             official = query_aps_issue_result(journal_slug, volume, issue, journal_name)
-            if official.entries:
+            if official.entries and policy.crossref_metadata_enabled:
                 _record_crossref_abstract_fill(official, issn, year, journal_slug, volume, issue)
+            if official.entries:
                 return official
             logger.warning("APS scraping returned %s; not using CrossRef for issue membership", official.outcome)
             return official
@@ -280,13 +288,19 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
             logger.exception("APS scraping failed; not using CrossRef for issue membership")
             return _official_fetch_failed("aps", journal_slug or journal_name or issn, repr(exc))
 
-    return query_journal_issue_result(issn, volume, issue, journal_name, year)
+    return _official_fetch_failed(
+        provider or "journal",
+        journal_slug or journal_name or issn,
+        "no authoritative issue adapter configured",
+    )
 
 
 def query_journal_issue_full(issn: str, volume: str, issue: str,
                             journal_name: str = "", year: int | None = None,
                             acs_code: str = "", provider: str = "",
-                            journal_slug: str = "") -> dict[str, JournalEntry]:
+                            journal_slug: str = "",
+                            source_policy: SourcePolicy | None = None,
+                            ) -> dict[str, JournalEntry]:
     return query_journal_issue_full_result(
         issn,
         volume,
@@ -296,6 +310,7 @@ def query_journal_issue_full(issn: str, volume: str, issue: str,
         acs_code,
         provider,
         journal_slug,
+        source_policy,
     ).entries
 
 

@@ -11,6 +11,7 @@ from typing import Callable
 from .codex import journal_configs, query_args
 from .diagnostics import record_repair_event
 from .migration import classify_report_file, validate_report_file
+from .source_policy import SourcePolicy
 from .zotero_query import ZoteroQuery
 
 
@@ -64,6 +65,7 @@ def repair_reports(
     assume_yes: bool = False,
     no_fetch: bool = False,
     input_func: Callable[[str], str] = input,
+    source_policy: SourcePolicy | None = None,
 ) -> list[RepairResult]:
     """Repair candidates after one explicit fetch decision."""
     if not candidates:
@@ -78,9 +80,10 @@ def repair_reports(
         if answer.strip().lower() not in {"y", "yes"}:
             return [_defer(candidate, "fetch declined by user") for candidate in candidates]
 
+    policy = source_policy or SourcePolicy.official_only()
     results: list[RepairResult] = []
     for candidate in candidates:
-        results.append(_repair_one(data_dir, candidate, zotero))
+        results.append(_repair_one(data_dir, candidate, zotero, policy))
     return results
 
 
@@ -88,10 +91,11 @@ def _repair_one(
     data_dir: str,
     candidate: RepairCandidate,
     zotero: ZoteroQuery | None,
+    source_policy: SourcePolicy,
 ) -> RepairResult:
     try:
         if candidate.source == "journal":
-            _repair_journal(data_dir, candidate, zotero)
+            _repair_journal(data_dir, candidate, zotero, source_policy)
         elif candidate.source == "arxiv":
             _repair_arxiv(data_dir, candidate, zotero)
         else:
@@ -108,6 +112,7 @@ def _repair_journal(
     data_dir: str,
     candidate: RepairCandidate,
     zotero: ZoteroQuery | None,
+    source_policy: SourcePolicy,
 ) -> None:
     from .report import filter_journal_to_md
 
@@ -124,6 +129,7 @@ def _repair_journal(
         zotero=zotero,
         acs_code=cfg.get("acs_code", ""),
         provider=provider,
+        source_policy=source_policy,
     )
 
 

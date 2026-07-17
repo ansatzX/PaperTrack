@@ -315,6 +315,7 @@ def _run_repair(args, zotero: ZoteroQuery | None) -> None:
         zotero=zotero,
         assume_yes=args.yes,
         no_fetch=args.no_fetch,
+        source_policy=args.source_policy,
     )
     counts: dict[str, int] = {}
     for result in results:

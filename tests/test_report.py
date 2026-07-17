@@ -1,5 +1,6 @@
 """Unit tests for arxiv_entry, report, and arxiv_index_fetch modules"""
 from bs4 import BeautifulSoup
+import pytest
 
 from papertrack.arxiv_entry import ArxivEntry
 from papertrack.arxiv_index_fetch import _parse_arxiv_result
@@ -14,6 +15,7 @@ from papertrack.report import (
     filter_journal_to_md,
     filter_journal_auto,
 )
+from papertrack.source_policy import SourcePolicy
 from papertrack.zotero_query import ZoteroQuery
 
 
@@ -210,6 +212,9 @@ Title:  Raw <mml:math></mml:math> title
             acs_code="",
             md_folder=str(tmp_path),
             provider="aip",
+            source_policy=SourcePolicy.from_environment(
+                {"PAPERTRACK_CROSSREF_MODE": "metadata"}
+            ),
         )
 
         assert rebuilt == [("164", "16")]
@@ -250,6 +255,9 @@ Title:  Latest article
             acs_code="",
             md_folder=str(tmp_path),
             provider="aip",
+            source_policy=SourcePolicy.from_environment(
+                {"PAPERTRACK_CROSSREF_MODE": "metadata"}
+            ),
         )
 
         assert rebuilt == [("163", "24")]
@@ -290,6 +298,9 @@ Title:  Test article
             acs_code="",
             md_folder=str(tmp_path),
             provider="aip",
+            source_policy=SourcePolicy.from_environment(
+                {"PAPERTRACK_CROSSREF_MODE": "metadata"}
+            ),
         )
 
         assert rebuilt == []
@@ -311,9 +322,35 @@ Title:  Test article
             acs_code="",
             md_folder=str(tmp_path),
             provider="aip",
+            source_policy=SourcePolicy.from_environment(
+                {"PAPERTRACK_CROSSREF_MODE": "metadata"}
+            ),
         )
 
         assert state == {"jcp": {"processed": []}}
+
+    def test_aip_auto_official_only_requires_explicit_issue(self, tmp_path, monkeypatch):
+        from papertrack import crossref_loi, report
+
+        monkeypatch.setattr(report, "_load_state", lambda md_folder: {})
+        monkeypatch.setattr(
+            crossref_loi,
+            "discover_issues_crossref",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("official-only mode must not call CrossRef discovery")
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match=r"journal issue.*--volume.*--issue"):
+            filter_journal_auto(
+                journal_name="Journal of Chemical Physics",
+                journal_slug="jcp",
+                issn="0021-9606",
+                acs_code="",
+                md_folder=str(tmp_path),
+                provider="aip",
+                source_policy=SourcePolicy.official_only(),
+            )
 
 
 class TestJournalRendering:

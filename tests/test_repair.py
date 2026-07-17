@@ -1,6 +1,7 @@
 import json
 
 from papertrack.repair import RepairCandidate, collect_repair_candidates, repair_reports
+from papertrack.source_policy import CrossrefMode, SourcePolicy
 
 
 def _valid_journal_report() -> str:
@@ -108,16 +109,25 @@ def test_repair_reports_fetches_and_records_fixed_journal(tmp_path, monkeypatch)
         issue="16",
     )
 
+    captured = {}
+
     def fake_filter_journal_to_md(**kwargs):
+        captured.update(kwargs)
         target = tmp_path / "data" / "aip" / "jcp" / "164" / "16.md"
         target.parent.mkdir(parents=True)
         target.write_text(_valid_journal_report(), encoding="utf-8")
 
     monkeypatch.setattr(report, "filter_journal_to_md", fake_filter_journal_to_md)
 
-    results = repair_reports(str(tmp_path / "data"), [candidate], assume_yes=True)
+    results = repair_reports(
+        str(tmp_path / "data"),
+        [candidate],
+        assume_yes=True,
+        source_policy=SourcePolicy.official_only(),
+    )
 
     assert results[0].outcome == "fixed"
+    assert captured["source_policy"].crossref_mode is CrossrefMode.DISABLED
     events = _events(tmp_path / "diagnostics" / "repairs.jsonl")
     assert events[0]["outcome"] == "fixed"
     assert events[0]["fetch_attempted"] is True
@@ -174,12 +184,20 @@ def test_repair_dispatches_no_fetch(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "ZoteroQuery", lambda: None)
     monkeypatch.setattr(cli, "collect_repair_candidates", lambda data_dir: [candidate])
 
-    def fake_repair_reports(data_dir, candidates, zotero, assume_yes, no_fetch):
+    def fake_repair_reports(
+        data_dir,
+        candidates,
+        zotero,
+        assume_yes,
+        no_fetch,
+        source_policy,
+    ):
         captured.update({
             "data_dir": data_dir,
             "candidates": candidates,
             "assume_yes": assume_yes,
             "no_fetch": no_fetch,
+            "source_policy": source_policy,
         })
         return []
 
@@ -202,4 +220,5 @@ def test_repair_dispatches_no_fetch(monkeypatch, tmp_path):
         "candidates": [candidate],
         "assume_yes": False,
         "no_fetch": True,
+        "source_policy": SourcePolicy.official_only(),
     }

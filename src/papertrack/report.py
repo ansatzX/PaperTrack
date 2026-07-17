@@ -12,6 +12,7 @@ from .arxiv_index_fetch import query_arxiv_result
 from .journal_entry import JournalEntry
 from .journal_fetch import query_journal_issue_full_result
 from .migration import has_journal_quality_failure, preserve_task_state, write_report_file
+from .source_policy import SourcePolicy
 from .zotero_query import ZoteroQuery
 
 logger = logging.getLogger(__name__)
@@ -405,13 +406,22 @@ def filter_journal_to_md(journal_name: str, journal_slug: str,
                          volume: str, issue: str, issn: str,
                          md_folder: str, zotero: ZoteroQuery | None = None,
                          year: int | None = None, acs_code: str = "",
-                         provider: str = "") -> bool:
+                         provider: str = "",
+                         source_policy: SourcePolicy | None = None) -> bool:
     """Fetch journal articles for a volume/issue and write a Markdown report.
 
     The report goes to {md_folder}/{journal_slug}/{volume}/{issue}.md
     """
     fetch_result = query_journal_issue_full_result(
-        issn, volume, issue, journal_name, year, acs_code, provider, journal_slug
+        issn,
+        volume,
+        issue,
+        journal_name,
+        year,
+        acs_code,
+        provider,
+        journal_slug,
+        source_policy,
     )
     if not fetch_result.ok:
         logger.warning(
@@ -487,7 +497,8 @@ def filter_journal_auto(journal_name: str, journal_slug: str,
                         issn: str, acs_code: str,
                         md_folder: str, zotero: ZoteroQuery | None = None,
                         backfill: bool = False, from_year: int = 0,
-                        provider: str = "acs"):
+                        provider: str = "acs",
+                        source_policy: SourcePolicy | None = None):
     """Auto-discover new issues for a journal and process them.
 
     For ACS journals (provider="acs"), scrapes the ACS LOI page.
@@ -497,6 +508,7 @@ def filter_journal_auto(journal_name: str, journal_slug: str,
     State is persisted in .papertrack_state.json in the current working directory.
     Repeated runs only pick up newly published issues.
     """
+    policy = source_policy or SourcePolicy.official_only()
     state = _load_state(md_folder)
     journal_state = state.get(journal_slug, {})
     processed = set(tuple(p) for p in journal_state.get("processed", []))
@@ -517,6 +529,7 @@ def filter_journal_auto(journal_name: str, journal_slug: str,
             zotero=zotero,
             acs_code=acs_code,
             provider=provider,
+            source_policy=policy,
         )
         rebuilt_keys.add((vol, iss))
         if written:
@@ -558,6 +571,7 @@ def filter_journal_auto(journal_name: str, journal_slug: str,
                 zotero=zotero,
                 acs_code=acs_code,
                 provider=provider,
+                source_policy=policy,
             )
             if written:
                 processed.add(key)
@@ -597,6 +611,7 @@ def filter_journal_auto(journal_name: str, journal_slug: str,
                 zotero=zotero,
                 year=yr,
                 provider=provider,
+                source_policy=policy,
             )
             if written:
                 processed.add(key)
@@ -606,6 +621,11 @@ def filter_journal_auto(journal_name: str, journal_slug: str,
 
     else:
         # ── CrossRef/AIP path: discover via CrossRef API ──
+        if not policy.crossref_discovery_enabled:
+            raise RuntimeError(
+                "AIP latest/backfill requires CrossRef issue discovery; "
+                "in official-only mode use 'journal issue --volume V --issue I'"
+            )
         from .crossref_loi import discover_issues_crossref
 
         triples = discover_issues_crossref(issn, from_year=from_year)
@@ -638,6 +658,7 @@ def filter_journal_auto(journal_name: str, journal_slug: str,
                 acs_code=acs_code,
                 year=yr,
                 provider=provider,
+                source_policy=policy,
             )
             if written:
                 processed.add(key)
