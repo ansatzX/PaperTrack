@@ -212,6 +212,39 @@ def test_aip_browser_bundle_runs_once_under_xvfb(monkeypatch):
     assert captured["kwargs"]["timeout"] == 120
 
 
+def test_aip_browser_allows_challenge_query_but_blocks_article_navigation():
+    from papertrack.aip_browser import _browser_request_allowed
+
+    issue_url = "https://pubs.aip.org/aip/jcp/issue/164/16"
+    endpoint = "https://pubs.aip.org/aip/jcp/PlatformArticle/ArticleAbstractAjax"
+
+    assert _browser_request_allowed(
+        issue_url + "?__cf_chl_tk=token",
+        "document",
+        issue_url,
+        endpoint,
+    )
+    assert not _browser_request_allowed(
+        "https://pubs.aip.org/aip/jcp/article/164/16/164101/123/Title",
+        "document",
+        issue_url,
+        endpoint,
+    )
+    assert _browser_request_allowed(endpoint + "?articleId=123", "xhr", issue_url, endpoint)
+    assert _browser_request_allowed(
+        "https://pubs.aip.org/cdn-cgi/challenge-platform/script",
+        "fetch",
+        issue_url,
+        endpoint,
+    )
+    assert not _browser_request_allowed(
+        "https://pubs.aip.org/aip/jcp/other-api",
+        "fetch",
+        issue_url,
+        endpoint,
+    )
+
+
 def test_aip_records_no_official_abstract_control(monkeypatch):
     from papertrack import aip_fetch
 

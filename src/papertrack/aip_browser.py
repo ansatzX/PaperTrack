@@ -5,10 +5,33 @@ from __future__ import annotations
 from dataclasses import asdict
 import json
 import sys
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from .adapter_result import BLOCKED, FETCH_FAILED, SUCCESS
 from .aip_fetch import AipAbstractResult, _clean_abstract_html, aip_abstract_url
+
+
+def _browser_request_allowed(
+    request_url: str,
+    resource_type: str,
+    issue_url: str,
+    abstract_endpoint: str,
+) -> bool:
+    if resource_type in {"image", "font", "media"}:
+        return False
+    if resource_type == "document":
+        request = urlsplit(request_url)
+        issue = urlsplit(issue_url)
+        return (request.scheme, request.netloc, request.path) == (
+            issue.scheme,
+            issue.netloc,
+            issue.path,
+        )
+    if resource_type in {"xhr", "fetch"}:
+        return request_url.startswith(abstract_endpoint) or (
+            "/cdn-cgi/challenge-platform/" in request_url
+        )
+    return True
 
 
 def _run(issue_url: str, journal_slug: str) -> dict:
@@ -22,17 +45,11 @@ def _run(issue_url: str, journal_slug: str) -> dict:
 
         def route_request(route):
             request = route.request
-            is_challenge = "/cdn-cgi/challenge-platform/" in request.url
-            if request.resource_type in {"image", "font", "media"}:
-                route.abort()
-                return
-            if request.resource_type == "document" and request.url != issue_url:
-                route.abort()
-                return
-            if (
-                request.resource_type in {"xhr", "fetch"}
-                and not request.url.startswith(endpoint)
-                and not is_challenge
+            if not _browser_request_allowed(
+                request.url,
+                request.resource_type,
+                issue_url,
+                endpoint,
             ):
                 route.abort()
                 return
