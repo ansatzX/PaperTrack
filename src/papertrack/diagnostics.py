@@ -21,6 +21,7 @@ ABNORMAL_OUTCOMES = {
     "fetch_failed",
     "parse_failed",
     "official_empty_suspicious",
+    "official_field_absent",
     "partial",
 }
 
@@ -106,8 +107,18 @@ def record_repair_event(event: dict[str, Any]) -> None:
 def _append_jsonl(filename: str, event: dict[str, Any]) -> None:
     root = diagnostics_dir()
     root.mkdir(parents=True, exist_ok=True)
-    with open(root / filename, "a", encoding="utf-8") as f:
-        f.write(json.dumps(event, sort_keys=True, ensure_ascii=False) + "\n")
+    payload = (
+        json.dumps(event, sort_keys=True, ensure_ascii=False) + "\n"
+    ).encode("utf-8")
+    fd = os.open(root / filename, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        written = os.write(fd, payload)
+        if written != len(payload):
+            raise OSError(
+                f"short diagnostics append: wrote {written} of {len(payload)} bytes"
+            )
+    finally:
+        os.close(fd)
 
 
 def _write_snapshot(event: dict[str, Any], html: str) -> str:

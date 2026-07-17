@@ -1,5 +1,6 @@
 """Direct ACS journal TOC scraper with resilient official-page fetching."""
 
+from dataclasses import dataclass
 import logging
 import re
 
@@ -9,13 +10,15 @@ from .adapter_result import (
     AdapterResult,
     BLOCKED,
     FETCH_FAILED,
+    OFFICIAL_FIELD_ABSENT,
     OFFICIAL_EMPTY_SUSPICIOUS,
+    PARSE_FAILED,
     SUCCESS,
 )
 from .diagnostics import record_fetch_attempt
 from .http_fetch import (
-    CURL_IMPERSONATIONS,
     HttpFetchResult,
+    HttpRequestPolicy,
     fetch_html_resilient,
     is_blocked_response,
 )
@@ -24,21 +27,28 @@ from .journal_entry import JournalEntry
 logger = logging.getLogger(__name__)
 
 ACS_TOC_URL = "https://pubs.acs.org/toc/{journal_code}/{volume}/{issue}"
-ACS_HTTP_CLIENTS = (
-    "curl_cffi",
-    "cloudscraper",
-    "primp",
-    "tls_client",
-    "pyreqwest_impersonate",
-    "requests",
+ACS_FETCH_STRATEGIES = (
+    ("curl_cffi", "chrome136"),
+    ("requests", "default"),
+    ("requests", "default"),
 )
-ACS_IMPERSONATIONS = CURL_IMPERSONATIONS
-ACS_FETCH_ROUNDS = 3
-ACS_ROUND_BACKOFF = (2, 5)
+ACS_REQUEST_POLICY = HttpRequestPolicy(
+    min_interval=1.0,
+    max_attempts=3,
+    backoff=(2.0, 5.0),
+)
 
 # Per-issue cache to avoid re-scraping on repeated runs.
-_cache: dict[str, dict[str, JournalEntry]] = {}
+_cache: dict[str, AdapterResult[dict[str, JournalEntry]]] = {}
 _last_fetch_result: HttpFetchResult | None = None
+
+
+@dataclass
+class AcsParseResult:
+    entries: dict[str, JournalEntry]
+    issue_item_count: int
+    missing_fields: list[dict]
+    critical_field_failures: list[dict]
 
 
 def _is_blocked(html: str) -> bool:
@@ -50,37 +60,45 @@ def _fetch_html(url: str) -> tuple[str, str, int | None]:
     global _last_fetch_result
     _last_fetch_result = fetch_html_resilient(
         url,
-        clients=ACS_HTTP_CLIENTS,
-        curl_impersonations=ACS_IMPERSONATIONS,
-        rounds=ACS_FETCH_ROUNDS,
-        backoff=ACS_ROUND_BACKOFF,
+        strategies=ACS_FETCH_STRATEGIES,
+        request_policy=ACS_REQUEST_POLICY,
+        provider="acs",
         log_label="ACS",
     )
     return _last_fetch_result.html, _last_fetch_result.outcome, _last_fetch_result.status_code
 
 
-def _parse_acs_toc(html: str, journal_name: str) -> dict[str, JournalEntry]:
+def _parse_acs_toc_result(html: str, journal_name: str) -> AcsParseResult:
     """Parse ACS TOC page HTML into JournalEntry dict keyed by DOI."""
     soup = BeautifulSoup(html, "lxml")
     result: dict[str, JournalEntry] = {}
+    missing_fields: list[dict] = []
+    critical_field_failures: list[dict] = []
+    issue_item_count = 0
 
-    for item in soup.select("div.issue-item.clearfix"):
+    for card_number, item in enumerate(soup.select("div.issue-item.clearfix"), 1):
         # Skip non-article items
         text_preview = item.get_text(" ", strip=True)
         if any(skip in text_preview for skip in
                ("Issue Publication Information", "Editorial Masthead", "Issue Editorial")):
             continue
+        issue_item_count += 1
 
         # --- DOI & Title ---
         title_a = item.select_one("h3.issue-item_title a, h4.issue-item_title a")
         if not title_a:
+            critical_field_failures.append({"card": card_number, "field": "title"})
             continue
         href = title_a.get("href", "")
-        doi_match = re.search(r"10\.1021/\S+", href)
+        doi_match = re.search(r"10\.1021/[^?#\s]+", href)
         if not doi_match:
+            critical_field_failures.append({"card": card_number, "field": "doi"})
             continue
         doi = doi_match.group(0)
         title = title_a.get_text(" ", strip=True)
+        if not title:
+            critical_field_failures.append({"card": card_number, "field": "title"})
+            continue
 
         # --- Authors ---
         authors = []
@@ -136,21 +154,41 @@ def _parse_acs_toc(html: str, journal_name: str) -> dict[str, JournalEntry]:
             if date_match:
                 date = _normalize_date(date_match.group(1).strip())
 
-        if doi and title:
-            result[doi] = JournalEntry(
-                doi=doi,
-                title=title,
-                authors=authors,
-                abstract=abstract,
-                journal_name=journal_name,
-                volume=volume,
-                issue=issue,
-                pages=pages,
-                date=date,
-                toc_image_url=toc_image_url,
-            )
+        entry = JournalEntry(
+            doi=doi,
+            title=title,
+            authors=authors,
+            abstract=abstract,
+            journal_name=journal_name,
+            volume=volume,
+            issue=issue,
+            pages=pages,
+            date=date,
+            toc_image_url=toc_image_url,
+        )
+        result[doi] = entry
+        for field_name, value in (
+            ("authors", authors),
+            ("abstract", abstract),
+            ("volume", volume),
+            ("issue", issue),
+            ("pages", pages),
+            ("date", date),
+        ):
+            if not value:
+                missing_fields.append({"doi": doi, "field": field_name})
 
-    return result
+    return AcsParseResult(
+        entries=result,
+        issue_item_count=issue_item_count,
+        missing_fields=missing_fields,
+        critical_field_failures=critical_field_failures,
+    )
+
+
+def _parse_acs_toc(html: str, journal_name: str) -> dict[str, JournalEntry]:
+    """Backward-compatible entry-only ACS parser."""
+    return _parse_acs_toc_result(html, journal_name).entries
 
 
 def _normalize_date(raw: str) -> str:
@@ -184,16 +222,13 @@ def query_acs_issue_result(journal_code: str, volume: str, issue: str,
     """
     cache_key = f"{journal_code}:{volume}:{issue}"
     if cache_key in _cache:
-        return AdapterResult(
-            entries=_cache[cache_key],
-            outcome=SUCCESS,
-            provider="acs",
-            source="journal",
-        )
+        return _cache[cache_key]
 
     url = ACS_TOC_URL.format(journal_code=journal_code, volume=volume, issue=issue)
 
     logger.info("Scraping ACS TOC: %s", url)
+    global _last_fetch_result
+    _last_fetch_result = None
     html, failure_outcome, status_code = _fetch_html(url)
     if not html or failure_outcome:
         outcome = failure_outcome or FETCH_FAILED
@@ -228,8 +263,44 @@ def query_acs_issue_result(journal_code: str, volume: str, issue: str,
             metadata={"url": url},
         )
 
-    entries = _parse_acs_toc(html, journal_name)
-    if not entries:
+    parsed = _parse_acs_toc_result(html, journal_name)
+    metadata = {
+        "url": url,
+        "article_count": len(parsed.entries),
+        "issue_item_count": parsed.issue_item_count,
+        "missing_fields": parsed.missing_fields,
+        "critical_field_failures": parsed.critical_field_failures,
+        "fetch_history": (
+            _last_fetch_result.history if _last_fetch_result else []
+        ),
+    }
+    if parsed.critical_field_failures:
+        record_fetch_attempt(
+            {
+                "source_role": "authoritative",
+                "source": "journal",
+                "provider": "acs",
+                "journal": journal_code,
+                "volume": volume,
+                "issue": issue,
+                "url": url,
+                "stage": "issue_page_parse",
+                "outcome": PARSE_FAILED,
+                "article_count": len(parsed.entries),
+                "critical_field_failures": parsed.critical_field_failures,
+            },
+            html=html,
+        )
+        return AdapterResult(
+            entries={},
+            outcome=PARSE_FAILED,
+            provider="acs",
+            source="journal",
+            message="ACS article card is missing DOI or title",
+            metadata=metadata,
+        )
+
+    if not parsed.entries:
         record_fetch_attempt(
             {
                 "source_role": "authoritative",
@@ -251,19 +322,37 @@ def query_acs_issue_result(journal_code: str, volume: str, issue: str,
             provider="acs",
             source="journal",
             message="ACS issue page parsed to zero official articles",
-            metadata={"url": url},
+            metadata=metadata,
         )
 
-    _cache[cache_key] = entries
+    for missing in parsed.missing_fields:
+        record_fetch_attempt(
+            {
+                "source_role": "authoritative",
+                "source": "journal",
+                "provider": "acs",
+                "journal": journal_code,
+                "volume": volume,
+                "issue": issue,
+                "doi": missing["doi"],
+                "field": missing["field"],
+                "url": url,
+                "stage": "issue_page_parse",
+                "outcome": OFFICIAL_FIELD_ABSENT,
+            }
+        )
+
     logger.info("ACS %s v%s i%s: %d articles scraped",
-                journal_code, volume, issue, len(entries))
-    return AdapterResult(
-        entries=entries,
+                journal_code, volume, issue, len(parsed.entries))
+    result = AdapterResult(
+        entries=parsed.entries,
         outcome=SUCCESS,
         provider="acs",
         source="journal",
-        metadata={"url": url},
+        metadata=metadata,
     )
+    _cache[cache_key] = result
+    return result
 
 
 def query_acs_issue(journal_code: str, volume: str, issue: str,

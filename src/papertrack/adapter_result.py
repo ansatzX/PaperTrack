@@ -14,6 +14,7 @@ RATE_LIMITED = "rate_limited"
 FETCH_FAILED = "fetch_failed"
 PARSE_FAILED = "parse_failed"
 OFFICIAL_EMPTY_SUSPICIOUS = "official_empty_suspicious"
+OFFICIAL_FIELD_ABSENT = "official_field_absent"
 
 
 @dataclass

@@ -61,6 +61,33 @@ def test_acs_issue_result_distinguishes_cloudflare_block(monkeypatch):
     assert result.provider == "acs"
 
 
+def test_acs_issue_result_rejects_article_card_without_doi(monkeypatch):
+    from papertrack import acs_fetch
+
+    acs_fetch._cache.clear()
+    monkeypatch.setattr(
+        acs_fetch,
+        "_fetch_html",
+        lambda *args, **kwargs: (
+            """
+            <div class="issue-item clearfix">
+              <h3 class="issue-item_title"><a href="/article/no-doi">Article title</a></h3>
+            </div>
+            """,
+            "",
+            200,
+        ),
+    )
+
+    result = acs_fetch.query_acs_issue_result("jcisd8", "66", "12", "JCIM")
+
+    assert result.outcome == PARSE_FAILED
+    assert result.entries == {}
+    assert result.metadata["critical_field_failures"] == [
+        {"card": 1, "field": "doi"}
+    ]
+
+
 def test_arxiv_result_distinguishes_parse_failure(monkeypatch):
     from papertrack import arxiv_index_fetch
 

@@ -113,3 +113,26 @@ def test_migration_and_repair_events_are_written(tmp_path):
 
     assert _jsonl(tmp_path / "migrations.jsonl")[0]["outcome"] == "migrated"
     assert _jsonl(tmp_path / "repairs.jsonl")[0]["outcome"] == "fixed"
+
+
+def test_jsonl_event_uses_one_atomic_append_write(tmp_path, monkeypatch):
+    from papertrack import diagnostics
+
+    configure_diagnostics(diagnostics_dir=str(tmp_path))
+    writes = []
+    closes = []
+    monkeypatch.setattr(diagnostics.os, "open", lambda *args, **kwargs: 17)
+    monkeypatch.setattr(
+        diagnostics.os,
+        "write",
+        lambda fd, payload: writes.append((fd, payload)) or len(payload),
+    )
+    monkeypatch.setattr(diagnostics.os, "close", closes.append)
+
+    record_migration_event({"outcome": "migrated", "journal": "测试"})
+
+    assert len(writes) == 1
+    assert writes[0][0] == 17
+    assert writes[0][1].endswith(b"\n")
+    assert json.loads(writes[0][1].decode("utf-8"))["journal"] == "测试"
+    assert closes == [17]

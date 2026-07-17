@@ -730,6 +730,75 @@ def test_crossref_non_article_issue_metadata_is_filtered():
     assert articles == [article_item]
 
 
+def test_acs_issue_page_defines_membership_and_records_absent_abstract(monkeypatch):
+    from papertrack import acs_fetch
+
+    acs_fetch._cache.clear()
+    html = """
+    <div class="issue-item clearfix">
+      <h3 class="issue-item_title">
+        <a href="/doi/10.1021/acs.jcim.6c00001">Research article</a>
+      </h3>
+      <span class="hlFld-ContribAuthor"><given-names>Ada</given-names><surname>Lovelace</surname></span>
+      <span class="hlFld-Abstract">Official abstract.</span>
+      <div class="issue-item_info">
+        <span class="issue-item_vol-num">66</span>, 12, 100-110 Publication Date: June 1, 2026
+      </div>
+    </div>
+    <div class="issue-item clearfix">
+      <h4 class="issue-item_title">
+        <a href="/doi/10.1021/acs.jcim.6c00002">Correction</a>
+      </h4>
+      <span class="hlFld-ContribAuthor"><given-names>Grace</given-names><surname>Hopper</surname></span>
+      <div class="issue-item_info">
+        <span class="issue-item_vol-num">66</span>, 12, 111-112 Publication Date: June 1, 2026
+      </div>
+    </div>
+    """
+    fetched = []
+    events = []
+
+    def fake_fetch(url):
+        fetched.append(url)
+        return html, "", 200
+
+    monkeypatch.setattr(acs_fetch, "_fetch_html", fake_fetch)
+    monkeypatch.setattr(
+        acs_fetch,
+        "record_fetch_attempt",
+        lambda event, html=None: events.append(event),
+    )
+
+    result = acs_fetch.query_acs_issue_result("jcisd8", "66", "12", "JCIM")
+
+    assert list(result.entries) == [
+        "10.1021/acs.jcim.6c00001",
+        "10.1021/acs.jcim.6c00002",
+    ]
+    assert result.entries["10.1021/acs.jcim.6c00001"].authors == ["Ada Lovelace"]
+    assert result.entries["10.1021/acs.jcim.6c00002"].abstract == ""
+    assert result.metadata["article_count"] == 2
+    assert result.metadata["missing_fields"] == [
+        {"doi": "10.1021/acs.jcim.6c00002", "field": "abstract"}
+    ]
+    assert fetched == ["https://pubs.acs.org/toc/jcisd8/66/12"]
+    assert [event for event in events if event.get("outcome") == "official_field_absent"] == [
+        {
+            "source_role": "authoritative",
+            "source": "journal",
+            "provider": "acs",
+            "journal": "jcisd8",
+            "volume": "66",
+            "issue": "12",
+            "doi": "10.1021/acs.jcim.6c00002",
+            "field": "abstract",
+            "url": "https://pubs.acs.org/toc/jcisd8/66/12",
+            "stage": "issue_page_parse",
+            "outcome": "official_field_absent",
+        }
+    ]
+
+
 def test_aip_fetch_html_retries_impersonation_rounds(monkeypatch):
     from papertrack import aip_fetch
 
