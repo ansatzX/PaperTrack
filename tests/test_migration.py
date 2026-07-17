@@ -1,11 +1,26 @@
 from papertrack.migration import (
     CURRENT_JOURNAL_FORMAT,
     classify_report_file,
+    has_journal_quality_failure,
     migrate_report_file,
     migrate_reports,
     preserve_task_state,
     validate_report_content,
 )
+
+
+def test_aps_official_doi_casing_is_not_crossref_provenance():
+    official = """### 10.1103/PhysRevLett.127.270401
+
+Title:  Quantum Vacuum Sagnac Effect
+"""
+    old_crossref = """### 10.1103/physrevlett.127.270401
+
+Title:  Quantum Vacuum Sagnac Effect
+"""
+
+    assert has_journal_quality_failure(official) is False
+    assert has_journal_quality_failure(old_crossref) is True
 
 
 def _legacy_journal_report() -> str:

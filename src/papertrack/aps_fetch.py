@@ -5,75 +5,47 @@ from __future__ import annotations
 from datetime import datetime
 import logging
 import re
-import time
 
 from bs4 import BeautifulSoup
-from curl_cffi import requests
 
-from .adapter_result import AdapterResult, BLOCKED, FETCH_FAILED, OFFICIAL_EMPTY_SUSPICIOUS, SUCCESS
+from .adapter_result import AdapterResult, FETCH_FAILED, OFFICIAL_EMPTY_SUSPICIOUS, SUCCESS
 from .diagnostics import record_fetch_attempt
+from .http_fetch import HttpRequestPolicy, fetch_html_resilient, is_blocked_response
 from .journal_entry import JournalEntry
 
 logger = logging.getLogger(__name__)
 
 APS_BASE = "https://journals.aps.org"
 APS_ISSUE_URL = APS_BASE + "/{journal_slug}/issues/{volume}/{issue}"
-APS_IMPERSONATIONS = (
-    "firefox",
-    "chrome136",
-    "safari",
-    "chrome131",
-    "chrome124",
+APS_FETCH_STRATEGIES = (
+    ("curl_cffi", "chrome136"),
+    ("requests", "default"),
+    ("requests", "default"),
 )
-APS_FETCH_ROUNDS = 3
-APS_ROUND_BACKOFF = (2, 5)
+APS_REQUEST_POLICY = HttpRequestPolicy(
+    min_interval=10.0,
+    max_attempts=3,
+    backoff=(2.0, 5.0),
+)
 
 _cache: dict[str, dict[str, JournalEntry]] = {}
 
 
 def _is_blocked(html: str) -> bool:
-    head = html[:5000]
-    return "Just a moment" in head or "cf-chl" in head or "Cloudflare" in head
+    return is_blocked_response(html) or "Cloudflare" in html[:5000]
 
 
 def _fetch_html(url: str, required_selector: str = "") -> tuple[str, str]:
-    """Fetch APS HTML, trying several browser fingerprints."""
-    last_html = ""
-    last_status = None
-    last_error = None
-    for round_idx in range(APS_FETCH_ROUNDS):
-        for impersonate in APS_IMPERSONATIONS:
-            try:
-                resp = requests.get(url, impersonate=impersonate, timeout=30, allow_redirects=True)
-                last_html = resp.text
-                last_status = resp.status_code
-                if resp.status_code != 200 or _is_blocked(resp.text):
-                    logger.debug("APS %s via %s returned %s/block", url, impersonate, resp.status_code)
-                    continue
-                if required_selector:
-                    soup = BeautifulSoup(resp.text, "lxml")
-                    if not soup.select(required_selector):
-                        logger.debug("APS %s via %s missing %s", url, impersonate, required_selector)
-                        continue
-                logger.info("APS fetch succeeded via %s: %s", impersonate, url)
-                return resp.text, ""
-            except Exception as exc:
-                last_error = exc
-                logger.debug("APS fetch via %s failed for %s: %s", impersonate, url, exc)
-                time.sleep(1)
-        if round_idx < APS_FETCH_ROUNDS - 1:
-            delay = APS_ROUND_BACKOFF[min(round_idx, len(APS_ROUND_BACKOFF) - 1)]
-            logger.info("Retrying APS fetch round %d/%d in %ds: %s",
-                        round_idx + 2, APS_FETCH_ROUNDS, delay, url)
-            time.sleep(delay)
-
-    if last_html and _is_blocked(last_html):
-        return last_html, BLOCKED
-    if last_error:
-        logger.warning("APS fetch failed for %s: %s", url, last_error)
-    else:
-        logger.warning("APS fetch failed for %s with status %s", url, last_status)
-    return last_html, FETCH_FAILED
+    """Fetch APS HTML with a provider-wide 10-second request floor."""
+    result = fetch_html_resilient(
+        url,
+        required_selector=required_selector,
+        strategies=APS_FETCH_STRATEGIES,
+        request_policy=APS_REQUEST_POLICY,
+        provider="aps",
+        log_label="APS",
+    )
+    return result.html, result.outcome
 
 
 def _parse_aps_issue(
@@ -88,7 +60,7 @@ def _parse_aps_issue(
     entries: dict[str, JournalEntry] = {}
 
     for card in soup.select(".browse-result-card.issue"):
-        title_el = card.select_one('.title a[href*="/abstract/10.1103/"]')
+        title_el = card.select_one('.title a[href*="10.1103/"]')
         if not title_el:
             continue
         href = title_el.get("href", "")
@@ -225,7 +197,7 @@ def query_aps_issue_result(journal_slug: str, volume: str, issue: str,
                 "article_count": 0,
                 "selector_counts": {
                     ".browse-result-card.issue": len(soup.select(".browse-result-card.issue")),
-                    ".title a": len(soup.select('.title a[href*="/abstract/10.1103/"]')),
+                    ".title a": len(soup.select('.title a[href*="10.1103/"]')),
                 },
             },
             html=html,

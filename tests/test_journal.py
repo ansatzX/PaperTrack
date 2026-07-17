@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from papertrack.cli import _journal_output_root
 from papertrack.journal_entry import JournalEntry
 from papertrack.source_policy import SourcePolicy
@@ -359,6 +361,35 @@ def test_parse_aps_issue_supports_legacy_h4_titles():
         "François Impens",
     ]
     assert entry.pages == "270401"
+
+
+def test_parse_aps_historical_issue_fixtures():
+    from papertrack.aps_fetch import _parse_aps_issue
+
+    fixture_dir = Path(__file__).parent / "fixtures" / "aps"
+    issue_127 = _parse_aps_issue(
+        (fixture_dir / "prl-127-27.html").read_text(encoding="utf-8"),
+        "prl",
+        "Physical Review Letters",
+        "127",
+        "27",
+    )
+    issue_129 = _parse_aps_issue(
+        (fixture_dir / "prl-129-27.html").read_text(encoding="utf-8"),
+        "prl",
+        "Physical Review Letters",
+        "129",
+        "27",
+    )
+
+    assert list(issue_127) == ["10.1103/PhysRevLett.127.270401"]
+    assert issue_127["10.1103/PhysRevLett.127.270401"].abstract == (
+        "Official historical issue summary."
+    )
+    assert list(issue_129) == ["10.1103/PhysRevLett.129.270402"]
+    assert issue_129["10.1103/PhysRevLett.129.270402"].title == (
+        "Certified Quantum Measurement"
+    )
 
 
 def test_crossref_fetch_year_uses_cursor_pagination(monkeypatch):

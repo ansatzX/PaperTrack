@@ -5,49 +5,26 @@ from __future__ import annotations
 from datetime import datetime
 import logging
 import re
-import time
 
 from bs4 import BeautifulSoup
-from curl_cffi import requests
+
+from .aps_fetch import APS_FETCH_STRATEGIES, APS_REQUEST_POLICY
+from .http_fetch import fetch_html_resilient
 
 logger = logging.getLogger(__name__)
 
 APS_BASE = "https://journals.aps.org"
 APS_ISSUES_URL = APS_BASE + "/{journal_slug}/issues"
 APS_VOLUME_URL = APS_BASE + "/{journal_slug}/issues/{volume}"
-APS_IMPERSONATIONS = (
-    "firefox",
-    "chrome136",
-    "safari",
-    "chrome131",
-    "chrome124",
-)
-APS_FETCH_ROUNDS = 3
-APS_ROUND_BACKOFF = (2, 5)
-
-
-def _is_blocked(html: str) -> bool:
-    head = html[:5000]
-    return "Just a moment" in head or "cf-chl" in head or "Cloudflare" in head
-
-
 def _scrape(url: str) -> str:
-    for round_idx in range(APS_FETCH_ROUNDS):
-        for impersonate in APS_IMPERSONATIONS:
-            try:
-                resp = requests.get(url, impersonate=impersonate, timeout=30, allow_redirects=True)
-                if resp.status_code == 200 and not _is_blocked(resp.text):
-                    logger.info("APS LOI fetch succeeded via %s: %s", impersonate, url)
-                    return resp.text
-            except Exception as exc:
-                logger.debug("APS LOI fetch via %s failed for %s: %s", impersonate, url, exc)
-                time.sleep(1)
-        if round_idx < APS_FETCH_ROUNDS - 1:
-            delay = APS_ROUND_BACKOFF[min(round_idx, len(APS_ROUND_BACKOFF) - 1)]
-            logger.info("Retrying APS LOI fetch round %d/%d in %ds: %s",
-                        round_idx + 2, APS_FETCH_ROUNDS, delay, url)
-            time.sleep(delay)
-    return ""
+    result = fetch_html_resilient(
+        url,
+        strategies=APS_FETCH_STRATEGIES,
+        request_policy=APS_REQUEST_POLICY,
+        provider="aps",
+        log_label="APS LOI",
+    )
+    return result.html if result.ok else ""
 
 
 def discover_issues_aps(
