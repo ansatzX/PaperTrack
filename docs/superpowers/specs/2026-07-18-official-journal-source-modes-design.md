@@ -52,10 +52,20 @@ variables directly.
 - The formal AIP issue URL defines issue membership and official DOI, title,
   author, volume, issue, page, and date metadata.
 - When an issue item exposes `data-articleid`, PaperTrack may request its
-  abstract from AIP's official `PlatformArticle/ArticleAbstractAjax` endpoint.
+  abstract from AIP's official journal-scoped endpoint, for example
+  `/aip/jcp/PlatformArticle/ArticleAbstractAjax`. The current unscoped
+  `/PlatformArticle/ArticleAbstractAjax` URL is not equivalent.
 - PaperTrack does not visit article detail pages.
 - Absence of an abstract control is distinct from an AJAX request failure and
   from an AJAX success response with no abstract.
+- Direct HTTP is attempted first. If the official issue page returns a
+  Cloudflare challenge, PaperTrack may make one headful Playwright fallback in
+  an Xvfb display. That browser load blocks images, fonts, and media, retains
+  scripts required by the publisher challenge, and is limited to the issue URL
+  plus its official abstract AJAX requests.
+- The browser context is reused for every abstract control in that issue and is
+  then closed. A successful issue result is cached, so the same run does not
+  repeat the browser challenge.
 
 ### APS
 
@@ -78,7 +88,8 @@ Publisher requests are bounded and observable.
   retry rounds.
 - Use at most three issue-page network attempts for transient failures.
 - Stop immediately on an identified challenge page unless the response supplies
-  a retry interval. Do not intensify requests to defeat a challenge.
+  a retry interval. AIP may make its single bounded browser fallback; other
+  providers do not intensify requests to defeat a challenge.
 - Honor `Retry-After`; otherwise use bounded exponential backoff.
 - Enforce a provider request interval. The initial floors are 1 second for ACS,
   10 seconds for APS, and 1 second for AIP. A larger configured interval wins.
@@ -138,7 +149,9 @@ fixture.
 2. ACS tests cover official issue extraction, challenge detection, bounded
    retries, and JCIM 66/12's two official entries without abstracts.
 3. AIP tests cover issue extraction, article-ID discovery, each abstract outcome,
-   sequential throttling, cache behavior, and no article-page requests.
+   sequential throttling, cache behavior, direct-HTTP-to-browser fallback,
+   journal-scoped AJAX URLs, blocked heavy browser assets, and no article-page
+   requests.
 4. APS tests parse both current `h3` and historical `h4` issue cards and verify
    the PRL 127/27 and 129/27 snapshots.
 5. Report tests prove failed official fetches preserve files and processed state.
