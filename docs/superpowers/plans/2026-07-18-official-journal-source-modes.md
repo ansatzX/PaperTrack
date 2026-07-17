@@ -14,7 +14,7 @@
 - `PAPERTRACK_CROSSREF_MODE=metadata` is enabled only by `run.sh`.
 - Invalid values stop execution with an actionable error.
 - CrossRef never adds/removes official issue members or replaces official DOI/title/author/volume/issue/page/date fields.
-- No adapter visits individual article pages; AIP may use its official issue-page abstract AJAX endpoint.
+- No adapter visits individual article pages; AIP may use its official issue-page abstract AJAX endpoint and one bounded Playwright/Xvfb fallback for a Cloudflare issue-page challenge.
 - Official failure does not write an empty report, erase a prior report, or mark an issue processed.
 - Requests are sequential, bounded, cached, and observable; challenge pages stop retries.
 - Tests do not require live publisher sites or Zotero.
@@ -144,18 +144,18 @@ class SourcePolicy:
 
 ---
 
-### Task 5: AIP Official Issue And Abstract AJAX
+### Task 5: AIP Official Issue, Browser Fallback, And Abstract AJAX
 
 **Files:** modify `src/papertrack/aip_fetch.py`; test `tests/test_journal.py`, `tests/test_adapter_result.py`, `tests/test_report.py`.
 
-**Interfaces:** Add `AipAbstractResult(abstract, outcome, status_code, message)` and return it from `_fetch_aip_abstract`; cache terminal results by official `articleId`.
+**Interfaces:** Add `AipAbstractResult(abstract, outcome, status_code, message)` and return it from `_fetch_aip_abstract`; cache terminal results by official `articleId`. Add an internal browser fallback that returns the official issue HTML and keeps one browser context for the issue's official abstract AJAX calls.
 
-- [ ] **Step 1: Add failing tests for official abstract success, control absent, empty response, blocked response, and transport failure. Each checks DOI, article ID, URL, status, and field.**
+- [ ] **Step 1: Add failing tests for official abstract success, control absent, empty response, blocked response, transport failure, and one challenge-triggered browser fallback. Each checks DOI, article ID, URL, status, and field.**
 - [ ] **Step 2: Add a failing session/cache test proving duplicate article IDs cause one AJAX request and no article-detail URL is requested.**
 - [ ] **Step 3: Run `pytest -q tests/test_journal.py tests/test_adapter_result.py -k aip` and observe RED.**
-- [ ] **Step 4: Reuse one AIP session, fetch the canonical issue URL first, use a legacy URL only for genuine 404, and enforce sequential 1-second issue/AJAX spacing with bounded attempts.**
+- [ ] **Step 4: Reuse one AIP HTTP session, fetch the canonical issue URL first, use a legacy URL only for genuine 404, and enforce sequential 1-second issue/AJAX spacing with bounded attempts. A challenge may trigger exactly one headful Playwright fallback under `xvfb-run`; block images/fonts/media, keep scripts/cookies, and allow only the issue URL plus journal-scoped `/aip/{journal}/PlatformArticle/ArticleAbstractAjax` calls. Do not use the browser for ACS or APS.**
 - [ ] **Step 5: Emit per-DOI diagnostics for every non-success outcome; never collapse all failures to an unclassified empty string.**
-- [ ] **Step 6: Verify blocked issue results are not cached and report/state preservation remains intact.**
+- [ ] **Step 6: Verify blocked issue results are not cached, browser fallback is attempted at most once per issue, journal-scoped AJAX is used, and report/state preservation remains intact.**
 - [ ] **Step 7: Run focused and full tests; commit `fix: make AIP issue and abstract failures explicit`.**
 
 ---
