@@ -10,6 +10,7 @@ T = TypeVar("T")
 SUCCESS = "success"
 PARTIAL = "partial"
 BLOCKED = "blocked"
+RATE_LIMITED = "rate_limited"
 FETCH_FAILED = "fetch_failed"
 PARSE_FAILED = "parse_failed"
 OFFICIAL_EMPTY_SUSPICIOUS = "official_empty_suspicious"

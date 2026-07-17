@@ -1,10 +1,8 @@
-"""Direct ACS journal TOC scraper using curl_cffi for Cloudflare bypass."""
+"""Direct ACS journal TOC scraper with resilient official-page fetching."""
 
 import logging
 import re
-import time
 
-from curl_cffi import requests
 from bs4 import BeautifulSoup
 
 from .adapter_result import (
@@ -15,14 +13,50 @@ from .adapter_result import (
     SUCCESS,
 )
 from .diagnostics import record_fetch_attempt
+from .http_fetch import (
+    CURL_IMPERSONATIONS,
+    HttpFetchResult,
+    fetch_html_resilient,
+    is_blocked_response,
+)
 from .journal_entry import JournalEntry
 
 logger = logging.getLogger(__name__)
 
 ACS_TOC_URL = "https://pubs.acs.org/toc/{journal_code}/{volume}/{issue}"
+ACS_HTTP_CLIENTS = (
+    "curl_cffi",
+    "cloudscraper",
+    "primp",
+    "tls_client",
+    "pyreqwest_impersonate",
+    "requests",
+)
+ACS_IMPERSONATIONS = CURL_IMPERSONATIONS
+ACS_FETCH_ROUNDS = 3
+ACS_ROUND_BACKOFF = (2, 5)
 
 # Per-issue cache to avoid re-scraping on repeated runs.
 _cache: dict[str, dict[str, JournalEntry]] = {}
+_last_fetch_result: HttpFetchResult | None = None
+
+
+def _is_blocked(html: str) -> bool:
+    return is_blocked_response(html)
+
+
+def _fetch_html(url: str) -> tuple[str, str, int | None]:
+    """Fetch ACS HTML through the shared HTTP-only strategy chain."""
+    global _last_fetch_result
+    _last_fetch_result = fetch_html_resilient(
+        url,
+        clients=ACS_HTTP_CLIENTS,
+        curl_impersonations=ACS_IMPERSONATIONS,
+        rounds=ACS_FETCH_ROUNDS,
+        backoff=ACS_ROUND_BACKOFF,
+        log_label="ACS",
+    )
+    return _last_fetch_result.html, _last_fetch_result.outcome, _last_fetch_result.status_code
 
 
 def _parse_acs_toc(html: str, journal_name: str) -> dict[str, JournalEntry]:
@@ -159,99 +193,75 @@ def query_acs_issue_result(journal_code: str, volume: str, issue: str,
 
     url = ACS_TOC_URL.format(journal_code=journal_code, volume=volume, issue=issue)
 
-    last_exc = None
-    last_outcome = FETCH_FAILED
-    last_message = "ACS issue page could not be fetched"
-    for attempt in range(3):
-        try:
-            logger.info("Scraping ACS TOC: %s", url)
-            resp = requests.get(url, impersonate="chrome124", timeout=30)
-            if "Just a moment" in resp.text:
-                logger.warning("Cloudflare block on attempt %d/3", attempt + 1)
-                last_outcome = BLOCKED
-                last_message = "ACS issue page returned a block page"
-                record_fetch_attempt(
-                    {
-                        "source_role": "authoritative",
-                        "source": "journal",
-                        "provider": "acs",
-                        "journal": journal_code,
-                        "volume": volume,
-                        "issue": issue,
-                        "url": url,
-                        "stage": "issue_page_fetch",
-                        "outcome": "blocked",
-                        "http_status": getattr(resp, "status_code", None),
-                        "block_markers": ["Just a moment"],
-                    },
-                    html=resp.text,
-                )
-                if attempt < 2:
-                    time.sleep((1, 2, 4)[attempt])
-                continue
-            entries = _parse_acs_toc(resp.text, journal_name)
-            if not entries:
-                record_fetch_attempt(
-                    {
-                        "source_role": "authoritative",
-                        "source": "journal",
-                        "provider": "acs",
-                        "journal": journal_code,
-                        "volume": volume,
-                        "issue": issue,
-                        "url": url,
-                        "stage": "issue_page_parse",
-                        "outcome": "official_empty_suspicious",
-                        "article_count": 0,
-                    },
-                    html=resp.text,
-                )
-                return AdapterResult(
-                    entries={},
-                    outcome=OFFICIAL_EMPTY_SUSPICIOUS,
-                    provider="acs",
-                    source="journal",
-                    message="ACS issue page parsed to zero official articles",
-                    metadata={"url": url},
-                )
-            _cache[cache_key] = entries
-            logger.info("ACS %s v%s i%s: %d articles scraped",
-                        journal_code, volume, issue, len(entries))
-            return AdapterResult(
-                entries=entries,
-                outcome=SUCCESS,
-                provider="acs",
-                source="journal",
-                metadata={"url": url},
-            )
-        except Exception as e:
-            last_exc = e
-            last_outcome = FETCH_FAILED
-            last_message = repr(e)
-            logger.warning("ACS fetch attempt %d/3 failed: %s", attempt + 1, e)
-            if attempt == 2:
-                record_fetch_attempt({
-                    "source_role": "authoritative",
-                    "source": "journal",
-                    "provider": "acs",
-                    "journal": journal_code,
-                    "volume": volume,
-                    "issue": issue,
-                    "url": url,
-                    "stage": "issue_page_fetch",
-                    "outcome": "fetch_failed",
-                    "exception": repr(e),
-                })
-            if attempt < 2:
-                time.sleep((1, 2, 4)[attempt])
+    logger.info("Scraping ACS TOC: %s", url)
+    html, failure_outcome, status_code = _fetch_html(url)
+    if not html or failure_outcome:
+        outcome = failure_outcome or FETCH_FAILED
+        fetch_result = _last_fetch_result
+        record_fetch_attempt(
+            {
+                "source_role": "authoritative",
+                "source": "journal",
+                "provider": "acs",
+                "journal": journal_code,
+                "volume": volume,
+                "issue": issue,
+                "url": url,
+                "stage": "issue_page_fetch",
+                "outcome": outcome,
+                "http_status": status_code,
+                "block_markers": ["Just a moment"] if outcome == BLOCKED else [],
+                "client": fetch_result.client if fetch_result else "",
+                "variant": fetch_result.variant if fetch_result else "",
+                "attempt_count": len(fetch_result.history) if fetch_result else 0,
+                "fetch_history": fetch_result.history[-20:] if fetch_result else [],
+                "message": "ACS issue page could not be fetched",
+            },
+            html=html or None,
+        )
+        return AdapterResult(
+            entries={},
+            outcome=outcome,
+            provider="acs",
+            source="journal",
+            message="ACS issue page could not be fetched",
+            metadata={"url": url},
+        )
 
-    logger.error("ACS fetch failed after 3 attempts: %s", last_exc)
+    entries = _parse_acs_toc(html, journal_name)
+    if not entries:
+        record_fetch_attempt(
+            {
+                "source_role": "authoritative",
+                "source": "journal",
+                "provider": "acs",
+                "journal": journal_code,
+                "volume": volume,
+                "issue": issue,
+                "url": url,
+                "stage": "issue_page_parse",
+                "outcome": "official_empty_suspicious",
+                "article_count": 0,
+            },
+            html=html,
+        )
+        return AdapterResult(
+            entries={},
+            outcome=OFFICIAL_EMPTY_SUSPICIOUS,
+            provider="acs",
+            source="journal",
+            message="ACS issue page parsed to zero official articles",
+            metadata={"url": url},
+        )
+
+    _cache[cache_key] = entries
+    logger.info("ACS %s v%s i%s: %d articles scraped",
+                journal_code, volume, issue, len(entries))
     return AdapterResult(
-        entries={},
-        outcome=last_outcome,
+        entries=entries,
+        outcome=SUCCESS,
         provider="acs",
         source="journal",
-        message=last_message,
         metadata={"url": url},
     )
 

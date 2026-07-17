@@ -5,7 +5,7 @@ from urllib.error import URLError
 from urllib.parse import urlencode
 import json
 
-from .adapter_result import AdapterResult, SUCCESS
+from .adapter_result import AdapterResult, FETCH_FAILED, SUCCESS
 from .diagnostics import record_fetch_attempt
 from .journal_entry import JournalEntry
 
@@ -154,7 +154,7 @@ def query_journal_issue_result(issn: str, volume: str, issue: str,
 def _fill_missing_abstracts_from_crossref(entries: dict[str, JournalEntry],
                                           issn: str,
                                           year: int | None = None) -> int:
-    """Fill missing abstracts by DOI without changing AIP issue membership."""
+    """Fill missing abstracts by DOI without changing official issue membership."""
     if year is None:
         for entry in entries.values():
             if entry.date:
@@ -185,175 +185,100 @@ def _fill_missing_abstracts_from_crossref(entries: dict[str, JournalEntry],
     return filled
 
 
+def _record_crossref_abstract_fill(
+    official: AdapterResult[dict[str, JournalEntry]],
+    issn: str,
+    year: int | None,
+    journal_slug: str,
+    volume: str,
+    issue: str,
+) -> None:
+    filled = _fill_missing_abstracts_from_crossref(official.entries, issn, year)
+    if not filled:
+        return
+    record_fetch_attempt({
+        "source_role": "third_party_metadata",
+        "source": "journal",
+        "provider": "crossref",
+        "journal": journal_slug,
+        "volume": volume,
+        "issue": issue,
+        "stage": "abstract_fill",
+        "outcome": "success",
+        "fallback_used": ["crossref_abstract_fill"],
+        "filled_abstracts": filled,
+    })
+    official.metadata["crossref_filled_abstracts"] = filled
+
+
+def _official_fetch_failed(provider: str, journal: str, message: str) -> AdapterResult[dict[str, JournalEntry]]:
+    return AdapterResult(
+        entries={},
+        outcome=FETCH_FAILED,
+        provider=provider,
+        source="journal",
+        message=f"{journal}: {message}",
+    )
+
+
 def query_journal_issue_full_result(issn: str, volume: str, issue: str,
                                     journal_name: str = "", year: int | None = None,
                                     acs_code: str = "", provider: str = "",
                                     journal_slug: str = "") -> AdapterResult[dict[str, JournalEntry]]:
-    """Fetch articles for a journal volume/issue, preferring ACS direct scraping.
+    """Fetch articles for a journal volume/issue.
 
-    Falls back to CrossRef when ACS scraping fails or acs_code is not provided.
+    Official journal providers define issue membership. CrossRef may fill
+    missing abstracts by DOI, but only after an official issue fetch succeeds.
     """
     if acs_code:
         try:
             from .acs_fetch import query_acs_issue_result
             official = query_acs_issue_result(acs_code, volume, issue, journal_name)
             if official.entries:
+                _record_crossref_abstract_fill(
+                    official, issn, year, journal_slug or journal_name or issn, volume, issue
+                )
                 return official
-            logger.info("ACS scraping returned %s, falling back to CrossRef", official.outcome)
-            record_fetch_attempt({
-                "source_role": "fallback",
-                "source": "journal",
-                "provider": "crossref",
-                "journal": journal_slug or journal_name or issn,
-                "volume": volume,
-                "issue": issue,
-                "stage": "issue_membership_fallback",
-                "outcome": "success",
-                "fallback_used": ["crossref_issue_membership"],
-                "official_outcome": official.outcome,
-                "message": "ACS official source did not produce entries; using CrossRef fallback",
-            })
+            logger.warning("ACS scraping returned %s; not using CrossRef for issue membership", official.outcome)
+            return official
         except ImportError:
-            logger.warning("curl_cffi not available for ACS scraping, falling back to CrossRef")
-            record_fetch_attempt({
-                "source_role": "fallback",
-                "source": "journal",
-                "provider": "crossref",
-                "journal": journal_slug or journal_name or issn,
-                "volume": volume,
-                "issue": issue,
-                "stage": "issue_membership_fallback",
-                "outcome": "success",
-                "fallback_used": ["crossref_issue_membership"],
-                "message": "ACS scraper unavailable; using CrossRef fallback",
-            })
-        except Exception:
-            logger.exception("ACS scraping failed, falling back to CrossRef")
-            record_fetch_attempt({
-                "source_role": "fallback",
-                "source": "journal",
-                "provider": "crossref",
-                "journal": journal_slug or journal_name or issn,
-                "volume": volume,
-                "issue": issue,
-                "stage": "issue_membership_fallback",
-                "outcome": "success",
-                "fallback_used": ["crossref_issue_membership"],
-                "message": "ACS scraper failed; using CrossRef fallback",
-            })
+            logger.warning("ACS scraper unavailable; not using CrossRef for issue membership")
+            return _official_fetch_failed("acs", journal_slug or journal_name or issn, "ACS scraper unavailable")
+        except Exception as exc:
+            logger.exception("ACS scraping failed; not using CrossRef for issue membership")
+            return _official_fetch_failed("acs", journal_slug or journal_name or issn, repr(exc))
 
     if provider == "aip" and journal_slug:
         try:
             from .aip_fetch import query_aip_issue_result
             official = query_aip_issue_result(journal_slug, volume, issue, journal_name)
             if official.entries:
-                filled = _fill_missing_abstracts_from_crossref(official.entries, issn, year)
-                if filled:
-                    record_fetch_attempt({
-                        "source_role": "third_party_metadata",
-                        "source": "journal",
-                        "provider": "crossref",
-                        "journal": journal_slug,
-                        "volume": volume,
-                        "issue": issue,
-                        "stage": "abstract_fill",
-                        "outcome": "success",
-                        "fallback_used": ["crossref_abstract_fill"],
-                        "filled_abstracts": filled,
-                    })
-                    official.metadata["crossref_filled_abstracts"] = filled
+                _record_crossref_abstract_fill(official, issn, year, journal_slug, volume, issue)
                 return official
-            logger.info("AIP scraping returned %s, falling back to CrossRef", official.outcome)
-            record_fetch_attempt({
-                "source_role": "fallback",
-                "source": "journal",
-                "provider": "crossref",
-                "journal": journal_slug,
-                "volume": volume,
-                "issue": issue,
-                "stage": "issue_membership_fallback",
-                "outcome": "success",
-                "fallback_used": ["crossref_issue_membership"],
-                "official_outcome": official.outcome,
-                "message": "AIP official source did not produce entries; using CrossRef fallback",
-            })
+            logger.warning("AIP scraping returned %s; not using CrossRef for issue membership", official.outcome)
+            return official
         except ImportError:
-            logger.warning("curl_cffi not available, falling back to CrossRef")
-            record_fetch_attempt({
-                "source_role": "fallback",
-                "source": "journal",
-                "provider": "crossref",
-                "journal": journal_slug or journal_name or issn,
-                "volume": volume,
-                "issue": issue,
-                "stage": "issue_membership_fallback",
-                "outcome": "success",
-                "fallback_used": ["crossref_issue_membership"],
-                "message": "AIP scraper unavailable; using CrossRef fallback",
-            })
-        except Exception:
-            logger.exception("AIP scraping failed, falling back to CrossRef")
-            record_fetch_attempt({
-                "source_role": "fallback",
-                "source": "journal",
-                "provider": "crossref",
-                "journal": journal_slug or journal_name or issn,
-                "volume": volume,
-                "issue": issue,
-                "stage": "issue_membership_fallback",
-                "outcome": "success",
-                "fallback_used": ["crossref_issue_membership"],
-                "message": "AIP scraper failed; using CrossRef fallback",
-            })
+            logger.warning("AIP scraper unavailable; not using CrossRef for issue membership")
+            return _official_fetch_failed("aip", journal_slug or journal_name or issn, "AIP scraper unavailable")
+        except Exception as exc:
+            logger.exception("AIP scraping failed; not using CrossRef for issue membership")
+            return _official_fetch_failed("aip", journal_slug or journal_name or issn, repr(exc))
 
     if provider == "aps" and journal_slug:
         try:
             from .aps_fetch import query_aps_issue_result
             official = query_aps_issue_result(journal_slug, volume, issue, journal_name)
             if official.entries:
+                _record_crossref_abstract_fill(official, issn, year, journal_slug, volume, issue)
                 return official
-            logger.info("APS scraping returned %s, falling back to CrossRef", official.outcome)
-            record_fetch_attempt({
-                "source_role": "fallback",
-                "source": "journal",
-                "provider": "crossref",
-                "journal": journal_slug,
-                "volume": volume,
-                "issue": issue,
-                "stage": "issue_membership_fallback",
-                "outcome": "success",
-                "fallback_used": ["crossref_issue_membership"],
-                "official_outcome": official.outcome,
-                "message": "APS official source did not produce entries; using CrossRef fallback",
-            })
+            logger.warning("APS scraping returned %s; not using CrossRef for issue membership", official.outcome)
+            return official
         except ImportError:
-            logger.warning("APS scraper unavailable, falling back to CrossRef")
-            record_fetch_attempt({
-                "source_role": "fallback",
-                "source": "journal",
-                "provider": "crossref",
-                "journal": journal_slug or journal_name or issn,
-                "volume": volume,
-                "issue": issue,
-                "stage": "issue_membership_fallback",
-                "outcome": "success",
-                "fallback_used": ["crossref_issue_membership"],
-                "message": "APS scraper unavailable; using CrossRef fallback",
-            })
-        except Exception:
-            logger.exception("APS scraping failed, falling back to CrossRef")
-            record_fetch_attempt({
-                "source_role": "fallback",
-                "source": "journal",
-                "provider": "crossref",
-                "journal": journal_slug or journal_name or issn,
-                "volume": volume,
-                "issue": issue,
-                "stage": "issue_membership_fallback",
-                "outcome": "success",
-                "fallback_used": ["crossref_issue_membership"],
-                "message": "APS scraper failed; using CrossRef fallback",
-            })
+            logger.warning("APS scraper unavailable; not using CrossRef for issue membership")
+            return _official_fetch_failed("aps", journal_slug or journal_name or issn, "APS scraper unavailable")
+        except Exception as exc:
+            logger.exception("APS scraping failed; not using CrossRef for issue membership")
+            return _official_fetch_failed("aps", journal_slug or journal_name or issn, repr(exc))
 
     return query_journal_issue_result(issn, volume, issue, journal_name, year)
 

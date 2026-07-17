@@ -17,6 +17,7 @@ REPAIRS_FILE = "repairs.jsonl"
 
 ABNORMAL_OUTCOMES = {
     "blocked",
+    "rate_limited",
     "fetch_failed",
     "parse_failed",
     "official_empty_suspicious",

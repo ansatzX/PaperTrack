@@ -1,5 +1,6 @@
 from papertrack.migration import (
     CURRENT_JOURNAL_FORMAT,
+    classify_report_file,
     migrate_report_file,
     migrate_reports,
     preserve_task_state,
@@ -76,6 +77,41 @@ def test_migration_validation_failure_restores_backup(tmp_path, monkeypatch):
 
     assert result.status == "failed"
     assert report_file.read_text(encoding="utf-8") == original
+
+
+def test_current_journal_report_with_bad_issue_metadata_is_corrupt(tmp_path):
+    report_file = tmp_path / "acs" / "jcim" / "66" / "11.md"
+    report_file.parent.mkdir(parents=True)
+    report_file.write_text(
+        """---
+papertrack_format: journal-v2
+papertrack_source: journal
+papertrack_provider: acs
+papertrack_journal: jcim
+papertrack_volume: "66"
+papertrack_issue: "11"
+---
+
+```dataview
+TASK
+from #jcim-v66-i11
+```
+
+## collected
+
+## not collected
+
+### 10.1021/civ066i011_2087001
+
+Title:  Issue Editorial Masthead
+""",
+        encoding="utf-8",
+    )
+
+    result = classify_report_file(str(report_file), data_dir=str(tmp_path))
+
+    assert result.status == "corrupt"
+    assert result.source == "journal"
 
 
 def test_migrate_reports_scans_markdown_and_skips_backups(tmp_path):

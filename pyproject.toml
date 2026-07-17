@@ -22,6 +22,12 @@ dependencies = [
 dev = [
     "pytest>=7.0.1",
 ]
+http-fallbacks = [
+    "cloudscraper>=1.2.71",
+    "primp>=1.3.1",
+    "tls-client>=1.0.1",
+    "pyreqwest-impersonate>=0.5.5",
+]
 
 [project.scripts]
 papertrack = "papertrack.cli:main"

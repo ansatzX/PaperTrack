@@ -1,13 +1,15 @@
 import re
 import time
 import logging
+import os
 from copy import deepcopy
+from dataclasses import dataclass
 from urllib.parse import urlencode
 
 import feedparser
 from bs4 import BeautifulSoup
 
-from .adapter_result import AdapterResult, FETCH_FAILED, PARSE_FAILED, SUCCESS
+from .adapter_result import AdapterResult, FETCH_FAILED, PARSE_FAILED, RATE_LIMITED, SUCCESS
 from .arxiv_entry import ArxivEntry
 from .diagnostics import record_fetch_attempt
 
@@ -16,6 +18,16 @@ logger = logging.getLogger(__name__)
 SEARCH_URL = "https://arxiv.org/search/advanced?"
 MAX_RETRIES = 3
 RETRY_BACKOFF = (1, 2, 4)
+RATE_LIMIT_BACKOFF = (30, 60, 120)
+_last_request_at = 0.0
+
+
+@dataclass
+class _PageFetchResult:
+    results: object | None
+    outcome: str = SUCCESS
+    status_code: int | None = None
+    message: str = ""
 
 
 def _parse_arxiv_result(res) -> ArxivEntry | None:
@@ -52,8 +64,9 @@ def _parse_arxiv_result(res) -> ArxivEntry | None:
 
     for tag in aso.find_all(class_="tag"):
         tag_classes = tag.get("class", [])
-        # Subject tags have is-link (primary category) or is-grey (cross-list) classes.
-        if "is-link" in tag_classes or "is-grey" in tag_classes:
+        # Subject tags have is-link (primary), is-grey (cross-list), or
+        # search-hit (the category that matched the current query).
+        if any(cls in tag_classes for cls in ("is-link", "is-grey", "search-hit")):
             subjects.append(tag.text.strip())
         # External DOI tags: <span class="tag is-light is-size-7"> with a child <a> link.
         # arXiv updates these after the paper is formally published.
@@ -118,18 +131,23 @@ def query_arxiv_result(date_from_date: str = "2025-02-01",
     while True:
         url = _advanced_search_url(query_args, start)
         urls.append(url)
-        results = _fetch_arxiv_page(url)
-        if results is None:
+        page_fetch = _fetch_arxiv_page(url)
+        if page_fetch.results is None:
             return AdapterResult(
                 entries={},
-                outcome=FETCH_FAILED,
+                outcome=page_fetch.outcome,
                 provider="arxiv",
                 source="arxiv",
-                message=f"arXiv advanced search fetch failed at start={start}",
-                metadata={"url": url, "urls": urls, "start": start},
+                message=page_fetch.message or f"arXiv advanced search fetch failed at start={start}",
+                metadata={
+                    "url": url,
+                    "urls": urls,
+                    "start": start,
+                    "http_status": page_fetch.status_code,
+                },
             )
 
-        page_entries = _parse_arxiv_page(results, url)
+        page_entries = _parse_arxiv_page(page_fetch.results, url)
         if page_entries is None:
             return AdapterResult(
                 entries={},
@@ -175,29 +193,106 @@ def _page_size(query_args: dict) -> int:
     return page_size if page_size > 0 else 200
 
 
-def _fetch_arxiv_page(url: str):
+def _fetch_arxiv_page(url: str) -> _PageFetchResult:
     # arXiv sometimes returns transient errors under load; retry with backoff.
     last_exc = None
+    last_status = None
+    last_outcome = FETCH_FAILED
+    last_message = "arXiv advanced search fetch failed"
     for attempt in range(MAX_RETRIES):
         try:
-            return feedparser.parse(url)
+            _throttle_arxiv_request()
+            parsed = feedparser.parse(url)
+            status = getattr(parsed, "status", None)
+            last_status = status
+            if status == 429:
+                last_outcome = RATE_LIMITED
+                last_message = "arXiv advanced search returned HTTP 429"
+                if attempt < MAX_RETRIES - 1:
+                    delay = _rate_limit_delay(attempt)
+                    logger.warning(
+                        "arXiv rate limited request attempt %d/%d. Retrying in %ds...",
+                        attempt + 1,
+                        MAX_RETRIES,
+                        delay,
+                    )
+                    time.sleep(delay)
+                continue
+            if status is not None and int(status) >= 400:
+                last_outcome = FETCH_FAILED
+                last_message = f"arXiv advanced search returned HTTP {status}"
+                if attempt < MAX_RETRIES - 1:
+                    delay = RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)]
+                    logger.warning(
+                        "arXiv returned HTTP %s on attempt %d/%d. Retrying in %ds...",
+                        status,
+                        attempt + 1,
+                        MAX_RETRIES,
+                        delay,
+                    )
+                    time.sleep(delay)
+                continue
+            return _PageFetchResult(results=parsed, status_code=status)
         except Exception as e:
             last_exc = e
+            last_message = repr(e)
             if attempt < MAX_RETRIES - 1:
                 delay = RETRY_BACKOFF[attempt]
                 logger.warning("arXiv fetch attempt %d/3 failed: %s. Retrying in %ds...", attempt + 1, e, delay)
                 time.sleep(delay)
-    logger.error("arXiv fetch failed after %d attempts: %s", MAX_RETRIES, last_exc)
+    logger.error("arXiv fetch failed after %d attempts: %s", MAX_RETRIES, last_message)
     record_fetch_attempt({
         "source_role": "authoritative",
         "source": "arxiv",
         "provider": "arxiv",
         "url": url,
         "stage": "advanced_search_fetch",
-        "outcome": "fetch_failed",
+        "outcome": last_outcome,
+        "http_status": last_status,
         "exception": repr(last_exc),
+        "message": last_message,
     })
-    return None
+    return _PageFetchResult(
+        results=None,
+        outcome=last_outcome,
+        status_code=last_status,
+        message=last_message,
+    )
+
+
+def _throttle_arxiv_request() -> None:
+    delay = _float_env("PAPERTRACK_ARXIV_REQUEST_DELAY", 0.0)
+    if delay <= 0:
+        return
+    global _last_request_at
+    now = time.monotonic()
+    elapsed = now - _last_request_at
+    if _last_request_at and elapsed < delay:
+        time.sleep(delay - elapsed)
+    _last_request_at = time.monotonic()
+
+
+def _rate_limit_delay(attempt: int) -> int:
+    raw = os.environ.get("PAPERTRACK_ARXIV_RATE_LIMIT_BACKOFF", "").strip()
+    if raw:
+        try:
+            values = [int(item.strip()) for item in raw.split(",") if item.strip()]
+            if values:
+                return values[min(attempt, len(values) - 1)]
+        except ValueError:
+            logger.warning("Invalid PAPERTRACK_ARXIV_RATE_LIMIT_BACKOFF=%r; using defaults", raw)
+    return RATE_LIMIT_BACKOFF[min(attempt, len(RATE_LIMIT_BACKOFF) - 1)]
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; using %s", name, raw, default)
+        return default
 
 
 def _parse_arxiv_page(results, url: str) -> dict[str, ArxivEntry] | None:

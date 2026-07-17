@@ -86,9 +86,18 @@ def build_query_args() -> dict[str, dict[str, str]]:
 
     chem_ph = deepcopy(quant_ph)
     chem_ph["classification-physics_archives"] = "physics"
-    chem_ph["terms-1-operator"] = "AND"
-    chem_ph["terms-1-term"] = "physics.chem-ph"
-    chem_ph["terms-1-field"] = "all"
+    chem_ph["terms-0-term"] = "physics.chem-ph"
+    chem_ph["terms-0-field"] = "cross_list_category"
+
+    cs_ai = deepcopy(quant_ph)
+    cs_ai.pop("classification-physics", None)
+    cs_ai.pop("classification-physics_archives", None)
+    cs_ai["terms-0-term"] = "cs.AI"
+    cs_ai["terms-0-field"] = "cross_list_category"
+    cs_ai["classification-computer_science"] = "y"
+
+    cs_lg = deepcopy(cs_ai)
+    cs_lg["terms-0-term"] = "cs.LG"
 
     return {
         "quant-ph": quant_ph,
@@ -97,6 +106,8 @@ def build_query_args() -> dict[str, dict[str, str]]:
         "hep-ph": hep_ph,
         "hep-th": hep_th,
         "chem-ph": chem_ph,
+        "cs.AI": cs_ai,
+        "cs.LG": cs_lg,
     }
 
 

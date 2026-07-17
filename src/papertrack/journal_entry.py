@@ -68,7 +68,11 @@ class JournalEntry:
     @staticmethod
     def is_non_article(doi: str, title: str = "") -> bool:
         """Filter out issue metadata and correction notices."""
-        if re.search(r"ctv\d{3}i\d{3}", doi):
+        if re.search(r"(?:ctv|civ)\d{3}i\d{3}", doi):
+            return True
+        if re.search(r"issue\s+(?:editorial\s+masthead|publication\s+information)", title, re.IGNORECASE):
+            return True
+        if re.search(r"\beditorial\s+masthead\b", title, re.IGNORECASE):
             return True
         return bool(re.match(r"\s*erratum\b", title, re.IGNORECASE))
 

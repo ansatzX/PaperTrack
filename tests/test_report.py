@@ -126,6 +126,68 @@ Title:  Test article
         assert parse_journal_report(str(report_file)) == ["10.1063/example"]
         assert _is_missing_or_corrupt_journal_report(str(tmp_path), "jcp", "164", "16") is False
 
+    def test_issue_metadata_journal_report_is_rebuild_candidate(self, tmp_path):
+        report_file = tmp_path / "jcim" / "66" / "11.md"
+        report_file.parent.mkdir(parents=True)
+        report_file.write_text(
+            """---
+papertrack_format: journal-v2
+papertrack_source: journal
+papertrack_provider: acs
+papertrack_journal: jcim
+papertrack_volume: "66"
+papertrack_issue: "11"
+---
+
+```dataview
+TASK
+from #jcim-v66-i11
+```
+
+## collected
+
+## not collected
+
+### 10.1021/civ066i011_2087001
+
+Title:  Issue Editorial Masthead
+""",
+            encoding="utf-8",
+        )
+
+        assert _is_missing_or_corrupt_journal_report(str(tmp_path), "jcim", "66", "11") is True
+
+    def test_aps_crossref_fallback_report_is_rebuild_candidate(self, tmp_path):
+        report_file = tmp_path / "prl" / "127" / "27.md"
+        report_file.parent.mkdir(parents=True)
+        report_file.write_text(
+            """---
+papertrack_format: journal-v2
+papertrack_source: journal
+papertrack_provider: aps
+papertrack_journal: prl
+papertrack_volume: "127"
+papertrack_issue: "27"
+---
+
+```dataview
+TASK
+from #prl-v127-i27
+```
+
+## collected
+
+## not collected
+
+### 10.1103/physrevlett.127.270401
+
+Title:  Raw <mml:math></mml:math> title
+""",
+            encoding="utf-8",
+        )
+
+        assert _is_missing_or_corrupt_journal_report(str(tmp_path), "prl", "127", "27") is True
+
     def test_auto_rebuilds_processed_issue_when_file_missing(self, tmp_path, monkeypatch):
         from papertrack import crossref_loi, report
 
@@ -457,6 +519,23 @@ class TestParseArxivResult:
         assert entry.external_doi_url == "https://doi.org/10.1038/s42005-025-01947-z"
         assert entry.subjects == ["quant-ph"]
 
+    def test_extracts_search_hit_subject_tags(self):
+        html = """<li class="arxiv-result">
+ <p class="list-title is-inline-block"><a href="https://arxiv.org/abs/2606.01694">arXiv:2606.01694</a></p>
+ <p class="title is-5 mathjax">Test</p>
+ <p class="authors"><a href="...">Author</a></p>
+ <p class="abstract mathjax"><span class="abstract-full">Abs.</span></p>
+ <span class="tag is-small is-link tooltip is-tooltip-top">cs.CV</span>
+ <span class="tag is-small search-hit tooltip is-tooltip-top">cs.AI</span>
+ <span class="tag is-small is-grey tooltip is-tooltip-top">cs.LG</span>
+</li>"""
+
+        soup = BeautifulSoup(html, "lxml")
+        entry = _parse_arxiv_result(soup.find("li"))
+
+        assert entry is not None
+        assert entry.subjects == ["cs.CV", "cs.AI", "cs.LG"]
+
 
 class TestZoteroQuery:
     """Test ZoteroQuery index building and matching logic"""
@@ -612,6 +691,62 @@ def test_filter_arxiv_days_to_md_processes_exact_days(tmp_path, monkeypatch):
     assert (tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "09.md").exists()
 
 
+def test_filter_arxiv_days_to_md_skips_existing_written_day(tmp_path, monkeypatch):
+    from papertrack import report
+    from papertrack.adapter_result import AdapterResult, SUCCESS
+    from papertrack.arxiv_entry import ArxivEntry
+
+    existing = tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "08.md"
+    existing.parent.mkdir(parents=True)
+    existing.write_text(
+        """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+---
+
+```dataview
+TASK
+from #quant-ph-2026-06-08
+```
+
+## collected
+
+### arXiv:2606.00000
+
+Title:  Existing paper
+
+## not collected
+""",
+        encoding="utf-8",
+    )
+
+    calls = []
+
+    def fake_query(date_from_date, date_to_date, query_args):
+        calls.append((date_from_date, date_to_date))
+        return AdapterResult(entries={
+            "arXiv:2606.00001": ArxivEntry(
+                arxiv_id="arXiv:2606.00001",
+                title=f"Paper for {date_from_date}",
+                authors=["A Author"],
+                abstract="Abstract text",
+            )
+        }, outcome=SUCCESS, provider="arxiv", source="arxiv")
+
+    monkeypatch.setattr(report, "query_arxiv_result", fake_query)
+
+    report.filter_arxiv_days_to_md(
+        days=[date(2026, 6, 8), date(2026, 6, 9)],
+        md_folder=str(tmp_path / "arxiv" / "quant-ph"),
+        query_args={"size": "200"},
+        category="quant-ph",
+        zotero=None,
+    )
+
+    assert calls == [("2026-06-09", "2026-06-10")]
+    assert (tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "09.md").exists()
+
+
 def test_filter_arxiv_days_to_md_skips_empty_days(tmp_path, monkeypatch):
     from papertrack import report
     from papertrack.adapter_result import AdapterResult, SUCCESS
@@ -636,3 +771,34 @@ def test_filter_arxiv_days_to_md_skips_empty_days(tmp_path, monkeypatch):
     )
 
     assert not (tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "09.md").exists()
+
+
+def test_filter_arxiv_days_to_md_stops_on_rate_limit(tmp_path, monkeypatch):
+    import pytest
+    from papertrack import report
+    from papertrack.adapter_result import AdapterResult, RATE_LIMITED
+
+    calls = []
+
+    def fake_query(date_from_date, date_to_date, query_args):
+        calls.append(date_from_date)
+        return AdapterResult(
+            entries={},
+            outcome=RATE_LIMITED,
+            provider="arxiv",
+            source="arxiv",
+            message="HTTP 429",
+        )
+
+    monkeypatch.setattr(report, "query_arxiv_result", fake_query)
+
+    with pytest.raises(RuntimeError, match="arXiv rate limited"):
+        report.filter_arxiv_days_to_md(
+            days=[date(2026, 6, 8), date(2026, 6, 9)],
+            md_folder=str(tmp_path / "arxiv" / "quant-ph"),
+            query_args={"size": "200"},
+            category="quant-ph",
+            zotero=None,
+        )
+
+    assert calls == ["2026-06-08"]

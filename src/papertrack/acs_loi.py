@@ -4,33 +4,61 @@ import logging
 import re
 import time
 
-from curl_cffi import requests
 from bs4 import BeautifulSoup
+
+from .adapter_result import FETCH_FAILED
+from .diagnostics import record_fetch_attempt
+from .http_fetch import CURL_IMPERSONATIONS, fetch_html_resilient
 
 logger = logging.getLogger(__name__)
 
 ACS_BASE = "https://pubs.acs.org"
 ACS_LOI_URL = ACS_BASE + "/loi/{acs_code}"
+ACS_HTTP_CLIENTS = (
+    "curl_cffi",
+    "cloudscraper",
+    "primp",
+    "tls_client",
+    "pyreqwest_impersonate",
+    "requests",
+)
+ACS_FETCH_ROUNDS = 3
+ACS_ROUND_BACKOFF = (2, 5)
 
 
 def _scrape(url: str) -> str:
-    """Fetch a page via curl_cffi (Chrome impersonation), return HTML text."""
-    last_exc = None
-    for attempt in range(3):
-        try:
-            resp = requests.get(url, impersonate="chrome124", timeout=30)
-            if "Just a moment" in resp.text:
-                logger.warning("Cloudflare block on %s attempt %d/3", url, attempt + 1)
-                if attempt < 2:
-                    time.sleep((1, 2, 4)[attempt])
-                continue
-            return resp.text
-        except Exception as e:
-            last_exc = e
-            logger.warning("Fetch %s attempt %d/3 failed: %s", url, attempt + 1, e)
-            if attempt < 2:
-                time.sleep((1, 2, 4)[attempt])
-    raise RuntimeError(f"Failed to fetch {url} after 3 attempts: {last_exc}")
+    """Fetch an ACS LOI page through the HTTP-only strategy chain."""
+    result = fetch_html_resilient(
+        url,
+        clients=ACS_HTTP_CLIENTS,
+        curl_impersonations=CURL_IMPERSONATIONS,
+        rounds=ACS_FETCH_ROUNDS,
+        backoff=ACS_ROUND_BACKOFF,
+        log_label="ACS LOI",
+    )
+    if result.ok:
+        return result.html
+
+    journal_match = re.search(r"/loi/([^/?#]+)", url)
+    record_fetch_attempt(
+        {
+            "source_role": "authoritative",
+            "source": "journal",
+            "provider": "acs",
+            "journal": journal_match.group(1) if journal_match else "",
+            "url": url,
+            "stage": "loi_fetch",
+            "outcome": result.outcome or FETCH_FAILED,
+            "http_status": result.status_code,
+            "client": result.client,
+            "variant": result.variant,
+            "attempt_count": len(result.history),
+            "fetch_history": result.history[-20:],
+            "message": "ACS list-of-issues page could not be fetched",
+        },
+        html=result.html or None,
+    )
+    raise RuntimeError(f"Failed to fetch {url}: {result.outcome or FETCH_FAILED}")
 
 
 def _extract_year(url: str) -> int:

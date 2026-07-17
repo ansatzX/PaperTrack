@@ -326,6 +326,40 @@ def test_parse_aps_issue_extracts_journal_entries():
     assert entry.abstract == "A textbook rule breaks down for high-speed deformations."
 
 
+def test_parse_aps_issue_supports_legacy_h4_titles():
+    from papertrack.aps_fetch import _parse_aps_issue
+
+    html = """
+    <div class="browse-result-card issue">
+      <section class="headline">
+        <h4 class="title">
+          <a href="/prl/abstract/10.1103/PhysRevLett.127.270401">
+            Quantum Vacuum Sagnac Effect
+          </a>
+        </h4>
+      </section>
+      <section class="citation-container">
+        <p>Guilherme C. Matos, Reinaldo de Melo e Souza, Paulo A. Maia Neto, and François Impens</p>
+        <p><span>Phys. Rev. Lett. <b>127</b>, 270401 (2021)</span>
+           <span> - Published 29 December, 2021</span></p>
+      </section>
+      <section class="summary-container"><p></p></section>
+    </div>
+    """
+
+    entries = _parse_aps_issue(html, "prl", "Physical Review Letters", "127", "27")
+
+    entry = entries["10.1103/PhysRevLett.127.270401"]
+    assert entry.title == "Quantum Vacuum Sagnac Effect"
+    assert entry.authors == [
+        "Guilherme C. Matos",
+        "Reinaldo de Melo e Souza",
+        "Paulo A. Maia Neto",
+        "François Impens",
+    ]
+    assert entry.pages == "270401"
+
+
 def test_crossref_fetch_year_uses_cursor_pagination(monkeypatch):
     from papertrack import journal_fetch
 
@@ -587,16 +621,9 @@ def test_aip_crossref_abstract_fallback_infers_year_from_official_metadata(monke
     assert entries["10.1063/missing-abstract"].abstract == "CrossRef fallback abstract."
 
 
-def test_aip_provider_falls_back_to_crossref_when_official_empty(monkeypatch):
+def test_official_provider_does_not_use_crossref_for_issue_membership(monkeypatch):
     from papertrack import aip_fetch, journal_fetch
     from papertrack.adapter_result import AdapterResult, OFFICIAL_EMPTY_SUSPICIOUS
-
-    crossref_entry = JournalEntry(
-        doi="10.1063/crossref",
-        title="CrossRef article",
-        authors=[],
-        abstract="CrossRef abstract",
-    )
 
     monkeypatch.setattr(
         aip_fetch,
@@ -608,13 +635,13 @@ def test_aip_provider_falls_back_to_crossref_when_official_empty(monkeypatch):
             source="journal",
         ),
     )
-    monkeypatch.setattr(
-        journal_fetch,
-        "query_journal_issue",
-        lambda *args, **kwargs: {crossref_entry.doi: crossref_entry},
-    )
 
-    entries = journal_fetch.query_journal_issue_full(
+    def fake_crossref_issue(*args, **kwargs):
+        raise AssertionError("CrossRef must not define official issue membership")
+
+    monkeypatch.setattr(journal_fetch, "query_journal_issue", fake_crossref_issue)
+
+    result = journal_fetch.query_journal_issue_full_result(
         "0021-9606",
         "163",
         "24",
@@ -624,7 +651,34 @@ def test_aip_provider_falls_back_to_crossref_when_official_empty(monkeypatch):
         journal_slug="jcp",
     )
 
-    assert entries == {crossref_entry.doi: crossref_entry}
+    assert result.outcome == OFFICIAL_EMPTY_SUSPICIOUS
+    assert result.entries == {}
+
+
+def test_crossref_non_article_issue_metadata_is_filtered():
+    from papertrack import journal_fetch
+
+    journal_fetch.clear_cache()
+    metadata_item = {
+        "DOI": "10.1021/civ066i011_2087001",
+        "title": ["Issue Editorial Masthead"],
+        "volume": "66",
+        "issue": "11",
+    }
+    article_item = {
+        "DOI": "10.1021/acs.jcim.6c00648",
+        "title": ["PyRMD Studio"],
+        "volume": "66",
+        "issue": "11",
+    }
+
+    articles = [
+        item
+        for item in [metadata_item, article_item]
+        if not JournalEntry.is_non_article(item["DOI"], item["title"][0])
+    ]
+
+    assert articles == [article_item]
 
 
 def test_aip_fetch_html_retries_impersonation_rounds(monkeypatch):

@@ -209,10 +209,25 @@ def validate_report_content(content: str, source: str = "") -> bool:
         return False
     fmt = report_format(content)
     if source == "journal":
-        return fmt == CURRENT_JOURNAL_FORMAT and bool(re.search(r"^###\s*10\.\S+", content, re.MULTILINE))
+        return (
+            fmt == CURRENT_JOURNAL_FORMAT
+            and bool(re.search(r"^###\s*10\.\S+", content, re.MULTILINE))
+            and not has_journal_quality_failure(content)
+        )
     if source == "arxiv":
         return fmt == CURRENT_ARXIV_FORMAT and bool(re.search(r"^###\s*arXiv:\S+", content, re.MULTILINE))
     return fmt in {CURRENT_ARXIV_FORMAT, CURRENT_JOURNAL_FORMAT} and "### " in content
+
+
+def has_journal_quality_failure(content: str) -> bool:
+    """Detect generated journal reports polluted by known bad metadata sources."""
+    bad_patterns = (
+        r"^###\s*10\.1021/(?:civ|ctv)\d+i\d+[_\w-]*\s*$",
+        r"^Title:\s+Issue\s+(?:Editorial\s+Masthead|Publication\s+Information)\s*$",
+        r"<(?:mml:)?math\b",
+        r"^###\s*10\.1103/physrevlett\.",
+    )
+    return any(re.search(pattern, content, re.IGNORECASE | re.MULTILINE) for pattern in bad_patterns)
 
 
 def validate_report_file(path: str, source: str = "") -> bool:

@@ -16,3 +16,5 @@ data/
 docs/
 .claude/
 .pytest_cache
+.papertrack_diagnostics/
+.papertrack_state.json

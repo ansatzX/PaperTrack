@@ -6,11 +6,12 @@ from datetime import date, timedelta
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from .adapter_result import RATE_LIMITED
 from .arxiv_entry import ArxivEntry
 from .arxiv_index_fetch import query_arxiv_result
 from .journal_entry import JournalEntry
 from .journal_fetch import query_journal_issue_full_result
-from .migration import preserve_task_state, write_report_file
+from .migration import has_journal_quality_failure, preserve_task_state, write_report_file
 from .zotero_query import ZoteroQuery
 
 logger = logging.getLogger(__name__)
@@ -148,6 +149,28 @@ def _read_existing_report(file_path: str) -> str | None:
         return f.read()
 
 
+def _arxiv_report_file(md_folder: str,
+                       day_date: date,
+                       category: str,
+                       output_format: str = "category/year/month/day") -> str:
+    year_str = f"{day_date.year:04d}"
+    month_str = f"{day_date.month:02d}"
+    day_str = f"{day_date.day:02d}"
+    if output_format == "category/year/month/day":
+        file_dir = os.path.join(md_folder, year_str, month_str)
+    elif output_format == "year/month/day/category":
+        file_dir = os.path.join(md_folder, year_str, month_str, day_str, category)
+    elif output_format == "year/month/category/day":
+        file_dir = os.path.join(md_folder, year_str, month_str, category, day_str)
+    else:
+        file_dir = os.path.join(md_folder, year_str, month_str)
+    return os.path.join(file_dir, f"{day_str}.md")
+
+
+def _existing_arxiv_report_is_written(report_file: str) -> bool:
+    return parse_old_report(report_file) is not None
+
+
 def _filter_one_arxiv_day_to_md(day_date: date, md_folder: str,
                                 query_args: dict | None,
                                 category: str,
@@ -156,9 +179,19 @@ def _filter_one_arxiv_day_to_md(day_date: date, md_folder: str,
     date_string = day_date.strftime("%Y-%m-%d")
     next_date = day_date + timedelta(days=1)
     date_to_date = next_date.strftime("%Y-%m-%d")
+    oneday_report_file = _arxiv_report_file(md_folder, day_date, category, output_format)
+
+    if _existing_arxiv_report_is_written(oneday_report_file):
+        logger.info("Skipping existing arXiv report: %s %s", category, date_string)
+        return
 
     arxiv_fetch = query_arxiv_result(date_string, date_to_date, query_args)
     if not arxiv_fetch.ok:
+        if arxiv_fetch.outcome == RATE_LIMITED:
+            raise RuntimeError(
+                f"arXiv rate limited while fetching {category} {date_string}; "
+                "stopping this run to avoid worsening the throttle"
+            )
         logger.warning(
             "Skipping arXiv %s %s because fetch outcome was %s",
             category,
@@ -172,20 +205,7 @@ def _filter_one_arxiv_day_to_md(day_date: date, md_folder: str,
 
     logger.info("processing %s, papers: %d", date_string, len(arxiv_dict))
 
-    year_str = f"{day_date.year:04d}"
-    month_str = f"{day_date.month:02d}"
-    day_str = f"{day_date.day:02d}"
-    if output_format == "category/year/month/day":
-        file_dir = os.path.join(md_folder, year_str, month_str)
-    elif output_format == "year/month/day/category":
-        file_dir = os.path.join(md_folder, year_str, month_str, day_str, category)
-    elif output_format == "year/month/category/day":
-        file_dir = os.path.join(md_folder, year_str, month_str, category, day_str)
-    else:
-        file_dir = os.path.join(md_folder, year_str, month_str)
-
-    os.makedirs(file_dir, exist_ok=True)
-    oneday_report_file = os.path.join(file_dir, f"{day_str}.md")
+    os.makedirs(os.path.dirname(oneday_report_file), exist_ok=True)
 
     parse_old = parse_old_report(oneday_report_file)
     old_content = _read_existing_report(oneday_report_file)
@@ -373,7 +393,12 @@ def _is_missing_or_corrupt_journal_report(md_folder: str,
     report_file = _journal_report_file(md_folder, journal_slug, volume, issue)
     if not os.path.exists(report_file):
         return True
-    return parse_journal_report(report_file) is None
+    old_content = _read_existing_report(report_file)
+    if old_content is None:
+        return True
+    if parse_journal_report(report_file) is None:
+        return True
+    return has_journal_quality_failure(old_content)
 
 
 def filter_journal_to_md(journal_name: str, journal_slug: str,

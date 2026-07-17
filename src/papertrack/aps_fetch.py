@@ -88,7 +88,7 @@ def _parse_aps_issue(
     entries: dict[str, JournalEntry] = {}
 
     for card in soup.select(".browse-result-card.issue"):
-        title_el = card.select_one('h3.title a[href*="/abstract/10.1103/"]')
+        title_el = card.select_one('.title a[href*="/abstract/10.1103/"]')
         if not title_el:
             continue
         href = title_el.get("href", "")
@@ -210,6 +210,7 @@ def query_aps_issue_result(journal_slug: str, volume: str, issue: str,
 
     entries = _parse_aps_issue(html, journal_slug, journal_name, volume, issue)
     if not entries:
+        soup = BeautifulSoup(html, "lxml")
         record_fetch_attempt(
             {
                 "source_role": "authoritative",
@@ -223,8 +224,8 @@ def query_aps_issue_result(journal_slug: str, volume: str, issue: str,
                 "outcome": "official_empty_suspicious",
                 "article_count": 0,
                 "selector_counts": {
-                    ".browse-result-card.issue": 0,
-                    "h3.title a": 0,
+                    ".browse-result-card.issue": len(soup.select(".browse-result-card.issue")),
+                    ".title a": len(soup.select('.title a[href*="/abstract/10.1103/"]')),
                 },
             },
             html=html,
