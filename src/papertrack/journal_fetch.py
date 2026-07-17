@@ -5,7 +5,7 @@ from urllib.error import URLError
 from urllib.parse import urlencode
 import json
 
-from .adapter_result import AdapterResult, FETCH_FAILED, SUCCESS
+from .adapter_result import AdapterResult, FETCH_FAILED
 from .diagnostics import record_fetch_attempt
 from .journal_entry import JournalEntry
 from .source_policy import SourcePolicy
@@ -90,66 +90,6 @@ def _fetch_year(issn: str, year: int) -> list[dict]:
     _cache[cache_key] = articles
     logger.info("CrossRef %s %d: %d articles cached", issn, year, len(articles))
     return articles
-
-
-def query_journal_issue(issn: str, volume: str, issue: str,
-                        journal_name: str = "", year: int | None = None) -> dict[str, JournalEntry]:
-    """Fetch articles for a specific journal volume/issue via CrossRef.
-
-    Args:
-        issn: Journal ISSN (e.g. '1549-9618' for JCTC).
-        volume: Volume number as string.
-        issue: Issue number as string.
-        journal_name: Display name for the journal.
-        year: Publication year. If None, estimated from current date
-              (assumes volume → year mapping is 1:1 starting from journal inception).
-
-    Returns:
-        Dict mapping DOI → JournalEntry, sorted by page number.
-    """
-    if year is None:
-        year = time.localtime().tm_year
-
-    all_articles = _fetch_year(issn, year)
-
-    # Filter by volume and issue
-    matches: list[JournalEntry] = []
-    for item in all_articles:
-        item_vol = item.get("volume", "") or ""
-        item_iss = item.get("issue", "") or ""
-        if str(item_vol) == str(volume) and str(item_iss) == str(issue):
-            entry = JournalEntry.from_crossref(item, journal_name)
-            matches.append(entry)
-
-    # Sort by page number if available
-    def _page_key(entry: JournalEntry) -> int:
-        try:
-            return int(entry.pages.split("-")[0])
-        except (ValueError, AttributeError):
-            return 0
-
-    matches.sort(key=_page_key)
-
-    result: dict[str, JournalEntry] = {}
-    for entry in matches:
-        result[entry.doi] = entry
-
-    logger.info("JOURNAL %s Vol.%s Iss.%s: %d articles matched",
-                journal_name or issn, volume, issue, len(result))
-    return result
-
-
-def query_journal_issue_result(issn: str, volume: str, issue: str,
-                               journal_name: str = "",
-                               year: int | None = None) -> AdapterResult[dict[str, JournalEntry]]:
-    entries = query_journal_issue(issn, volume, issue, journal_name, year)
-    return AdapterResult(
-        entries=entries,
-        outcome=SUCCESS,
-        provider="crossref",
-        source="journal",
-        source_role="fallback",
-    )
 
 
 def _fill_missing_abstracts_from_crossref(entries: dict[str, JournalEntry],

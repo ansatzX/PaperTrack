@@ -7,33 +7,21 @@ import time
 from bs4 import BeautifulSoup
 
 from .adapter_result import FETCH_FAILED
+from .acs_fetch import ACS_FETCH_STRATEGIES, ACS_REQUEST_POLICY
 from .diagnostics import record_fetch_attempt
-from .http_fetch import CURL_IMPERSONATIONS, fetch_html_resilient
+from .http_fetch import fetch_html_resilient
 
 logger = logging.getLogger(__name__)
 
 ACS_BASE = "https://pubs.acs.org"
 ACS_LOI_URL = ACS_BASE + "/loi/{acs_code}"
-ACS_HTTP_CLIENTS = (
-    "curl_cffi",
-    "cloudscraper",
-    "primp",
-    "tls_client",
-    "pyreqwest_impersonate",
-    "requests",
-)
-ACS_FETCH_ROUNDS = 3
-ACS_ROUND_BACKOFF = (2, 5)
-
-
 def _scrape(url: str) -> str:
-    """Fetch an ACS LOI page through the HTTP-only strategy chain."""
+    """Fetch an ACS LOI page with the shared ACS request floor."""
     result = fetch_html_resilient(
         url,
-        clients=ACS_HTTP_CLIENTS,
-        curl_impersonations=CURL_IMPERSONATIONS,
-        rounds=ACS_FETCH_ROUNDS,
-        backoff=ACS_ROUND_BACKOFF,
+        strategies=ACS_FETCH_STRATEGIES,
+        request_policy=ACS_REQUEST_POLICY,
+        provider="acs",
         log_label="ACS LOI",
     )
     if result.ok:

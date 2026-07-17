@@ -375,3 +375,14 @@ Current verification commands used during development:
 /home/ansatz/soft/miniconda3/bin/conda run -n arxiv pytest -q
 /home/ansatz/soft/miniconda3/bin/conda run -n arxiv python -m compileall -q src tests
 ```
+
+For a deliberately bounded live check of one fixed formal issue per provider:
+
+```bash
+/home/ansatz/soft/miniconda3/bin/conda run -n arxiv \
+  python scripts/verify_official_journal_issues.py --provider all
+```
+
+The verifier is official-only and read-only: it does not import report, Zotero,
+CrossRef, or state code. Publisher blocking is reported as a failed observation,
+not converted into an empty successful issue.

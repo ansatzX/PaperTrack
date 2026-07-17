@@ -476,7 +476,7 @@ def test_aip_provider_uses_official_source_before_crossref(monkeypatch):
         raise AssertionError("CrossRef should not be called when AIP returns entries")
 
     monkeypatch.setattr(aip_fetch, "query_aip_issue_result", fake_aip_issue)
-    monkeypatch.setattr(journal_fetch, "query_journal_issue", fake_crossref_issue)
+    monkeypatch.setattr(journal_fetch, "_fetch_year", fake_crossref_issue)
 
     entries = journal_fetch.query_journal_issue_full(
         "0021-9606",
@@ -516,7 +516,7 @@ def test_aps_provider_uses_official_source_before_crossref(monkeypatch):
     def fake_crossref_issue(*args, **kwargs):
         raise AssertionError("CrossRef should not be called when APS returns entries")
 
-    monkeypatch.setattr(journal_fetch, "query_journal_issue", fake_crossref_issue)
+    monkeypatch.setattr(journal_fetch, "_fetch_year", fake_crossref_issue)
 
     entries = journal_fetch.query_journal_issue_full(
         "0031-9007",
@@ -719,7 +719,7 @@ def test_official_provider_does_not_use_crossref_for_issue_membership(monkeypatc
     def fake_crossref_issue(*args, **kwargs):
         raise AssertionError("CrossRef must not define official issue membership")
 
-    monkeypatch.setattr(journal_fetch, "query_journal_issue", fake_crossref_issue)
+    monkeypatch.setattr(journal_fetch, "_fetch_year", fake_crossref_issue)
 
     result = journal_fetch.query_journal_issue_full_result(
         "0021-9606",
@@ -828,6 +828,26 @@ def test_acs_issue_page_defines_membership_and_records_absent_abstract(monkeypat
             "outcome": "official_field_absent",
         }
     ]
+
+
+def test_acs_loi_uses_shared_provider_request_floor(monkeypatch):
+    from papertrack import acs_loi
+    from papertrack.http_fetch import HttpFetchResult
+
+    captured = {}
+
+    def fake_fetch(url, **kwargs):
+        captured.update(kwargs)
+        return HttpFetchResult(html="<html>official LOI</html>", status_code=200)
+
+    monkeypatch.setattr(acs_loi, "fetch_html_resilient", fake_fetch)
+
+    assert acs_loi._scrape("https://pubs.acs.org/loi/jcisd8") == (
+        "<html>official LOI</html>"
+    )
+    assert captured["provider"] == "acs"
+    assert captured["request_policy"].min_interval == 1.0
+    assert captured["request_policy"].max_attempts == 3
 
 
 def test_aip_uses_legacy_issue_url_only_after_canonical_404(monkeypatch):
