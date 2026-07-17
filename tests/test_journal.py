@@ -799,36 +799,38 @@ def test_acs_issue_page_defines_membership_and_records_absent_abstract(monkeypat
     ]
 
 
-def test_aip_fetch_html_retries_impersonation_rounds(monkeypatch):
+def test_aip_uses_legacy_issue_url_only_after_canonical_404(monkeypatch):
     from papertrack import aip_fetch
+    from papertrack.adapter_result import FETCH_FAILED
+    from papertrack.http_fetch import HttpFetchResult
 
-    attempts = []
+    aip_fetch.clear_aip_caches()
+    calls = []
 
-    class Response:
-        def __init__(self, status_code, text):
-            self.status_code = status_code
-            self.text = text
+    def fake_fetch(url):
+        calls.append(url)
+        return HttpFetchResult(
+            outcome=FETCH_FAILED,
+            status_code=404,
+        )
 
-    def fake_get(url, impersonate, timeout, allow_redirects):
-        attempts.append(impersonate)
-        if len(attempts) < 3:
-            return Response(403, "blocked")
-        return Response(200, '<html><div class="al-article-items"></div></html>')
+    monkeypatch.setattr(aip_fetch, "_fetch_issue_http", fake_fetch)
 
-    monkeypatch.setattr(aip_fetch, "AIP_IMPERSONATIONS", ("firefox", "chrome"))
-    monkeypatch.setattr(aip_fetch.requests, "get", fake_get)
-    monkeypatch.setattr(aip_fetch.time, "sleep", lambda *args: None)
+    result = aip_fetch.query_aip_issue_result("jcp", "164", "16")
 
-    html = aip_fetch._fetch_html("https://pubs.aip.org/aip/jcp/issue/164/16", ".al-article-items")
-
-    assert html
-    assert attempts == ["firefox", "chrome", "firefox"]
+    assert result.outcome == FETCH_FAILED
+    assert calls == [
+        "https://pubs.aip.org/aip/jcp/issue/164/16",
+        "https://pubs.aip.org/jcp/issue/164/16",
+    ]
 
 
 def test_query_aip_issue_uses_official_abstract_ajax_not_article_pages(monkeypatch):
     from papertrack import aip_fetch
+    from papertrack.adapter_result import SUCCESS
+    from papertrack.http_fetch import HttpFetchResult
 
-    aip_fetch._cache.clear()
+    aip_fetch.clear_aip_caches()
     html = """
     <div class="al-article-items">
       <h3 class="customLink item-title">
@@ -850,17 +852,23 @@ def test_query_aip_issue_uses_official_abstract_ajax_not_article_pages(monkeypat
     fetched_urls = []
     fetched_abstract_ids = []
 
-    def fake_fetch(url, required_selector=""):
+    def fake_fetch(url):
         fetched_urls.append(url)
         if "/article/" in url:
             raise AssertionError("query_aip_issue must not fetch article pages")
-        return html
+        return HttpFetchResult(html=html, status_code=200)
 
-    def fake_fetch_abstract(article_id, referer_url):
+    def fake_fetch_abstract(article_id, referer_url, journal_slug):
         fetched_abstract_ids.append((article_id, referer_url))
-        return "Official abstract text."
+        return aip_fetch.AipAbstractResult(
+            abstract="Official abstract text.",
+            outcome=SUCCESS,
+            status_code=200,
+            url=aip_fetch.aip_abstract_url(journal_slug),
+            article_id=article_id,
+        )
 
-    monkeypatch.setattr(aip_fetch, "_fetch_html", fake_fetch)
+    monkeypatch.setattr(aip_fetch, "_fetch_issue_http", fake_fetch)
     monkeypatch.setattr(aip_fetch, "_fetch_aip_abstract", fake_fetch_abstract)
 
     entries = aip_fetch.query_aip_issue("jcp", "164", "16", "Journal of Chemical Physics")
@@ -873,35 +881,40 @@ def test_query_aip_issue_uses_official_abstract_ajax_not_article_pages(monkeypat
 
 def test_query_aip_issue_does_not_cache_empty_fetch_failures(monkeypatch):
     from papertrack import aip_fetch
+    from papertrack.adapter_result import FETCH_FAILED
+    from papertrack.http_fetch import HttpFetchResult
 
-    aip_fetch._cache.clear()
+    aip_fetch.clear_aip_caches()
     calls = []
 
-    def fake_fetch(url, required_selector=""):
+    def fake_fetch(url):
         calls.append(url)
-        return ""
+        return HttpFetchResult(outcome=FETCH_FAILED)
 
-    monkeypatch.setattr(aip_fetch, "_fetch_html", fake_fetch)
+    monkeypatch.setattr(aip_fetch, "_fetch_issue_http", fake_fetch)
 
     assert aip_fetch.query_aip_issue("jcp", "164", "16") == {}
     assert aip_fetch.query_aip_issue("jcp", "164", "16") == {}
     assert calls == [
         "https://pubs.aip.org/aip/jcp/issue/164/16",
-        "https://pubs.aip.org/jcp/issue/164/16",
         "https://pubs.aip.org/aip/jcp/issue/164/16",
-        "https://pubs.aip.org/jcp/issue/164/16",
     ]
 
 
 def test_query_aip_issue_records_official_empty_suspicious(monkeypatch, tmp_path):
     from papertrack import aip_fetch
     from papertrack.diagnostics import configure_diagnostics
+    from papertrack.http_fetch import HttpFetchResult
 
-    aip_fetch._cache.clear()
+    aip_fetch.clear_aip_caches()
     configure_diagnostics(diagnostics_dir=str(tmp_path))
     html = "<html><body><main>No article items today</main></body></html>"
 
-    monkeypatch.setattr(aip_fetch, "_fetch_html", lambda *args, **kwargs: html)
+    monkeypatch.setattr(
+        aip_fetch,
+        "_fetch_issue_http",
+        lambda *args, **kwargs: HttpFetchResult(html=html, status_code=200),
+    )
 
     entries = aip_fetch.query_aip_issue("jcp", "164", "16", "Journal of Chemical Physics")
 
@@ -912,77 +925,6 @@ def test_query_aip_issue_records_official_empty_suspicious(monkeypatch, tmp_path
     snapshot_files = list((tmp_path / "snapshots" / "aip").glob("*.html"))
     assert len(snapshot_files) == 1
     assert snapshot_files[0].read_text(encoding="utf-8") == html
-
-
-def test_fetch_aip_abstract_uses_official_ajax_endpoint(monkeypatch):
-    from papertrack import aip_fetch
-
-    seen = []
-
-    class Response:
-        status_code = 200
-        text = (
-            '{"Success":true,"Html":"'
-            '<section class=\\"abstract\\" aria-label=\\"Main abstract\\">'
-            '<h2>Abstract</h2><p>Official abstract text.</p></section>"}'
-        )
-
-        def json(self):
-            return {
-                "Success": True,
-                "Html": (
-                    '<section class="abstract" aria-label="Main abstract">'
-                    "<h2>Abstract</h2><p>Official abstract text.</p></section>"
-                ),
-            }
-
-    def fake_get(url, params, headers, impersonate, timeout, allow_redirects):
-        seen.append((url, params, headers, impersonate))
-        return Response()
-
-    monkeypatch.setattr(aip_fetch, "AIP_IMPERSONATIONS", ("chrome",))
-    monkeypatch.setattr(aip_fetch.requests, "get", fake_get)
-
-    abstract = aip_fetch._fetch_aip_abstract(
-        "3387571",
-        "https://pubs.aip.org/aip/jcp/issue/164/16",
-    )
-
-    assert abstract == "Official abstract text."
-    assert seen[0][0] == "https://pubs.aip.org/PlatformArticle/ArticleAbstractAjax"
-    assert seen[0][1] == {"articleId": "3387571", "layAbstract": "False"}
-    assert seen[0][2]["Referer"] == "https://pubs.aip.org/aip/jcp/issue/164/16"
-
-
-def test_fetch_aip_abstract_retries_impersonation_rounds(monkeypatch):
-    from papertrack import aip_fetch
-
-    attempts = []
-
-    class Response:
-        status_code = 200
-        text = '{"Success":true,"Html":"<p>Official abstract text.</p>"}'
-
-        def json(self):
-            if len(attempts) < 3:
-                return {"Success": True, "Html": ""}
-            return {"Success": True, "Html": "<p>Official abstract text.</p>"}
-
-    def fake_get(url, params, headers, impersonate, timeout, allow_redirects):
-        attempts.append(impersonate)
-        return Response()
-
-    monkeypatch.setattr(aip_fetch, "AIP_IMPERSONATIONS", ("firefox", "chrome"))
-    monkeypatch.setattr(aip_fetch.requests, "get", fake_get)
-    monkeypatch.setattr(aip_fetch.time, "sleep", lambda *args: None)
-
-    abstract = aip_fetch._fetch_aip_abstract(
-        "3387571",
-        "https://pubs.aip.org/aip/jcp/issue/164/16",
-    )
-
-    assert abstract == "Official abstract text."
-    assert attempts == ["firefox", "chrome", "firefox"]
 
 
 def test_non_article_titles_are_filtered_from_crossref_year(monkeypatch):

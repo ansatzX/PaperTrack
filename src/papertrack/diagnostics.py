@@ -22,6 +22,8 @@ ABNORMAL_OUTCOMES = {
     "parse_failed",
     "official_empty_suspicious",
     "official_field_absent",
+    "official_control_absent",
+    "official_response_empty",
     "partial",
 }
 

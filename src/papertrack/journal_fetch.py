@@ -323,8 +323,8 @@ def clear_cache():
     except ImportError:
         pass
     try:
-        from .aip_fetch import _cache as _aip_cache
-        _aip_cache.clear()
+        from .aip_fetch import clear_aip_caches
+        clear_aip_caches()
     except ImportError:
         pass
     try:

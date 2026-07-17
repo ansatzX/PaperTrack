@@ -10,9 +10,14 @@ from papertrack.adapter_result import (
 
 def test_aip_issue_result_distinguishes_fetch_failure(monkeypatch):
     from papertrack import aip_fetch
+    from papertrack.http_fetch import HttpFetchResult
 
     aip_fetch._cache.clear()
-    monkeypatch.setattr(aip_fetch, "_fetch_html", lambda *args, **kwargs: "")
+    monkeypatch.setattr(
+        aip_fetch,
+        "_fetch_issue_http",
+        lambda *args, **kwargs: HttpFetchResult(outcome=FETCH_FAILED),
+    )
 
     result = aip_fetch.query_aip_issue_result("jcp", "164", "16", "Journal of Chemical Physics")
 
