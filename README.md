@@ -8,8 +8,8 @@ The current journal workflow is source-conscious:
 - ACS journals such as JCTC use ACS issue pages as the primary source.
 - AIP journals such as JCP use AIP issue pages as the primary source.
 - APS journals such as PRL use APS issue pages as the primary source.
-- CrossRef is a fallback only. For JCP, it can fill missing abstracts by DOI, but
-  it does not decide which articles belong to an issue.
+- CrossRef is disabled by default. The stable `run.sh` wrapper enables it only
+  to fill missing abstracts by exact DOI; it never decides issue membership.
 
 ## Requirements
 
@@ -25,6 +25,13 @@ pip install -e ".[dev]"
 
 The project depends on `curl_cffi` for publisher pages, plus `pyzotero`,
 `beautifulsoup4`, `lxml`, `feedparser`, `jinja2`, and `requests`.
+
+The bounded AIP Cloudflare fallback also needs Playwright, Chromium, and Xvfb:
+
+```bash
+pip install -e ".[dev,browser]"
+playwright install chromium
+```
 
 ## Quick Start
 
@@ -43,6 +50,11 @@ python main.py journal latest \
   --journal jcp \
   --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
 ```
+
+In default official-only development mode, AIP `latest`/`backfill` cannot
+discover volume/issue pairs without CrossRef. Use the explicit `journal issue`
+command shown below. The repository-provided `run.sh` is the production path
+that enables metadata-mode discovery.
 
 Backfill journal issues:
 
@@ -109,6 +121,17 @@ Journal output is always:
 
 ## Journal Source Policy
 
+`PAPERTRACK_CROSSREF_MODE` has two accepted values:
+
+- unset or `disabled`: official publisher pages only; this is the development
+  default and makes no CrossRef requests;
+- `metadata`: permit CrossRef issue discovery for AIP and exact-DOI abstract
+  completion only after an official issue fetch succeeds.
+
+Any other value is an error. CrossRef cannot add or remove issue members, or
+replace official DOI, title, author, volume, issue, page, or date metadata. Only
+`run.sh` exports `PAPERTRACK_CROSSREF_MODE=metadata`.
+
 ### JCTC / ACS
 
 JCTC is configured as an ACS journal:
@@ -143,9 +166,12 @@ For each issue, PaperTrack:
 2. Extracts the official issue article list, DOI, title, authors, page, year,
    and `data-articleid`.
 3. Fetches abstracts from AIP's official issue-page AJAX endpoint:
-   `https://pubs.aip.org/PlatformArticle/ArticleAbstractAjax`.
-4. If any AIP article still lacks an abstract, fills only that missing
-   `abstract` field from CrossRef by matching the DOI.
+   `https://pubs.aip.org/aip/jcp/PlatformArticle/ArticleAbstractAjax`.
+4. If direct HTTP receives a Cloudflare challenge, makes one bounded headful
+   Playwright attempt under Xvfb, reusing one browser context for that issue and
+   blocking images, fonts, media, and article-page navigation.
+5. In production `metadata` mode only, fills a still-missing `abstract` from
+   CrossRef by exact DOI.
 
 PaperTrack does not visit each AIP article page. CrossRef is never allowed to
 add articles to an AIP issue or replace AIP metadata.
@@ -328,6 +354,13 @@ Run tests:
 
 ```bash
 pytest -q
+```
+
+Direct journal development commands intentionally leave
+`PAPERTRACK_CROSSREF_MODE` unset. For AIP, test a known formal issue explicitly:
+
+```bash
+python main.py journal issue --journal jcp --volume 164 --issue 16 --year 2026
 ```
 
 Run syntax checks:

@@ -52,6 +52,7 @@ def test_run_sh_runs_arxiv_sources_only_during_journal_pause():
     assert "ARXIV_RATE_LIMIT_BACKOFF=30,60,120" in content
     assert 'PAPERTRACK_ARXIV_REQUEST_DELAY="$ARXIV_REQUEST_DELAY_SECONDS"' in content
     assert 'PAPERTRACK_ARXIV_RATE_LIMIT_BACKOFF="$ARXIV_RATE_LIMIT_BACKOFF"' in content
+    assert "export PAPERTRACK_CROSSREF_MODE=metadata" in content
     assert 'run --no-capture-output -n "$CONDA_ENV" python main.py' in content
     assert "# JOURNALS=(jctc jcim jcp prl)" in content
     assert 'arxiv_category_has_data "$category"' in content

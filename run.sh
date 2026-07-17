@@ -24,6 +24,10 @@ cd "$PROJECT_DIR"
 
 export PAPERTRACK_ARXIV_REQUEST_DELAY="$ARXIV_REQUEST_DELAY_SECONDS"
 export PAPERTRACK_ARXIV_RATE_LIMIT_BACKOFF="$ARXIV_RATE_LIMIT_BACKOFF"
+# This stable scheduled wrapper may complete missing abstracts from CrossRef.
+# Direct development commands leave this unset and therefore use official
+# publisher sources only.
+export PAPERTRACK_CROSSREF_MODE=metadata
 
 run_papertrack() {
     "$CONDA_BIN" run --no-capture-output -n "$CONDA_ENV" python main.py \

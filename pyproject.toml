@@ -28,6 +28,9 @@ http-fallbacks = [
     "tls-client>=1.0.1",
     "pyreqwest-impersonate>=0.5.5",
 ]
+browser = [
+    "playwright>=1.40",
+]
 
 [project.scripts]
 papertrack = "papertrack.cli:main"

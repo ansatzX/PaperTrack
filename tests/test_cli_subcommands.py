@@ -129,6 +129,35 @@ def test_invalid_source_policy_stops_before_journal_handler(monkeypatch, tmp_pat
     assert calls == []
 
 
+def test_metadata_source_policy_reaches_journal_handler(monkeypatch, tmp_path):
+    from papertrack import cli
+
+    captured = {}
+    monkeypatch.setenv("PAPERTRACK_CROSSREF_MODE", "metadata")
+    monkeypatch.setattr(cli, "ZoteroQuery", lambda: None)
+    monkeypatch.setattr(cli, "filter_journal_to_md", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "papertrack",
+            "journal",
+            "issue",
+            "--journal",
+            "jcp",
+            "--volume",
+            "164",
+            "--issue",
+            "16",
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    cli.main()
+
+    assert captured["source_policy"].crossref_mode is CrossrefMode.METADATA
+
+
 def test_arxiv_backfill_month_dispatches_month_days(monkeypatch, tmp_path):
     from papertrack import cli
 
