@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import importlib
 import logging
+import os
 import time
 from typing import Mapping, Sequence
 
@@ -104,6 +105,22 @@ DEFAULT_STRATEGIES = (
 )
 
 _last_request_at: dict[str, float] = {}
+
+
+def configured_interval(
+    name: str,
+    floor: float,
+    env: Mapping[str, str] | None = None,
+) -> float:
+    """Read a request interval without allowing configuration below ``floor``."""
+    values = os.environ if env is None else env
+    raw = values.get(name, "").strip()
+    if not raw:
+        return float(floor)
+    try:
+        return max(float(floor), float(raw))
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a non-negative number") from exc
 
 
 def clear_provider_throttles() -> None:

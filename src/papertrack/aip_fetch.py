@@ -23,7 +23,7 @@ from .adapter_result import (
     SUCCESS,
 )
 from .diagnostics import record_fetch_attempt
-from .http_fetch import HttpFetchResult, is_blocked_response
+from .http_fetch import HttpFetchResult, configured_interval, is_blocked_response
 from .journal_entry import JournalEntry
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,8 @@ AIP_ISSUE_URL = AIP_BASE + "/aip/{journal_slug}/issue/{volume}/{issue}"
 AIP_LEGACY_ISSUE_URL = AIP_BASE + "/{journal_slug}/issue/{volume}/{issue}"
 AIP_MAX_ATTEMPTS = 3
 AIP_BACKOFF = (2.0, 5.0)
-AIP_MIN_INTERVAL = 1.0
+AIP_ISSUE_INTERVAL = configured_interval("PAPERTRACK_AIP_ISSUE_INTERVAL", 30)
+AIP_ABSTRACT_INTERVAL = configured_interval("PAPERTRACK_AIP_ABSTRACT_INTERVAL", 10)
 AIP_IMPERSONATE = "chrome136"
 
 
@@ -59,15 +60,15 @@ class AipBrowserBundle:
 _cache: dict[str, AdapterResult[dict[str, JournalEntry]]] = {}
 _abstract_cache: dict[str, AipAbstractResult] = {}
 _session = None
-_last_request_at: float | None = None
+_last_request_at: dict[str, float] = {}
 
 
 def clear_aip_caches() -> None:
-    global _session, _last_request_at
+    global _session
     _cache.clear()
     _abstract_cache.clear()
     _session = None
-    _last_request_at = None
+    _last_request_at.clear()
 
 
 def aip_abstract_url(journal_slug: str) -> str:
@@ -85,19 +86,26 @@ def _get_session():
     return _session
 
 
-def _wait_for_aip_interval() -> None:
-    global _last_request_at
+def _wait_for_aip_interval(role: str) -> float:
+    intervals = {
+        "issue": AIP_ISSUE_INTERVAL,
+        "abstract": AIP_ABSTRACT_INTERVAL,
+    }
+    interval = intervals[role]
     now = time.monotonic()
-    if _last_request_at is not None:
-        delay = max(0.0, _last_request_at + AIP_MIN_INTERVAL - now)
+    previous = _last_request_at.get(role)
+    delay = 0.0
+    if previous is not None:
+        delay = max(0.0, previous + interval - now)
         if delay:
             time.sleep(delay)
             now = time.monotonic()
-    _last_request_at = now
+    _last_request_at[role] = now
+    return delay
 
 
-def _aip_get(url: str, **kwargs):
-    _wait_for_aip_interval()
+def _aip_get(url: str, *, role: str, **kwargs):
+    _wait_for_aip_interval(role)
     kwargs.setdefault("impersonate", AIP_IMPERSONATE)
     kwargs.setdefault("timeout", 30)
     kwargs.setdefault("allow_redirects", True)
@@ -131,7 +139,7 @@ def _fetch_issue_http(url: str) -> HttpFetchResult:
         }
         retry_after = None
         try:
-            response = _aip_get(url)
+            response = _aip_get(url, role="issue")
             retry_after = _retry_after(response)
             last_html = str(getattr(response, "text", "") or "")
             last_status = int(getattr(response, "status_code", 0) or 0) or None
@@ -210,7 +218,12 @@ def _fetch_aip_abstract(
     for attempt_idx in range(AIP_MAX_ATTEMPTS):
         retry_after = None
         try:
-            response = _aip_get(url, params=params, headers=headers)
+            response = _aip_get(
+                url,
+                role="abstract",
+                params=params,
+                headers=headers,
+            )
             retry_after = _retry_after(response)
             status = int(getattr(response, "status_code", 0) or 0) or None
             text = str(getattr(response, "text", "") or "")
@@ -360,7 +373,9 @@ def _fetch_aip_browser_bundle(url: str, journal_slug: str) -> AipBrowserBundle:
         "papertrack.aip_browser",
         url,
         journal_slug,
+        str(AIP_ABSTRACT_INTERVAL),
     ]
+    _wait_for_aip_interval("issue")
     try:
         completed = subprocess.run(
             command,

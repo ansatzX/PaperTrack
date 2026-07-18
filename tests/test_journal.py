@@ -846,7 +846,7 @@ def test_acs_loi_uses_shared_provider_request_floor(monkeypatch):
         "<html>official LOI</html>"
     )
     assert captured["provider"] == "acs"
-    assert captured["request_policy"].min_interval == 1.0
+    assert captured["request_policy"].min_interval == 30.0
     assert captured["request_policy"].max_attempts == 3
 
 

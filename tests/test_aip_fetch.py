@@ -184,6 +184,7 @@ def test_aip_browser_bundle_runs_once_under_xvfb(monkeypatch):
     from papertrack import aip_fetch
 
     captured = {}
+    wait_roles = []
 
     class Completed:
         returncode = 0
@@ -196,6 +197,11 @@ def test_aip_browser_bundle_runs_once_under_xvfb(monkeypatch):
         return Completed()
 
     monkeypatch.setattr(aip_fetch.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        aip_fetch,
+        "_wait_for_aip_interval",
+        lambda role: wait_roles.append(role),
+    )
 
     bundle = aip_fetch._fetch_aip_browser_bundle(
         "https://pubs.aip.org/aip/jcp/issue/164/16",
@@ -204,12 +210,69 @@ def test_aip_browser_bundle_runs_once_under_xvfb(monkeypatch):
 
     assert bundle.html.startswith('<div class="al-article-items"')
     assert captured["command"][:2] == ["xvfb-run", "-a"]
-    assert captured["command"][-3:] == [
+    assert captured["command"][-4:] == [
         "papertrack.aip_browser",
         "https://pubs.aip.org/aip/jcp/issue/164/16",
         "jcp",
+        "10.0",
     ]
     assert captured["kwargs"]["timeout"] == 120
+    assert wait_roles == ["issue"]
+
+
+def test_aip_request_clocks_are_role_aware(monkeypatch):
+    from papertrack import aip_fetch
+
+    clock = [100.0]
+    sleeps = []
+    starts = []
+
+    class Session:
+        def get(self, url, **kwargs):
+            starts.append((url, clock[0]))
+            return Response()
+
+    def fake_sleep(delay):
+        sleeps.append(delay)
+        clock[0] += delay
+
+    monkeypatch.setattr(aip_fetch.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(aip_fetch.time, "sleep", fake_sleep)
+    monkeypatch.setattr(aip_fetch, "_get_session", lambda: Session())
+    aip_fetch.clear_aip_caches()
+
+    aip_fetch._aip_get("issue-1", role="issue")
+    clock[0] += 1
+    aip_fetch._aip_get("issue-2", role="issue")
+
+    aip_fetch._aip_get("abstract-1", role="abstract")
+    clock[0] += 1
+    aip_fetch._aip_get("abstract-2", role="abstract")
+
+    assert sleeps == [29.0, 9.0]
+    assert starts[1][1] - starts[0][1] >= 30
+    assert starts[3][1] - starts[2][1] >= 10
+
+
+def test_aip_browser_abstract_wait_uses_request_start_clock(monkeypatch):
+    from papertrack import aip_browser
+
+    clock = [200.0]
+    sleeps = []
+
+    def fake_sleep(delay):
+        sleeps.append(delay)
+        clock[0] += delay
+
+    monkeypatch.setattr(aip_browser.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(aip_browser.time, "sleep", fake_sleep)
+
+    first_start = aip_browser._wait_for_abstract_interval(None, 10)
+    clock[0] += 2
+    second_start = aip_browser._wait_for_abstract_interval(first_start, 10)
+
+    assert sleeps == [8.0]
+    assert second_start - first_start >= 10
 
 
 def test_aip_browser_allows_challenge_query_but_blocks_article_navigation():

@@ -10,7 +10,12 @@ from bs4 import BeautifulSoup
 
 from .adapter_result import AdapterResult, FETCH_FAILED, OFFICIAL_EMPTY_SUSPICIOUS, SUCCESS
 from .diagnostics import record_fetch_attempt
-from .http_fetch import HttpRequestPolicy, fetch_html_resilient, is_blocked_response
+from .http_fetch import (
+    HttpRequestPolicy,
+    configured_interval,
+    fetch_html_resilient,
+    is_blocked_response,
+)
 from .journal_entry import JournalEntry
 
 logger = logging.getLogger(__name__)
@@ -23,7 +28,7 @@ APS_FETCH_STRATEGIES = (
     ("requests", "default"),
 )
 APS_REQUEST_POLICY = HttpRequestPolicy(
-    min_interval=10.0,
+    min_interval=configured_interval("PAPERTRACK_APS_ISSUE_INTERVAL", 30),
     max_attempts=3,
     backoff=(2.0, 5.0),
 )
@@ -36,7 +41,7 @@ def _is_blocked(html: str) -> bool:
 
 
 def _fetch_html(url: str, required_selector: str = "") -> tuple[str, str]:
-    """Fetch APS HTML with a provider-wide 10-second request floor."""
+    """Fetch APS HTML with a provider-wide 30-second request floor."""
     result = fetch_html_resilient(
         url,
         required_selector=required_selector,

@@ -162,3 +162,34 @@ def test_provider_throttle_is_shared_across_fetch_calls(monkeypatch):
 
 def test_block_detector_does_not_treat_plain_cloudflare_word_as_block():
     assert is_blocked_response("<html>Cloudflare CDN status page text</html>") is False
+
+
+def test_configured_interval_enforces_floor():
+    from papertrack import http_fetch
+
+    assert http_fetch.configured_interval("PAPERTRACK_TEST_INTERVAL", 30, {}) == 30
+    assert http_fetch.configured_interval(
+        "PAPERTRACK_TEST_INTERVAL",
+        30,
+        {"PAPERTRACK_TEST_INTERVAL": "5"},
+    ) == 30
+    assert http_fetch.configured_interval(
+        "PAPERTRACK_TEST_INTERVAL",
+        30,
+        {"PAPERTRACK_TEST_INTERVAL": "45"},
+    ) == 45
+
+
+def test_configured_interval_rejects_non_numeric_value():
+    from papertrack import http_fetch
+
+    try:
+        http_fetch.configured_interval(
+            "PAPERTRACK_TEST_INTERVAL",
+            30,
+            {"PAPERTRACK_TEST_INTERVAL": "fast"},
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "PAPERTRACK_TEST_INTERVAL must be a non-negative number"
+    else:
+        raise AssertionError("non-numeric interval was accepted")

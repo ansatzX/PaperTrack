@@ -19,6 +19,7 @@ from .diagnostics import record_fetch_attempt
 from .http_fetch import (
     HttpFetchResult,
     HttpRequestPolicy,
+    configured_interval,
     fetch_html_resilient,
     is_blocked_response,
 )
@@ -33,7 +34,7 @@ ACS_FETCH_STRATEGIES = (
     ("requests", "default"),
 )
 ACS_REQUEST_POLICY = HttpRequestPolicy(
-    min_interval=1.0,
+    min_interval=configured_interval("PAPERTRACK_ACS_ISSUE_INTERVAL", 30),
     max_attempts=3,
     backoff=(2.0, 5.0),
 )

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 import json
 import sys
+import time
 from urllib.parse import urlencode, urlsplit
 
 from .adapter_result import BLOCKED, FETCH_FAILED, SUCCESS
@@ -34,7 +35,20 @@ def _browser_request_allowed(
     return True
 
 
-def _run(issue_url: str, journal_slug: str) -> dict:
+def _wait_for_abstract_interval(
+    last_request_at: float | None,
+    interval: float,
+) -> float:
+    now = time.monotonic()
+    if last_request_at is not None:
+        delay = max(0.0, last_request_at + interval - now)
+        if delay:
+            time.sleep(delay)
+            now = time.monotonic()
+    return now
+
+
+def _run(issue_url: str, journal_slug: str, abstract_interval: float) -> dict:
     from playwright.sync_api import sync_playwright
 
     endpoint = aip_abstract_url(journal_slug)
@@ -65,9 +79,14 @@ def _run(issue_url: str, journal_slug: str) -> dict:
             article_ids = page.locator(".js-show-abstract[data-articleid]").evaluate_all(
                 "els => [...new Set(els.map(el => el.dataset.articleid).filter(Boolean))]"
             )
+            last_abstract_request_at = None
             for article_id in article_ids:
                 url = endpoint + "?" + urlencode(
                     {"articleId": article_id, "layAbstract": "False"}
+                )
+                last_abstract_request_at = _wait_for_abstract_interval(
+                    last_abstract_request_at,
+                    abstract_interval,
                 )
                 payload = page.evaluate(
                     """async ({url, issueUrl}) => {
@@ -119,9 +138,17 @@ def _run(issue_url: str, journal_slug: str) -> dict:
 
 
 def main() -> None:
-    if len(sys.argv) != 3:
-        raise SystemExit("usage: python -m papertrack.aip_browser ISSUE_URL JOURNAL_SLUG")
-    print(json.dumps(_run(sys.argv[1], sys.argv[2]), ensure_ascii=False))
+    if len(sys.argv) != 4:
+        raise SystemExit(
+            "usage: python -m papertrack.aip_browser "
+            "ISSUE_URL JOURNAL_SLUG ABSTRACT_INTERVAL"
+        )
+    print(
+        json.dumps(
+            _run(sys.argv[1], sys.argv[2], float(sys.argv[3])),
+            ensure_ascii=False,
+        )
+    )
 
 
 if __name__ == "__main__":
