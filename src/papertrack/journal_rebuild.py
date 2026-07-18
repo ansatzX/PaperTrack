@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import fcntl
 import json
+import logging
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -16,6 +17,8 @@ from .codex import journal_configs
 from .report import filter_journal_to_md
 from .source_policy import CrossrefMode, SourcePolicy
 
+
+logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 RESOLVED = "resolved"
@@ -516,7 +519,9 @@ def _targeted_defect_remains(content: str, reason: str) -> bool:
 
 def _assess_report(path: Path, candidate: RebuildCandidate) -> str:
     if not path.exists():
-        return OFFICIAL_SUCCESS_UNRESOLVED
+        raise FileNotFoundError(
+            f"truthy journal rebuild did not produce the expected report: {path}"
+        )
     content = path.read_text(encoding="utf-8")
     if any(_targeted_defect_remains(content, reason) for reason in candidate.reasons):
         return OFFICIAL_SUCCESS_UNRESOLVED
@@ -694,8 +699,17 @@ def run_provider_rebuild(
             else:
                 try:
                     outcome = _assess_report(report_path, candidate)
-                except (OSError, UnicodeError):
+                except BaseException as exc:
                     _restore_report(report_path, backup)
+                    if not isinstance(exc, Exception):
+                        raise
+                    logger.warning(
+                        "Journal rebuild assessment failed for %s at %s; "
+                        "restored prior state and recorded fetch_failed: %s",
+                        candidate.key,
+                        report_path,
+                        exc,
+                    )
                     outcome = FETCH_FAILED
                 else:
                     _discard_report_backup(backup)

@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from papertrack.journal_rebuild import (
+    FETCH_FAILED,
     OFFICIAL_SUCCESS_UNRESOLVED,
     RESOLVED,
     RebuildCandidate,
@@ -653,6 +654,112 @@ def test_verified_success_removes_outer_rebuild_backup(tmp_path, monkeypatch):
         "dispatch",
         ("directory_fsync", path.parent),
     ]
+
+
+def test_truthy_rebuild_without_output_restores_original_and_retries(
+    tmp_path, monkeypatch, caplog
+):
+    module = _configure(monkeypatch)
+    path = tmp_path / "data" / "acs" / "jcim" / "66" / "12.md"
+    path.parent.mkdir(parents=True)
+    original = b"original report bytes\n"
+    path.write_bytes(original)
+    calls = 0
+
+    def rebuild(**kwargs):
+        nonlocal calls
+        calls += 1
+        path.unlink()
+        return True
+
+    monkeypatch.setattr(module, "filter_journal_to_md", rebuild)
+    candidate = _candidate()
+    caplog.set_level("WARNING")
+
+    first = run_provider_rebuild(
+        "acs", (candidate,), tmp_path / "data", tmp_path / "diagnostics"
+    )
+    progress_path = tmp_path / "diagnostics" / "journal_rebuild_acs_state.json"
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    second = run_provider_rebuild(
+        "acs", (candidate,), tmp_path / "data", tmp_path / "diagnostics"
+    )
+
+    assert first.outcomes == {candidate.key: FETCH_FAILED}
+    assert second.outcomes == {candidate.key: FETCH_FAILED}
+    assert progress["issues"][candidate.key]["outcome"] == FETCH_FAILED
+    assert path.read_bytes() == original
+    assert calls == 2
+    assert str(path) in caplog.text
+    assert "did not produce the expected report" in caplog.text
+    assert not list(path.parent.glob(f".{path.name}.papertrack-rebuild-*.bak"))
+
+
+def test_truthy_rebuild_without_new_output_records_failure_and_retries(
+    tmp_path, monkeypatch
+):
+    module = _configure(monkeypatch)
+    path = tmp_path / "data" / "acs" / "jcim" / "66" / "12.md"
+    calls = 0
+
+    def rebuild(**kwargs):
+        nonlocal calls
+        calls += 1
+        assert not path.exists()
+        return True
+
+    monkeypatch.setattr(module, "filter_journal_to_md", rebuild)
+    candidate = _candidate()
+
+    first = run_provider_rebuild(
+        "acs", (candidate,), tmp_path / "data", tmp_path / "diagnostics"
+    )
+    progress_path = tmp_path / "diagnostics" / "journal_rebuild_acs_state.json"
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    second = run_provider_rebuild(
+        "acs", (candidate,), tmp_path / "data", tmp_path / "diagnostics"
+    )
+
+    assert first.outcomes == {candidate.key: FETCH_FAILED}
+    assert second.outcomes == {candidate.key: FETCH_FAILED}
+    assert progress["issues"][candidate.key]["outcome"] == FETCH_FAILED
+    assert not path.exists()
+    assert calls == 2
+
+
+def test_assessment_exception_restores_before_recording_fetch_failure(
+    tmp_path, monkeypatch
+):
+    module = _configure(monkeypatch)
+    path = tmp_path / "data" / "acs" / "jcim" / "66" / "12.md"
+    path.parent.mkdir(parents=True)
+    original = b"assessment recovery bytes\n"
+    path.write_bytes(original)
+
+    def rebuild(**kwargs):
+        path.write_text(
+            _report(("10.1021/new", "New article", "Abstract")),
+            encoding="utf-8",
+        )
+        return True
+
+    monkeypatch.setattr(module, "filter_journal_to_md", rebuild)
+    monkeypatch.setattr(
+        module,
+        "_assess_report",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("assessment exploded")
+        ),
+    )
+    candidate = _candidate("raw_html")
+
+    summary = run_provider_rebuild(
+        "acs", (candidate,), tmp_path / "data", tmp_path / "diagnostics"
+    )
+
+    assert summary.outcomes == {candidate.key: FETCH_FAILED}
+    assert path.read_bytes() == original
+    assert not list(path.parent.glob(f".{path.name}.papertrack-rebuild-*.bak"))
 
 
 def test_progress_is_persisted_with_replace(tmp_path, monkeypatch):
