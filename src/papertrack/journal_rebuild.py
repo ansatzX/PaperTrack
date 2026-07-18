@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import tempfile
 from typing import Iterable
 
@@ -25,6 +26,25 @@ _TERMINAL_OUTCOMES = {
     OFFICIAL_SUCCESS_UNRESOLVED,
     FETCH_FAILED,
 }
+_ASSESSMENT_REASONS = {
+    "lowercase_crossref_doi",
+    "ordinary_article_missing_abstract",
+    "raw_html",
+    "raw_mathml",
+    "whole_issue_missing_abstracts",
+}
+_INFORMATIONAL_REASONS = {"jcim_priority"}
+_SUPPORTED_REASONS = _ASSESSMENT_REASONS | _INFORMATIONAL_REASONS
+_CANDIDATE_FIELDS = {
+    "provider",
+    "journal",
+    "volume",
+    "issue",
+    "relative_path",
+    "classification",
+    "priority",
+    "reasons",
+}
 
 
 @dataclass(frozen=True)
@@ -39,12 +59,28 @@ class RebuildCandidate:
     reasons: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "provider", str(self.provider))
-        object.__setattr__(self, "journal", str(self.journal))
-        object.__setattr__(self, "volume", str(self.volume))
-        object.__setattr__(self, "issue", str(self.issue))
-        object.__setattr__(self, "relative_path", str(self.relative_path))
-        object.__setattr__(self, "reasons", tuple(self.reasons))
+        for field_name in (
+            "provider",
+            "journal",
+            "volume",
+            "issue",
+            "relative_path",
+            "classification",
+        ):
+            value = getattr(self, field_name)
+            if type(value) is not str or not value:
+                raise ValueError(f"candidate {field_name} must be a non-empty string")
+        if type(self.priority) is not int:
+            raise ValueError("candidate priority must be an integer")
+        if not isinstance(self.reasons, (tuple, list)) or not self.reasons:
+            raise ValueError("candidate reasons must be a non-empty sequence")
+        reasons = tuple(self.reasons)
+        if any(type(reason) is not str for reason in reasons):
+            raise ValueError("candidate reasons must contain only strings")
+        unknown = set(reasons) - _SUPPORTED_REASONS
+        if unknown:
+            raise ValueError(f"candidate reasons contain unsupported values: {sorted(unknown)!r}")
+        object.__setattr__(self, "reasons", reasons)
         if self.relative_path != self.expected_relative_path:
             raise ValueError(
                 "relative_path disagrees with provider/journal/volume/issue: "
@@ -70,6 +106,8 @@ class ProgressRecord:
     outcome: str
 
     def __post_init__(self) -> None:
+        if type(self.outcome) is not str:
+            raise ValueError("journal rebuild outcome must be a string")
         if self.outcome not in _TERMINAL_OUTCOMES:
             raise ValueError(f"unknown journal rebuild outcome: {self.outcome!r}")
 
@@ -126,7 +164,10 @@ class RebuildSummary:
 
 
 def _ordered(candidates: Iterable[RebuildCandidate]) -> list[RebuildCandidate]:
-    return sorted(candidates, key=lambda candidate: candidate.priority)
+    return sorted(
+        candidates,
+        key=lambda candidate: (candidate.priority, candidate.relative_path),
+    )
 
 
 def materialize_manifest(
@@ -153,17 +194,50 @@ def load_provider_candidates(
     provider: str,
 ) -> list[RebuildCandidate]:
     """Load and validate one provider's candidates from a runtime manifest."""
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if payload.get("schema_version") != SCHEMA_VERSION:
-        raise ValueError("unsupported journal rebuild manifest schema")
-    if payload.get("audit") != {"kind": "offline_markdown_quality"}:
-        raise ValueError("unexpected journal rebuild manifest audit kind")
-    candidates = [RebuildCandidate(**item) for item in payload.get("issues", [])]
+    candidates = _load_manifest_candidates(Path(path))
     return [
         candidate
         for candidate in _ordered(candidates)
         if candidate.provider == provider
     ]
+
+
+def _read_json_object(path: Path, kind: str) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid {kind} {path}: JSON read failed: {exc}") from exc
+    if type(payload) is not dict:
+        raise ValueError(f"invalid {kind} {path}: top level must be an object")
+    return payload
+
+
+def _load_manifest_candidates(path: Path) -> list[RebuildCandidate]:
+    payload = _read_json_object(path, "journal rebuild manifest")
+    if type(payload.get("schema_version")) is not int:
+        raise ValueError("journal rebuild manifest schema_version must be an integer")
+    if payload.get("schema_version") != SCHEMA_VERSION:
+        raise ValueError("unsupported journal rebuild manifest schema")
+    if type(payload.get("audit")) is not dict:
+        raise ValueError("journal rebuild manifest audit must be an object")
+    if payload.get("audit") != {"kind": "offline_markdown_quality"}:
+        raise ValueError("unexpected journal rebuild manifest audit kind")
+    if "issues" not in payload or type(payload["issues"]) is not list:
+        raise ValueError("journal rebuild manifest issues must be a list")
+    candidates = []
+    for index, item in enumerate(payload["issues"]):
+        context = f"journal rebuild manifest issues[{index}]"
+        if type(item) is not dict:
+            raise ValueError(f"{context} must be an object")
+        if set(item) != _CANDIDATE_FIELDS:
+            raise ValueError(f"{context} must contain exactly the candidate fields")
+        if type(item["reasons"]) is not list:
+            raise ValueError(f"{context}.reasons must be a list")
+        try:
+            candidates.append(RebuildCandidate(**item))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid {context}: {exc}") from exc
+    return candidates
 
 
 def _progress_path(diagnostics_dir: Path, provider: str) -> Path:
@@ -173,15 +247,37 @@ def _progress_path(diagnostics_dir: Path, provider: str) -> Path:
 def _load_progress(path: Path, provider: str) -> ProviderProgress:
     if not path.exists():
         return ProviderProgress(provider=provider, issues={})
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = _read_json_object(path, "journal rebuild progress")
+    if type(payload.get("schema_version")) is not int:
+        raise ValueError("journal rebuild progress schema_version must be an integer")
     if payload.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("unsupported journal rebuild progress schema")
+    if type(payload.get("provider")) is not str:
+        raise ValueError("journal rebuild progress provider must be a string")
     if payload.get("provider") != provider:
         raise ValueError("journal rebuild progress provider mismatch")
-    issues = {
-        key: ProgressRecord(**record)
-        for key, record in payload.get("issues", {}).items()
-    }
+    if "issues" not in payload or type(payload["issues"]) is not dict:
+        raise ValueError("journal rebuild progress issues must be an object")
+    issues = {}
+    for key, record in payload["issues"].items():
+        context = f"journal rebuild progress issues[{key!r}]"
+        if type(key) is not str or not key:
+            raise ValueError("journal rebuild progress issues keys must be strings")
+        key_parts = PurePosixPath(key).parts
+        if (
+            len(key_parts) != 4
+            or key_parts[0] != provider
+            or key_parts[-1] in {".md", "..md"}
+            or not key_parts[-1].endswith(".md")
+            or any(part in {".", ".."} for part in key_parts)
+        ):
+            raise ValueError(f"{context} is not a valid provider issue path")
+        if type(record) is not dict or set(record) != {"outcome"}:
+            raise ValueError(f"{context} must contain exactly outcome")
+        try:
+            issues[key] = ProgressRecord(**record)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid {context}: {exc}") from exc
     return ProviderProgress(provider=provider, issues=issues)
 
 
@@ -231,16 +327,9 @@ def _materialize_provider_manifest(
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         retained: list[RebuildCandidate] = []
         if manifest_path.exists():
-            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if payload.get("schema_version") != SCHEMA_VERSION:
-                raise ValueError("unsupported journal rebuild manifest schema")
-            if payload.get("audit") != {"kind": "offline_markdown_quality"}:
-                raise ValueError("unexpected journal rebuild manifest audit kind")
             retained = [
                 candidate
-                for candidate in (
-                    RebuildCandidate(**item) for item in payload.get("issues", [])
-                )
+                for candidate in _load_manifest_candidates(manifest_path)
                 if candidate.provider != provider
             ]
         materialize_manifest(manifest_path, (*retained, *candidates))
@@ -269,7 +358,16 @@ _EXEMPT_TITLE = re.compile(
     re.IGNORECASE,
 )
 _RAW_HTML = re.compile(r"</?[A-Za-z][^>]*>")
-_RAW_MATHML = re.compile(r"<(?:mml:)?math\b", re.IGNORECASE)
+_RAW_MATHML = re.compile(
+    r"</?(?:"
+    r"mml:[A-Za-z][\w.-]*|"
+    r"math|maction|maligngroup|malignmark|menclose|merror|mfenced|mfrac|mi|"
+    r"mlabeledtr|mmultiscripts|mn|mo|mover|mpadded|mphantom|mprescripts|"
+    r"mroot|mrow|ms|mspace|msqrt|mstyle|msub|msubsup|msup|mtable|mtd|"
+    r"mtext|mtr|munder|munderover|none|semantics|annotation|annotation-xml"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 def _field(entry_body: str, name: str) -> str:
@@ -311,8 +409,21 @@ def _generated_entries(content: str) -> tuple[_GeneratedEntry, ...]:
     return tuple(entries)
 
 
+def _existing_collected_dois(content: str) -> set[str]:
+    section = re.search(
+        r"^## collected\s*$\n(.*?)^## not collected\s*$",
+        content,
+        re.MULTILINE | re.DOTALL,
+    )
+    if not section:
+        return set()
+    return set(_ENTRY_HEADING.findall(section.group(1)))
+
+
 def _targeted_defect_remains(content: str, reason: str) -> bool:
     entries = _generated_entries(content)
+    if reason in _INFORMATIONAL_REASONS:
+        return False
     if reason == "raw_html":
         return any(_RAW_HTML.search(entry.generated_metadata) for entry in entries)
     if reason == "raw_mathml":
@@ -338,15 +449,51 @@ def _assess_report(path: Path, candidate: RebuildCandidate) -> str:
     return RESOLVED
 
 
-def _restore_report(path: Path, original: bytes | None) -> None:
-    if original is None:
+def _create_report_backup(path: Path) -> Path | None:
+    """Create and fsync a same-directory backup before external mutation."""
+    if not path.exists():
+        return None
+    backup_name: str | None = None
+    try:
+        with path.open("rb") as source, tempfile.NamedTemporaryFile(
+            "wb",
+            dir=path.parent,
+            prefix=f".{path.name}.papertrack-rebuild-",
+            suffix=".bak",
+            delete=False,
+        ) as backup:
+            backup_name = backup.name
+            shutil.copyfileobj(source, backup)
+            os.fchmod(backup.fileno(), path.stat().st_mode)
+            backup.flush()
+            os.fsync(backup.fileno())
+        return Path(backup_name)
+    except BaseException:
+        if backup_name is not None:
+            try:
+                os.unlink(backup_name)
+            except FileNotFoundError:
+                pass
+        raise
+
+
+def _restore_report(path: Path, backup: Path | None) -> None:
+    if backup is None:
         try:
             path.unlink()
         except FileNotFoundError:
             pass
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(original)
+    os.replace(backup, path)
+
+
+def _discard_report_backup(backup: Path | None) -> None:
+    if backup is None:
+        return
+    try:
+        backup.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _journal_config(candidate: RebuildCandidate) -> dict[str, str]:
@@ -415,7 +562,15 @@ def run_provider_rebuild(
 
         config = _journal_config(candidate)
         report_path = data_path / PurePosixPath(candidate.relative_path)
-        original = report_path.read_bytes() if report_path.exists() else None
+        backup = _create_report_backup(report_path)
+        try:
+            collected_dois = (
+                _existing_collected_dois(backup.read_text(encoding="utf-8"))
+                if backup is not None
+                else set()
+            )
+        except UnicodeError:
+            collected_dois = set()
         attempted.append(candidate.key)
         try:
             success = filter_journal_to_md(
@@ -429,21 +584,25 @@ def run_provider_rebuild(
                 acs_code=config.get("acs_code", ""),
                 provider=config.get("provider", provider),
                 source_policy=SourcePolicy(CrossrefMode.METADATA),
+                existing_collected_dois=collected_dois,
             )
         except BaseException as exc:
-            _restore_report(report_path, original)
+            _restore_report(report_path, backup)
             if not isinstance(exc, Exception):
                 raise
             outcome = FETCH_FAILED
         else:
             if not success:
-                _restore_report(report_path, original)
+                _restore_report(report_path, backup)
                 outcome = FETCH_FAILED
             else:
                 try:
                     outcome = _assess_report(report_path, candidate)
                 except (OSError, UnicodeError):
-                    outcome = OFFICIAL_SUCCESS_UNRESOLVED
+                    _restore_report(report_path, backup)
+                    outcome = FETCH_FAILED
+                else:
+                    _discard_report_backup(backup)
 
         outcomes[candidate.key] = outcome
         progress.issues[candidate.key] = ProgressRecord(outcome)

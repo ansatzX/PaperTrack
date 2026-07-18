@@ -334,7 +334,9 @@ def _render_journal_report(journal_name: str, journal_slug: str,
 
 
 def _classify_journal_papers(entries: dict[str, JournalEntry],
-                              zotero: ZoteroQuery | None) -> tuple[list[str], list[str]]:
+                              zotero: ZoteroQuery | None,
+                              existing_collected_dois: set[str] | None = None,
+                              ) -> tuple[list[str], list[str]]:
     collected: list[str] = []
     not_collected: list[str] = []
 
@@ -349,6 +351,8 @@ def _classify_journal_papers(entries: dict[str, JournalEntry],
                 collected.append(_render_journal_paper(entry))
             else:
                 not_collected.append(_render_journal_paper(entry))
+        elif existing_collected_dois and doi in existing_collected_dois:
+            collected.append(_render_journal_paper(entry))
         else:
             not_collected.append(_render_journal_paper(entry))
 
@@ -407,7 +411,9 @@ def filter_journal_to_md(journal_name: str, journal_slug: str,
                          md_folder: str, zotero: ZoteroQuery | None = None,
                          year: int | None = None, acs_code: str = "",
                          provider: str = "",
-                         source_policy: SourcePolicy | None = None) -> bool:
+                         source_policy: SourcePolicy | None = None,
+                         existing_collected_dois: set[str] | None = None,
+                         ) -> bool:
     """Fetch journal articles for a volume/issue and write a Markdown report.
 
     The report goes to {md_folder}/{journal_slug}/{volume}/{issue}.md
@@ -450,7 +456,11 @@ def filter_journal_to_md(journal_name: str, journal_slug: str,
 
     parse_old = parse_journal_report(report_file)
     old_content = _read_existing_report(report_file)
-    collected, not_collected = _classify_journal_papers(entries, zotero)
+    collected, not_collected = _classify_journal_papers(
+        entries,
+        zotero,
+        existing_collected_dois,
+    )
 
     new_data: list[str] = []
     if parse_old is not None:
