@@ -16,6 +16,7 @@ data/
 docs/
 .claude/
 .pytest_cache
+# Local runtime fetch and rebuild diagnostics
 .papertrack_diagnostics/
 .papertrack_state.json
 .worktrees/
