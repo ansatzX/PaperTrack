@@ -29,18 +29,32 @@ def _isolated_wrapper(
 import os
 import signal
 import sys
+import time
 from pathlib import Path
 
 marker_dir = Path(os.environ["PAPERTRACK_FAKE_MARKER_DIR"])
 provider = Path(__file__).stem.split("_")[1]
 (marker_dir / f"{provider}.started").write_text(str(os.getpid()))
 
+exit_code = os.environ.get(f"PAPERTRACK_FAKE_{provider.upper()}_EXIT")
+if exit_code is not None:
+    (marker_dir / f"{provider}.finished").write_text(exit_code)
+    raise SystemExit(int(exit_code))
+
+if os.environ.get("PAPERTRACK_FAKE_FINISH_PROVIDER") == provider:
+    gate = marker_dir / f"{provider}.finish_gate"
+    while not gate.exists():
+        time.sleep(0.01)
+    (marker_dir / f"{provider}.finished").write_text("finished")
+    raise SystemExit(0)
+
 def stop(signum, _frame):
     (marker_dir / f"{provider}.signal").write_text(str(signum))
     raise SystemExit(128 + signum)
 
+if os.environ.get("PAPERTRACK_FAKE_NO_INT_HANDLER_PROVIDER") != provider:
+    signal.signal(signal.SIGINT, stop)
 signal.signal(signal.SIGTERM, stop)
-signal.signal(signal.SIGINT, stop)
 while True:
     signal.pause()
 """
@@ -55,7 +69,6 @@ while True:
         fake_conda,
         """#!/usr/bin/env bash
 set -uo pipefail
-trap - TERM INT
 
 provider=unknown
 for argument in "$@"; do
@@ -72,11 +85,20 @@ if [[ "${PAPERTRACK_FAKE_SIGNAL_PARENT_PROVIDER:-}" == "$provider" ]]; then
 fi
 
 shift 4
-"$@" &
-child=$!
-wait "$child"
+if [[ "${PAPERTRACK_FAKE_CONDA_EXIT_PROVIDER:-}" == "$provider" ]]; then
+    "$@" &
+    printf 'exited' > "${PAPERTRACK_FAKE_MARKER_DIR}/${provider}.conda_exited"
+    exit 0
+fi
+exec "$@"
 """,
     )
+
+    supervisor = ROOT / "scripts/run_j_worker_supervisor.py"
+    if supervisor.exists():
+        (scripts_dir / supervisor.name).write_text(
+            supervisor.read_text(encoding="utf-8"), encoding="utf-8"
+        )
 
     wrapper_content = (ROOT / "run_j.sh").read_text(encoding="utf-8")
     replacements = {
@@ -119,11 +141,21 @@ def _wait_for_paths(paths: list[Path], timeout: float = 5.0) -> None:
     raise AssertionError(f"timed out waiting for marker files: {missing}")
 
 
+def _wait_until(predicate, description: str, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"timed out waiting for {description}")
+
+
 def _cleanup_process_groups(process: subprocess.Popen[str], marker_dir: Path) -> None:
-    for marker in marker_dir.glob("*.conda"):
+    for marker in (*marker_dir.glob("*.started"), *marker_dir.glob("*.conda")):
         try:
-            os.killpg(int(marker.read_text(encoding="utf-8")), signal.SIGKILL)
-        except (ProcessLookupError, ValueError):
+            pid = int(marker.read_text(encoding="utf-8"))
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except (ProcessLookupError, ValueError, PermissionError):
             pass
     try:
         os.killpg(process.pid, signal.SIGKILL)
@@ -132,9 +164,9 @@ def _cleanup_process_groups(process: subprocess.Popen[str], marker_dir: Path) ->
 
 
 def _assert_recorded_process_groups_are_gone(marker_dir: Path) -> None:
-    for marker in marker_dir.glob("*.conda"):
-        with pytest.raises(ProcessLookupError):
-            os.killpg(int(marker.read_text(encoding="utf-8")), 0)
+    for marker in (*marker_dir.glob("*.started"), *marker_dir.glob("*.conda")):
+        pid = int(marker.read_text(encoding="utf-8"))
+        assert not Path(f"/proc/{pid}").exists()
 
 
 def _communicate_bounded(
@@ -175,10 +207,10 @@ def test_run_j_signal_reaches_all_provider_descendants_and_reaps_groups(
     try:
         _wait_for_paths(started)
         process.send_signal(shutdown_signal)
-        _communicate_bounded(process, marker_dir)
+        _, stderr = _communicate_bounded(process, marker_dir)
         _wait_for_paths(signaled)
 
-        assert process.returncode == expected_status
+        assert process.returncode == expected_status, stderr
         assert [path.read_text(encoding="utf-8") for path in signaled] == [
             expected_marker,
             expected_marker,
@@ -207,10 +239,217 @@ def test_run_j_pending_shutdown_signals_just_launched_group_and_stops_launching(
     )
 
     try:
-        _communicate_bounded(process, marker_dir)
+        _, stderr = _communicate_bounded(process, marker_dir)
 
         assert process.returncode == 143
         assert not (marker_dir / "aip.conda").exists()
         assert not (marker_dir / "aps.conda").exists()
     finally:
         _cleanup_process_groups(process, marker_dir)
+
+
+def test_run_j_resets_inherited_sigint_for_descendant_without_handler(tmp_path):
+    wrapper, marker_dir = _isolated_wrapper(tmp_path)
+    environment = os.environ | {
+        "PAPERTRACK_FAKE_MARKER_DIR": str(marker_dir),
+        "PAPERTRACK_FAKE_NO_INT_HANDLER_PROVIDER": "acs",
+    }
+    process = subprocess.Popen(
+        ["bash", str(wrapper)],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    try:
+        _wait_for_paths(
+            [marker_dir / f"{provider}.started" for provider in ("acs", "aip", "aps")]
+        )
+        process.send_signal(signal.SIGINT)
+        _, stderr = _communicate_bounded(process, marker_dir)
+
+        assert process.returncode == 130, stderr
+        assert not (marker_dir / "acs.signal").exists()
+        _assert_recorded_process_groups_are_gone(marker_dir)
+    finally:
+        _cleanup_process_groups(process, marker_dir)
+
+
+def _find_direct_supervisor(wrapper_pid: int, provider: str) -> int | None:
+    children_path = Path(f"/proc/{wrapper_pid}/task/{wrapper_pid}/children")
+    try:
+        children = children_path.read_text(encoding="utf-8").split()
+    except FileNotFoundError:
+        return None
+    for child in children:
+        try:
+            command = Path(f"/proc/{child}/cmdline").read_bytes().replace(b"\0", b" ")
+        except FileNotFoundError:
+            continue
+        if f"rebuild_{provider}_candidates.py".encode() in command:
+            return int(child)
+    return None
+
+
+def _proc_starttime(pid: int) -> str:
+    stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    closing_paren = stat.rfind(") ")
+    assert closing_paren >= 0
+    return stat[closing_paren + 2 :].split()[19]
+
+
+def test_run_j_reaps_later_provider_as_soon_as_it_finishes(tmp_path):
+    wrapper, marker_dir = _isolated_wrapper(tmp_path)
+    environment = os.environ | {
+        "PAPERTRACK_FAKE_MARKER_DIR": str(marker_dir),
+        "PAPERTRACK_FAKE_FINISH_PROVIDER": "aps",
+    }
+    process = subprocess.Popen(
+        ["bash", str(wrapper)],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    try:
+        _wait_for_paths(
+            [marker_dir / f"{provider}.started" for provider in ("acs", "aip", "aps")]
+        )
+        supervisor_pid: list[int] = []
+
+        def found_aps_supervisor() -> bool:
+            pid = _find_direct_supervisor(process.pid, "aps")
+            if pid is not None:
+                supervisor_pid[:] = [pid]
+                return True
+            return False
+
+        _wait_until(found_aps_supervisor, "APS supervisor ownership")
+        (marker_dir / "aps.finish_gate").touch()
+        _wait_for_paths([marker_dir / "aps.finished"])
+        _wait_until(
+            lambda: not Path(f"/proc/{supervisor_pid[0]}").exists(),
+            "prompt APS supervisor reap",
+        )
+        assert (marker_dir / "acs.started").exists()
+        assert (marker_dir / "aip.started").exists()
+
+        process.send_signal(signal.SIGTERM)
+        _, stderr = _communicate_bounded(process, marker_dir)
+        assert process.returncode == 143, stderr
+    finally:
+        _cleanup_process_groups(process, marker_dir)
+
+
+def test_run_j_supervisor_owns_group_after_conda_exits_with_descendant(tmp_path):
+    wrapper, marker_dir = _isolated_wrapper(tmp_path)
+    environment = os.environ | {
+        "PAPERTRACK_FAKE_MARKER_DIR": str(marker_dir),
+        "PAPERTRACK_FAKE_CONDA_EXIT_PROVIDER": "acs",
+    }
+    process = subprocess.Popen(
+        ["bash", str(wrapper)],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    try:
+        _wait_for_paths(
+            [
+                marker_dir / "acs.started",
+                marker_dir / "acs.conda_exited",
+                marker_dir / "aip.started",
+                marker_dir / "aps.started",
+            ]
+        )
+        process.send_signal(signal.SIGTERM)
+        _, stderr = _communicate_bounded(process, marker_dir)
+        _wait_for_paths([marker_dir / "acs.signal"])
+
+        assert process.returncode == 143, stderr
+        _assert_recorded_process_groups_are_gone(marker_dir)
+    finally:
+        _cleanup_process_groups(process, marker_dir)
+
+
+def test_run_j_waits_all_supervisors_and_aggregates_ordinary_failure(tmp_path):
+    wrapper, marker_dir = _isolated_wrapper(tmp_path)
+    environment = os.environ | {
+        "PAPERTRACK_FAKE_MARKER_DIR": str(marker_dir),
+        "PAPERTRACK_FAKE_ACS_EXIT": "0",
+        "PAPERTRACK_FAKE_AIP_EXIT": "7",
+        "PAPERTRACK_FAKE_APS_EXIT": "0",
+    }
+    process = subprocess.Popen(
+        ["bash", str(wrapper)],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    try:
+        _, stderr = _communicate_bounded(process, marker_dir)
+
+        assert process.returncode == 1, stderr
+        assert [
+            (marker_dir / f"{provider}.finished").read_text(encoding="utf-8")
+            for provider in ("acs", "aip", "aps")
+        ] == ["0", "7", "0"]
+    finally:
+        _cleanup_process_groups(process, marker_dir)
+
+
+def test_supervisor_ownership_verifier_rejects_unrelated_session(tmp_path):
+    supervisor = ROOT / "scripts/run_j_worker_supervisor.py"
+    unrelated = subprocess.Popen(
+        [
+            "/usr/bin/setsid",
+            "/usr/bin/python3",
+            "-c",
+            "import signal; signal.pause()",
+            "--ownership-token",
+            "spoofed-token",
+        ],
+        start_new_session=False,
+    )
+
+    try:
+        _wait_until(
+            lambda: Path(f"/proc/{unrelated.pid}").exists(),
+            "unrelated session leader",
+        )
+        completed = subprocess.run(
+            [
+                "/usr/bin/python3",
+                str(supervisor),
+                "--verify-owner",
+                str(unrelated.pid),
+                "spoofed-token",
+                _proc_starttime(unrelated.pid),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert completed.returncode == 1
+        os.kill(unrelated.pid, 0)
+    finally:
+        try:
+            os.killpg(unrelated.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        unrelated.wait(timeout=5)

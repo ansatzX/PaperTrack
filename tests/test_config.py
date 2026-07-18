@@ -105,21 +105,22 @@ def test_run_j_sh_defines_and_reaps_exactly_three_provider_workers():
         ]
         assert len(matching_lines) == 1
 
-    assert '/usr/bin/setsid "$CONDA_BIN" run' in active_lines
+    assert '/usr/bin/setsid /usr/bin/python3 "$SUPERVISOR"' in active_lines
     assert active_lines.count('"${worker_flags[@]}" &') == 1
     assert 'pid="$!"' in active_lines
-    assert 'child_pids+=("$pid")' in active_lines
+    assert 'owned_tokens["$pid"]="$token"' in active_lines
+    assert 'owned_starttimes["$pid"]=""' in active_lines
+    assert 'owned_ready_files["$pid"]="$ready_file"' in active_lines
+    assert '--ready-file "$ready_file"' in active_lines
+    assert '[[ -s "$ready_file" ]]' in active_lines
     assert 'for script in "${worker_scripts[@]}"; do' in active_lines
     assert 'start_worker "$script" || break' in active_lines
-    assert 'for index in "${!child_pids[@]}"; do' in active_lines
-    assert 'wait "$pid"' in active_lines
-    assert 'unset \'child_pids[index]\'' in active_lines
+    assert 'while ((${#owned_tokens[@]} > 0)); do' in active_lines
+    assert 'wait -n -p completed_pid "${active_pids[@]}"' in active_lines
+    assert "unset 'owned_tokens[$completed_pid]'" in active_lines
     assert "child_status != 0 && shutdown_status == 0 && final_status == 0" in active_lines
     assert 'kill -s "$signal" -- "-$pid"' in active_lines
-    assert "pid != wrapper_pgid" in active_lines
-    assert "signal_generation=0" in active_lines
-    assert "((signal_generation += 1))" in active_lines
-    assert "observed_signal_generation != signal_generation" in active_lines
+    assert '--verify-owner "$pid" "$token" "$starttime"' in active_lines
     assert 'if [[ -n "$shutdown_signal" ]]; then' in active_lines
     assert "set -e" not in active_lines
     assert "trap 'forward_signal TERM' TERM" in active_lines

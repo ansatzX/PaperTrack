@@ -22,6 +22,7 @@ CONDA_BIN=/home/ansatz/soft/miniconda3/bin/conda
 CONDA_ENV=arxiv
 DATA_DIR=/home/ansatz/data/obsidian/1/papertrack_datas
 DIAGNOSTICS_DIR="${PROJECT_DIR}/.papertrack_diagnostics"
+SUPERVISOR="${PROJECT_DIR}/scripts/run_j_worker_supervisor.py"
 
 export PAPERTRACK_CROSSREF_MODE=metadata
 export PAPERTRACK_ACS_ISSUE_INTERVAL=30
@@ -31,48 +32,73 @@ export PAPERTRACK_APS_ISSUE_INTERVAL=30
 
 cd "$PROJECT_DIR"
 
-child_pids=()
+ownership_dir="$(mktemp -d "${TMPDIR:-/tmp}/papertrack-run-j.XXXXXX")" || {
+    echo "unable to create journal worker ownership directory" >&2
+    exit 1
+}
+cleanup_ownership_dir() {
+    rm -rf -- "$ownership_dir"
+}
+trap cleanup_ownership_dir EXIT
+
 worker_scripts=(
     scripts/rebuild_acs_candidates.py
     scripts/rebuild_aip_candidates.py
     scripts/rebuild_aps_candidates.py
 )
+declare -A owned_tokens=()
+declare -A owned_starttimes=()
+declare -A owned_scripts=()
+declare -A owned_ready_files=()
 final_status=0
-signal_generation=0
 shutdown_signal=""
 shutdown_status=0
-wrapper_pgid="$(ps -o pgid= -p "$$")"
-wrapper_pgid="${wrapper_pgid//[[:space:]]/}"
 
-signal_process_group() {
-    local signal="$1"
-    local pid="$2"
-    local attempt pgid
+capture_owned_starttime() {
+    local pid="$1"
+    local token="$2"
+    local ready_file="${owned_ready_files[$pid]:-}"
+    local attempt starttime
 
-    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
-    (( pid != wrapper_pgid )) || return 1
-
-    # The parent can run immediately after forking, before setsid(1) has made
-    # the child its own group leader. Never signal the wrapper's group; wait
-    # briefly for the recorded PID to become the dedicated PGID instead.
     for ((attempt = 0; attempt < 100; attempt++)); do
-        pgid="$(ps -o pgid= -p "$pid" 2>/dev/null)" || return 0
-        pgid="${pgid//[[:space:]]/}"
-        if [[ "$pgid" == "$pid" ]]; then
-            kill -s "$signal" -- "-$pid" 2>/dev/null || true
-            return 0
+        if [[ -s "$ready_file" ]]; then
+            starttime="$(<"$ready_file")"
+            if /usr/bin/python3 "$SUPERVISOR" \
+                --verify-owner "$pid" "$token" "$starttime"; then
+                owned_starttimes["$pid"]="$starttime"
+                return 0
+            fi
         fi
+        [[ -e "/proc/$pid" ]] || return 1
         sleep 0.01
     done
-
-    echo "unable to signal worker group $pid safely" >&2
     return 1
+}
+
+signal_owned_group() {
+    local signal="$1"
+    local pid="$2"
+    local token="${owned_tokens[$pid]:-}"
+    local starttime="${owned_starttimes[$pid]:-}"
+
+    [[ -n "$token" ]] || return 0
+    if [[ -z "$starttime" ]]; then
+        capture_owned_starttime "$pid" "$token" || return 0
+        starttime="${owned_starttimes[$pid]}"
+    fi
+    if /usr/bin/python3 "$SUPERVISOR" \
+        --verify-owner "$pid" "$token" "$starttime"; then
+        kill -s "$signal" -- "-$pid" 2>/dev/null || true
+        return 0
+    fi
+    echo "refusing to signal unowned worker group $pid" >&2
+    return 0
 }
 
 forward_signal() {
     local signal="$1"
     local signal_status=1
-    local index pid
+    local pid
 
     if [[ "$signal" == TERM ]]; then
         signal_status=143
@@ -84,31 +110,38 @@ forward_signal() {
         shutdown_status="$signal_status"
         final_status="$signal_status"
     fi
-    ((signal_generation += 1))
-
-    for index in "${!child_pids[@]}"; do
-        pid="${child_pids[$index]}"
-        signal_process_group "$signal" "$pid" || true
+    for pid in "${!owned_tokens[@]}"; do
+        signal_owned_group "$signal" "$pid"
     done
 }
 
 start_worker() {
     local script="$1"
-    local pid
+    local pid provider ready_file token
 
     [[ -z "$shutdown_signal" ]] || return 1
 
-    /usr/bin/setsid "$CONDA_BIN" run --no-capture-output -n "$CONDA_ENV" \
-        python "$script" \
-        --data-dir "$DATA_DIR" --diagnostics-dir "$DIAGNOSTICS_DIR" \
-        "${worker_flags[@]}" &
+    provider="${script#scripts/rebuild_}"
+    provider="${provider%_candidates.py}"
+    token="papertrack-${provider}-$$-${RANDOM}-${#owned_tokens[@]}"
+    ready_file="${ownership_dir}/${provider}.ready"
+    /usr/bin/setsid /usr/bin/python3 "$SUPERVISOR" \
+        --ownership-token "$token" --ready-file "$ready_file" -- \
+        "$CONDA_BIN" run --no-capture-output -n "$CONDA_ENV" \
+            python "$script" \
+            --data-dir "$DATA_DIR" --diagnostics-dir "$DIAGNOSTICS_DIR" \
+            "${worker_flags[@]}" &
     pid="$!"
-    child_pids+=("$pid")
+    owned_tokens["$pid"]="$token"
+    owned_starttimes["$pid"]=""
+    owned_scripts["$pid"]="$script"
+    owned_ready_files["$pid"]="$ready_file"
+    capture_owned_starttime "$pid" "$token" || true
 
     # A trap can run after the pre-launch check but before this PID is stored.
     # Persisted shutdown state closes that window for the newly created group.
     if [[ -n "$shutdown_signal" ]]; then
-        signal_process_group "$shutdown_signal" "$pid" || true
+        signal_owned_group "$shutdown_signal" "$pid"
         return 1
     fi
 }
@@ -120,18 +153,18 @@ for script in "${worker_scripts[@]}"; do
     start_worker "$script" || break
 done
 
-for index in "${!child_pids[@]}"; do
-    pid="${child_pids[$index]}"
-    while true; do
-        observed_signal_generation="$signal_generation"
-        wait "$pid"
-        child_status=$?
-        if (( observed_signal_generation != signal_generation )); then
-            continue
-        fi
-        break
-    done
-    unset 'child_pids[index]'
+while ((${#owned_tokens[@]} > 0)); do
+    active_pids=("${!owned_tokens[@]}")
+    completed_pid=""
+    wait -n -p completed_pid "${active_pids[@]}"
+    child_status=$?
+    if [[ -z "${completed_pid:-}" ]]; then
+        continue
+    fi
+    unset 'owned_tokens[$completed_pid]'
+    unset 'owned_starttimes[$completed_pid]'
+    unset 'owned_scripts[$completed_pid]'
+    unset 'owned_ready_files[$completed_pid]'
     if (( child_status != 0 && shutdown_status == 0 && final_status == 0 )); then
         final_status=1
     fi
