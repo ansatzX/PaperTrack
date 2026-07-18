@@ -14,20 +14,11 @@ ARXIV_REFRESH_DAYS=30
 ARXIV_BACKFILL_FROM=2026-01-01
 ARXIV_REQUEST_DELAY_SECONDS=10
 ARXIV_RATE_LIMIT_BACKOFF=30,60,120
-# Formal journal issue fetching is intentionally paused while the arXiv ledger
-# is stabilized. Keep the previous configuration here so it can be restored
-# without rediscovering the production command shape.
-# JOURNAL_FROM_YEAR=2018
-# JOURNALS=(jctc jcim jcp prl)
 
 cd "$PROJECT_DIR"
 
 export PAPERTRACK_ARXIV_REQUEST_DELAY="$ARXIV_REQUEST_DELAY_SECONDS"
 export PAPERTRACK_ARXIV_RATE_LIMIT_BACKOFF="$ARXIV_RATE_LIMIT_BACKOFF"
-# This stable scheduled wrapper may complete missing abstracts from CrossRef.
-# Direct development commands leave this unset and therefore use official
-# publisher sources only.
-export PAPERTRACK_CROSSREF_MODE=metadata
 
 run_papertrack() {
     "$CONDA_BIN" run --no-capture-output -n "$CONDA_ENV" python main.py \
@@ -61,11 +52,3 @@ for category in "${ARXIV_CATEGORY_LIST[@]}"; do
             --data-dir "$DATA_DIR"
     fi
 done
-
-# Issue ledger refresh is paused.
-# for journal in "${JOURNALS[@]}"; do
-#     run_papertrack journal backfill \
-#         --journal "$journal" \
-#         --from-year "$JOURNAL_FROM_YEAR" \
-#         --data-dir "$DATA_DIR"
-# done

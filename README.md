@@ -8,8 +8,9 @@ The current journal workflow is source-conscious:
 - ACS journals such as JCTC use ACS issue pages as the primary source.
 - AIP journals such as JCP use AIP issue pages as the primary source.
 - APS journals such as PRL use APS issue pages as the primary source.
-- CrossRef is disabled by default. The stable `run.sh` wrapper enables it only
-  to fill missing abstracts by exact DOI; it never decides issue membership.
+- CrossRef is disabled by default. The journal-only `run_j.sh` wrapper enables
+  metadata mode only to fill missing abstracts by exact DOI; it never decides
+  issue membership.
 
 ## Requirements
 
@@ -53,8 +54,8 @@ python main.py journal latest \
 
 In default official-only development mode, AIP `latest`/`backfill` cannot
 discover volume/issue pairs without CrossRef. Use the explicit `journal issue`
-command shown below. The repository-provided `run.sh` is the production path
-that enables metadata-mode discovery.
+command shown below. The repository-provided `run_j.sh` is the production
+journal rebuild path that enables metadata mode.
 
 Backfill journal issues:
 
@@ -90,11 +91,71 @@ python main.py repair \
   --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
 ```
 
-`run.sh` uses the local conda environment:
+Both production wrappers use the local conda environment:
 
 ```bash
 /home/ansatz/soft/miniconda3/bin/conda run -n arxiv python main.py ...
 ```
+
+## Scheduled Production Wrappers
+
+arXiv and journal work have separate entry points and should use separate cron
+invocations. For example:
+
+```cron
+0 1 * * * /home/ansatz/data/code/arxiv_reading/run.sh
+0 4 * * 0 /home/ansatz/data/code/arxiv_reading/run_j.sh
+```
+
+`run.sh` is arXiv-only. It refreshes the existing `chem-ph`, `quant-ph`,
+`cs.AI`, and `cs.LG` ledgers over the rolling 30-day window, or backfills a new
+empty category from 2026-01-01. It retains the arXiv 10-second request delay and
+30/60/120-second rate-limit backoff.
+
+`run_j.sh` concurrently starts the ACS, AIP, and APS candidate workers. It is a
+bounded repair run over exactly 43 audited issues: 2 ACS, 32 AIP, and 9 APS. It
+does not run general journal discovery or expand the candidate lists. The
+wrapper waits for all three providers even if one fails and returns nonzero if
+any provider leaves failed or unresolved work.
+
+With no arguments, a journal run resumes each provider's durable progress and
+skips already resolved candidates. The only accepted optional arguments are
+passed identically to all three workers:
+
+```bash
+./run_j.sh --retry-unresolved  # retry records currently marked unresolved
+./run_j.sh --reset-progress    # discard provider progress and assess all candidates
+./run_j.sh --dry-run           # inspect the ordered work without publisher requests
+```
+
+The flags can be combined. Unknown arguments are rejected rather than forwarded
+to the worker commands.
+
+Journal rebuild runtime files live under the ignored, machine-local
+`.papertrack_diagnostics/` directory:
+
+```text
+journal_rebuild_manifest.json
+journal_rebuild_acs_state.json
+journal_rebuild_aip_state.json
+journal_rebuild_aps_state.json
+```
+
+The shared manifest records only the approved candidates, while the provider
+state files record resumable outcomes. These JSON files are runtime state, are
+ignored by Git, and should not be treated as source configuration.
+
+The wrapper exports request intervals of 30 seconds for ACS issue pages, 30
+seconds for AIP issue pages, 10 seconds for AIP abstracts, and 30 seconds for APS
+issue pages. These values match the non-bypassable request floors enforced in
+code; lowering an environment value cannot weaken those floors.
+
+Official publisher issue pages remain authoritative for issue membership and
+publisher metadata. CrossRef metadata mode may complete a missing abstract by
+exact DOI, but cannot add or remove articles or replace official title, author,
+DOI, volume, issue, page, or date fields. A blocked fetch, parse failure, or
+unresolved repair produces a visible nonzero result and preserves the prior
+valid Markdown instead of replacing it with empty or partial output.
 
 ## Output Layout
 
@@ -130,7 +191,8 @@ Journal output is always:
 
 Any other value is an error. CrossRef cannot add or remove issue members, or
 replace official DOI, title, author, volume, issue, page, or date metadata. Only
-`run.sh` exports `PAPERTRACK_CROSSREF_MODE=metadata`.
+`run_j.sh` exports `PAPERTRACK_CROSSREF_MODE=metadata`; `run.sh` remains
+arXiv-only and does not configure CrossRef.
 
 ### JCTC / ACS
 
