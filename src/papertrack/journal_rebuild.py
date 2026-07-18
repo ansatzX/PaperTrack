@@ -212,31 +212,56 @@ def _read_json_object(path: Path, kind: str) -> dict:
     return payload
 
 
+def _require_exact_keys(
+    payload: dict,
+    expected: set[str],
+    context: str,
+    level: str = "top level",
+) -> None:
+    actual = set(payload)
+    if actual == expected:
+        return
+    missing = sorted(expected - actual)
+    extra = sorted(actual - expected)
+    raise ValueError(
+        f"invalid {context}: {level} keys must be exactly {sorted(expected)!r}; "
+        f"missing={missing!r}, extra={extra!r}"
+    )
+
+
 def _load_manifest_candidates(path: Path) -> list[RebuildCandidate]:
     payload = _read_json_object(path, "journal rebuild manifest")
+    context = f"journal rebuild manifest {path}"
+    _require_exact_keys(payload, {"schema_version", "audit", "issues"}, context)
     if type(payload.get("schema_version")) is not int:
-        raise ValueError("journal rebuild manifest schema_version must be an integer")
+        raise ValueError(f"invalid {context}: schema_version must be an integer")
     if payload.get("schema_version") != SCHEMA_VERSION:
-        raise ValueError("unsupported journal rebuild manifest schema")
+        raise ValueError(f"invalid {context}: unsupported schema_version")
     if type(payload.get("audit")) is not dict:
-        raise ValueError("journal rebuild manifest audit must be an object")
+        raise ValueError(f"invalid {context}: audit must be an object")
     if payload.get("audit") != {"kind": "offline_markdown_quality"}:
-        raise ValueError("unexpected journal rebuild manifest audit kind")
+        raise ValueError(
+            f"invalid {context}: audit must be exactly "
+            "{'kind': 'offline_markdown_quality'}"
+        )
     if "issues" not in payload or type(payload["issues"]) is not list:
-        raise ValueError("journal rebuild manifest issues must be a list")
+        raise ValueError(f"invalid {context}: issues must be a list")
     candidates = []
     for index, item in enumerate(payload["issues"]):
-        context = f"journal rebuild manifest issues[{index}]"
+        item_context = f"{context} issues[{index}]"
         if type(item) is not dict:
-            raise ValueError(f"{context} must be an object")
+            raise ValueError(f"invalid {item_context}: record must be an object")
         if set(item) != _CANDIDATE_FIELDS:
-            raise ValueError(f"{context} must contain exactly the candidate fields")
+            raise ValueError(
+                f"invalid {item_context}: record must contain exactly "
+                "the candidate fields"
+            )
         if type(item["reasons"]) is not list:
-            raise ValueError(f"{context}.reasons must be a list")
+            raise ValueError(f"invalid {item_context}.reasons: must be a list")
         try:
             candidates.append(RebuildCandidate(**item))
         except (TypeError, ValueError) as exc:
-            raise ValueError(f"invalid {context}: {exc}") from exc
+            raise ValueError(f"invalid {item_context}: {exc}") from exc
     return candidates
 
 
@@ -248,21 +273,23 @@ def _load_progress(path: Path, provider: str) -> ProviderProgress:
     if not path.exists():
         return ProviderProgress(provider=provider, issues={})
     payload = _read_json_object(path, "journal rebuild progress")
+    context = f"journal rebuild progress {path}"
+    _require_exact_keys(payload, {"schema_version", "provider", "issues"}, context)
     if type(payload.get("schema_version")) is not int:
-        raise ValueError("journal rebuild progress schema_version must be an integer")
+        raise ValueError(f"invalid {context}: schema_version must be an integer")
     if payload.get("schema_version") != SCHEMA_VERSION:
-        raise ValueError("unsupported journal rebuild progress schema")
+        raise ValueError(f"invalid {context}: unsupported schema_version")
     if type(payload.get("provider")) is not str:
-        raise ValueError("journal rebuild progress provider must be a string")
+        raise ValueError(f"invalid {context}: provider must be a string")
     if payload.get("provider") != provider:
-        raise ValueError("journal rebuild progress provider mismatch")
+        raise ValueError(f"invalid {context}: provider mismatch")
     if "issues" not in payload or type(payload["issues"]) is not dict:
-        raise ValueError("journal rebuild progress issues must be an object")
+        raise ValueError(f"invalid {context}: issues must be an object")
     issues = {}
     for key, record in payload["issues"].items():
-        context = f"journal rebuild progress issues[{key!r}]"
+        record_context = f"{context} issues[{key!r}]"
         if type(key) is not str or not key:
-            raise ValueError("journal rebuild progress issues keys must be strings")
+            raise ValueError(f"invalid {context}: issues keys must be strings")
         key_parts = PurePosixPath(key).parts
         if (
             len(key_parts) != 4
@@ -271,13 +298,15 @@ def _load_progress(path: Path, provider: str) -> ProviderProgress:
             or not key_parts[-1].endswith(".md")
             or any(part in {".", ".."} for part in key_parts)
         ):
-            raise ValueError(f"{context} is not a valid provider issue path")
+            raise ValueError(f"invalid {record_context}: invalid provider issue path")
         if type(record) is not dict or set(record) != {"outcome"}:
-            raise ValueError(f"{context} must contain exactly outcome")
+            raise ValueError(
+                f"invalid {record_context}: record must contain exactly outcome"
+            )
         try:
             issues[key] = ProgressRecord(**record)
         except (TypeError, ValueError) as exc:
-            raise ValueError(f"invalid {context}: {exc}") from exc
+            raise ValueError(f"invalid {record_context}: {exc}") from exc
     return ProviderProgress(provider=provider, issues=issues)
 
 
@@ -358,16 +387,61 @@ _EXEMPT_TITLE = re.compile(
     re.IGNORECASE,
 )
 _RAW_HTML = re.compile(r"</?[A-Za-z][^>]*>")
-_RAW_MATHML = re.compile(
-    r"</?(?:"
-    r"mml:[A-Za-z][\w.-]*|"
-    r"math|maction|maligngroup|malignmark|menclose|merror|mfenced|mfrac|mi|"
-    r"mlabeledtr|mmultiscripts|mn|mo|mover|mpadded|mphantom|mprescripts|"
-    r"mroot|mrow|ms|mspace|msqrt|mstyle|msub|msubsup|msup|mtable|mtd|"
-    r"mtext|mtr|munder|munderover|none|semantics|annotation|annotation-xml"
-    r")\b",
-    re.IGNORECASE,
-)
+_MATHML_ELEMENTS = frozenset({
+    "annotation",
+    "annotation-xml",
+    "maction",
+    "maligngroup",
+    "malignmark",
+    "math",
+    "menclose",
+    "merror",
+    "mfenced",
+    "mfrac",
+    "mglyph",
+    "mi",
+    "mlabeledtr",
+    "mlongdiv",
+    "mmultiscripts",
+    "mn",
+    "mo",
+    "mover",
+    "mpadded",
+    "mphantom",
+    "mprescripts",
+    "mroot",
+    "mrow",
+    "ms",
+    "mscarries",
+    "mscarry",
+    "msgroup",
+    "msline",
+    "mspace",
+    "msqrt",
+    "msrow",
+    "mstack",
+    "mstyle",
+    "msub",
+    "msubsup",
+    "msup",
+    "mtable",
+    "mtd",
+    "mtext",
+    "mtr",
+    "munder",
+    "munderover",
+    "none",
+    "semantics",
+})
+_RAW_TAG_NAME = re.compile(r"</?\s*([A-Za-z][\w.-]*(?::[A-Za-z][\w.-]*)?)\b")
+
+
+def _contains_raw_mathml(value: str) -> bool:
+    for match in _RAW_TAG_NAME.finditer(value):
+        tag = match.group(1).lower()
+        if tag.startswith("mml:") or tag in _MATHML_ELEMENTS:
+            return True
+    return False
 
 
 def _field(entry_body: str, name: str) -> str:
@@ -427,7 +501,7 @@ def _targeted_defect_remains(content: str, reason: str) -> bool:
     if reason == "raw_html":
         return any(_RAW_HTML.search(entry.generated_metadata) for entry in entries)
     if reason == "raw_mathml":
-        return any(_RAW_MATHML.search(entry.generated_metadata) for entry in entries)
+        return any(_contains_raw_mathml(entry.generated_metadata) for entry in entries)
     if reason == "lowercase_crossref_doi":
         return any(entry.doi.startswith("10.1103/physrevlett.") for entry in entries)
     if reason == "whole_issue_missing_abstracts":
@@ -449,6 +523,22 @@ def _assess_report(path: Path, candidate: RebuildCandidate) -> str:
     return RESOLVED
 
 
+def _fsync_directory(directory: Path) -> None:
+    """Fsync a directory or raise a contextual durability error."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(directory, flags)
+    except OSError as exc:
+        raise RuntimeError(f"unable to open directory for fsync: {directory}") from exc
+    try:
+        try:
+            os.fsync(descriptor)
+        except OSError as exc:
+            raise RuntimeError(f"unable to fsync directory: {directory}") from exc
+    finally:
+        os.close(descriptor)
+
+
 def _create_report_backup(path: Path) -> Path | None:
     """Create and fsync a same-directory backup before external mutation."""
     if not path.exists():
@@ -467,6 +557,7 @@ def _create_report_backup(path: Path) -> Path | None:
             os.fchmod(backup.fileno(), path.stat().st_mode)
             backup.flush()
             os.fsync(backup.fileno())
+        _fsync_directory(path.parent)
         return Path(backup_name)
     except BaseException:
         if backup_name is not None:
@@ -483,8 +574,11 @@ def _restore_report(path: Path, backup: Path | None) -> None:
             path.unlink()
         except FileNotFoundError:
             pass
+        else:
+            _fsync_directory(path.parent)
         return
     os.replace(backup, path)
+    _fsync_directory(path.parent)
 
 
 def _discard_report_backup(backup: Path | None) -> None:
@@ -494,6 +588,8 @@ def _discard_report_backup(backup: Path | None) -> None:
         backup.unlink()
     except FileNotFoundError:
         pass
+    else:
+        _fsync_directory(backup.parent)
 
 
 def _journal_config(candidate: RebuildCandidate) -> dict[str, str]:

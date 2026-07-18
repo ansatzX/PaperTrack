@@ -197,8 +197,46 @@ def test_manifest_loader_rejects_missing_wrong_type_or_malformed_issues(
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps(payload), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="issues"):
+    with pytest.raises(ValueError) as error:
         load_provider_candidates(manifest, "acs")
+    message = str(error.value)
+    assert "journal rebuild manifest" in message
+    assert str(manifest) in message
+    assert "issues" in message
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "schema_version": 1,
+            "audit": {"kind": "offline_markdown_quality"},
+            "issues": [],
+            "extra": True,
+        },
+        {"audit": {"kind": "offline_markdown_quality"}, "issues": []},
+        {
+            "schema_version": "1",
+            "audit": {"kind": "offline_markdown_quality"},
+            "issues": [],
+        },
+        {"schema_version": 1, "audit": {"kind": "wrong"}, "issues": []},
+        {
+            "schema_version": 1,
+            "audit": {"kind": "offline_markdown_quality", "extra": True},
+            "issues": [],
+        },
+    ],
+)
+def test_manifest_loader_requires_exact_contextual_top_level_schema(tmp_path, payload):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError) as error:
+        load_provider_candidates(manifest, "acs")
+
+    assert "journal rebuild manifest" in str(error.value)
+    assert str(manifest) in str(error.value)
 
 
 def test_manifest_loader_wraps_malformed_json_with_path_context(tmp_path):
@@ -237,8 +275,33 @@ def test_progress_loader_rejects_missing_wrong_type_or_malformed_issues(
     progress = tmp_path / "journal_rebuild_acs_state.json"
     progress.write_text(json.dumps(payload), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="issues"):
+    with pytest.raises(ValueError) as error:
         _load_progress(progress, "acs")
+    message = str(error.value)
+    assert "journal rebuild progress" in message
+    assert str(progress) in message
+    assert "issues" in message
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"schema_version": 1, "provider": "acs", "issues": {}, "extra": True},
+        {"provider": "acs", "issues": {}},
+        {"schema_version": "1", "provider": "acs", "issues": {}},
+        {"schema_version": 1, "provider": 3, "issues": {}},
+        {"schema_version": 1, "provider": "aip", "issues": {}},
+    ],
+)
+def test_progress_loader_requires_exact_contextual_top_level_schema(tmp_path, payload):
+    progress = tmp_path / "journal_rebuild_acs_state.json"
+    progress.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError) as error:
+        _load_progress(progress, "acs")
+
+    assert "journal rebuild progress" in str(error.value)
+    assert str(progress) in str(error.value)
 
 
 def test_progress_loader_wraps_malformed_json_with_path_context(tmp_path):
@@ -474,17 +537,26 @@ def test_failed_rebuild_atomically_restores_from_same_directory_backup(
     original = b"durable exact bytes\n"
     path.write_bytes(original)
     report_replacements = []
+    events = []
     real_replace = module.os.replace
 
     def track_replace(source, target):
         if Path(target) == path:
             report_replacements.append((Path(source), Path(target)))
+            events.append(("replace", path.parent))
         real_replace(source, target)
 
     def rebuild(**kwargs):
+        events.append(("dispatch", path.parent))
         path.write_text("partial replacement", encoding="utf-8")
         return False
 
+    monkeypatch.setattr(
+        module,
+        "_fsync_directory",
+        lambda directory: events.append(("directory_fsync", Path(directory))),
+        raising=False,
+    )
     monkeypatch.setattr(module.os, "replace", track_replace)
     monkeypatch.setattr(module, "filter_journal_to_md", rebuild)
 
@@ -498,6 +570,12 @@ def test_failed_rebuild_atomically_restores_from_same_directory_backup(
     assert target == path
     assert path.read_bytes() == original
     assert not backup.exists()
+    assert events == [
+        ("directory_fsync", path.parent),
+        ("dispatch", path.parent),
+        ("replace", path.parent),
+        ("directory_fsync", path.parent),
+    ]
 
 
 def test_restore_replace_failure_keeps_durable_backup_and_aborts_progress(
@@ -508,6 +586,7 @@ def test_restore_replace_failure_keeps_durable_backup_and_aborts_progress(
     path.parent.mkdir(parents=True)
     original = b"recoverable original bytes\n"
     path.write_bytes(original)
+    directory_fsyncs = []
     real_replace = module.os.replace
 
     def fail_report_restore(source, target):
@@ -520,6 +599,12 @@ def test_restore_replace_failure_keeps_durable_backup_and_aborts_progress(
         return False
 
     monkeypatch.setattr(module.os, "replace", fail_report_restore)
+    monkeypatch.setattr(
+        module,
+        "_fsync_directory",
+        lambda directory: directory_fsyncs.append(Path(directory)),
+        raising=False,
+    )
     monkeypatch.setattr(module, "filter_journal_to_md", rebuild)
 
     with pytest.raises(OSError, match="simulated atomic restore failure"):
@@ -532,6 +617,7 @@ def test_restore_replace_failure_keeps_durable_backup_and_aborts_progress(
     assert backups[0].read_bytes() == original
     assert path.read_text(encoding="utf-8") == "partial replacement"
     assert not (tmp_path / "diagnostics" / "journal_rebuild_acs_state.json").exists()
+    assert directory_fsyncs == [path.parent]
 
 
 def test_verified_success_removes_outer_rebuild_backup(tmp_path, monkeypatch):
@@ -539,8 +625,10 @@ def test_verified_success_removes_outer_rebuild_backup(tmp_path, monkeypatch):
     path = tmp_path / "data" / "acs" / "jcim" / "66" / "12.md"
     path.parent.mkdir(parents=True)
     path.write_text(_report(("10.1021/old", "Old", "Abstract")), encoding="utf-8")
+    events = []
 
     def rebuild(**kwargs):
+        events.append("dispatch")
         path.write_text(
             _report(("10.1021/new", "New", "Abstract")),
             encoding="utf-8",
@@ -548,12 +636,23 @@ def test_verified_success_removes_outer_rebuild_backup(tmp_path, monkeypatch):
         return True
 
     monkeypatch.setattr(module, "filter_journal_to_md", rebuild)
+    monkeypatch.setattr(
+        module,
+        "_fsync_directory",
+        lambda directory: events.append(("directory_fsync", Path(directory))),
+        raising=False,
+    )
 
     run_provider_rebuild(
         "acs", (_candidate("raw_html"),), tmp_path / "data", tmp_path / "diagnostics"
     )
 
     assert not list(path.parent.glob(f".{path.name}.papertrack-rebuild-*.bak"))
+    assert events == [
+        ("directory_fsync", path.parent),
+        "dispatch",
+        ("directory_fsync", path.parent),
+    ]
 
 
 def test_progress_is_persisted_with_replace(tmp_path, monkeypatch):
@@ -639,6 +738,25 @@ def test_success_is_assessed_only_against_generated_entry_fields(tmp_path, monke
             "raw_mathml",
             (("10.1021/acs.jcim.1c00001", "Ordinary article", "x<mi>i</mi>"),),
         ),
+        *[
+            (
+                "raw_mathml",
+                ((
+                    "10.1021/acs.jcim.1c00001",
+                    "Ordinary article",
+                    f"x<{tag}>i</{tag}>",
+                ),),
+            )
+            for tag in (
+                "mglyph",
+                "mstack",
+                "mscarries",
+                "mscarry",
+                "msgroup",
+                "msline",
+                "msrow",
+            )
+        ],
         (
             "lowercase_crossref_doi",
             (("10.1103/physrevlett.127.000001", "Ordinary article", "Abstract"),),
@@ -679,7 +797,7 @@ def test_raw_mathml_check_does_not_flag_ordinary_prose(tmp_path, monkeypatch):
                 (
                     "10.1021/acs.jcim.1c00001",
                     "Ordinary article",
-                    "We use mi, mo, and msub notation as plain prose.",
+                    "We use mi, mo, and msub as prose with <mark>highlighting</mark>.",
                 )
             ),
             encoding="utf-8",
