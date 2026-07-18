@@ -90,7 +90,7 @@ def test_run_j_sh_configures_exact_production_request_intervals():
     assert 'DIAGNOSTICS_DIR="${PROJECT_DIR}/.papertrack_diagnostics"' in content
 
 
-def test_run_j_sh_starts_and_reaps_exactly_three_provider_workers():
+def test_run_j_sh_defines_and_reaps_exactly_three_provider_workers():
     run_j_sh = ROOT / "run_j.sh"
     active_lines = _active_shell_lines(run_j_sh)
     worker_scripts = (
@@ -104,17 +104,23 @@ def test_run_j_sh_starts_and_reaps_exactly_three_provider_workers():
             line for line in active_lines.splitlines() if script in line
         ]
         assert len(matching_lines) == 1
-        assert matching_lines[0].rstrip().endswith("&")
 
-    assert active_lines.count("child_pids+=(\"$!\")") == 3
-    assert active_lines.count('"${worker_flags[@]}" &') == 3
+    assert '/usr/bin/setsid "$CONDA_BIN" run' in active_lines
+    assert active_lines.count('"${worker_flags[@]}" &') == 1
+    assert 'pid="$!"' in active_lines
+    assert 'child_pids+=("$pid")' in active_lines
+    assert 'for script in "${worker_scripts[@]}"; do' in active_lines
+    assert 'start_worker "$script" || break' in active_lines
     assert 'for index in "${!child_pids[@]}"; do' in active_lines
     assert 'wait "$pid"' in active_lines
     assert 'unset \'child_pids[index]\'' in active_lines
-    assert "child_status != 0 && final_status == 0" in active_lines
+    assert "child_status != 0 && shutdown_status == 0 && final_status == 0" in active_lines
+    assert 'kill -s "$signal" -- "-$pid"' in active_lines
+    assert "pid != wrapper_pgid" in active_lines
     assert "signal_generation=0" in active_lines
     assert "((signal_generation += 1))" in active_lines
     assert "observed_signal_generation != signal_generation" in active_lines
+    assert 'if [[ -n "$shutdown_signal" ]]; then' in active_lines
     assert "set -e" not in active_lines
     assert "trap 'forward_signal TERM' TERM" in active_lines
     assert "trap 'forward_signal INT' INT" in active_lines
