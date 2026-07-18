@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 import logging
 import re
+import subprocess
+import sys
 
 from bs4 import BeautifulSoup
 
-from .adapter_result import AdapterResult, FETCH_FAILED, OFFICIAL_EMPTY_SUSPICIOUS, SUCCESS
+from .adapter_result import AdapterResult, BLOCKED, FETCH_FAILED, OFFICIAL_EMPTY_SUSPICIOUS, SUCCESS
 from .diagnostics import record_fetch_attempt
 from .http_fetch import (
     HttpRequestPolicy,
     configured_interval,
     fetch_html_resilient,
     is_blocked_response,
+    provider_throttle,
 )
 from .journal_entry import JournalEntry
 
@@ -34,6 +38,20 @@ APS_REQUEST_POLICY = HttpRequestPolicy(
 )
 
 _cache: dict[str, dict[str, JournalEntry]] = {}
+
+APS_BROWSER_TIMEOUT = 60
+
+
+def _fetch_aps_browser(url: str) -> dict:
+    provider_throttle("aps", APS_REQUEST_POLICY.min_interval)
+    cmd = ["xvfb-run", "-a", sys.executable, "-m", "papertrack.aps_browser", url]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=APS_BROWSER_TIMEOUT)
+        if proc.returncode != 0:
+            return {"outcome": FETCH_FAILED, "message": proc.stderr or "browser helper failed", "html": ""}
+        return json.loads(proc.stdout or "{}")
+    except Exception as exc:
+        return {"outcome": FETCH_FAILED, "message": str(exc), "html": ""}
 
 
 def _is_blocked(html: str) -> bool:
@@ -161,7 +179,21 @@ def query_aps_issue_result(journal_slug: str, volume: str, issue: str,
     html, failure_outcome = _fetch_html(url, ".browse-result-card.issue")
     if not html or failure_outcome:
         outcome = failure_outcome or FETCH_FAILED
-        record_fetch_attempt(
+        if outcome == BLOCKED:
+            browser = _fetch_aps_browser(url)
+            record_fetch_attempt({
+                "source_role": "authoritative", "source": "journal", "provider": "aps",
+                "journal": journal_slug, "volume": volume, "issue": issue, "url": url,
+                "stage": "issue_page_browser_fallback", "outcome": browser.get("outcome", FETCH_FAILED),
+                "fallback_used": True, "fallback_of": "issue_page_fetch",
+                "message": browser.get("message", ""),
+            }, html=browser.get("html") or None)
+            if browser.get("outcome") == SUCCESS and browser.get("html"):
+                html, failure_outcome = browser["html"], ""
+            else:
+                outcome = browser.get("outcome") or outcome
+        if not html or failure_outcome:
+            record_fetch_attempt(
             {
                 "source_role": "authoritative",
                 "source": "journal",
@@ -176,14 +208,14 @@ def query_aps_issue_result(journal_slug: str, volume: str, issue: str,
             },
             html=html or None,
         )
-        return AdapterResult(
-            entries={},
-            outcome=outcome,
-            provider="aps",
-            source="journal",
-            message="APS issue page could not be fetched with required selector",
-            metadata={"url": url},
-        )
+            return AdapterResult(
+                entries={},
+                outcome=outcome,
+                provider="aps",
+                source="journal",
+                message="APS issue page could not be fetched with required selector",
+                metadata={"url": url},
+            )
 
     entries = _parse_aps_issue(html, journal_slug, journal_name, volume, issue)
     if not entries:
