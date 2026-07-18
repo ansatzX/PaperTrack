@@ -819,6 +819,49 @@ def test_official_exception_records_complete_failure_context(
     }
 
 
+@pytest.mark.parametrize(
+    ("provider", "journal_slug", "expected_url"),
+    (
+        ("mystery", "", "unconfigured://mystery/Example%20Journal/1/2"),
+        ("aip", "", "unconfigured://aip/Example%20Journal/1/2"),
+    ),
+)
+def test_no_adapter_failure_uses_explicit_unconfigured_issue_url(
+    monkeypatch, provider, journal_slug, expected_url
+):
+    from papertrack import journal_fetch
+
+    events = []
+    monkeypatch.setattr(
+        journal_fetch,
+        "record_fetch_attempt",
+        lambda event, html=None: events.append(event),
+    )
+
+    result = journal_fetch.query_journal_issue_full_result(
+        "1234-5678",
+        "1",
+        "2",
+        "Example Journal",
+        provider=provider,
+        journal_slug=journal_slug,
+    )
+
+    assert result.outcome == "fetch_failed"
+    assert len(events) == 1
+    event = events[0]
+    assert event["url"] == expected_url
+    assert event["url"]
+    assert event["provider"] == provider
+    assert event["journal"] == "Example Journal"
+    assert event["volume"] == "1"
+    assert event["issue"] == "2"
+    assert event["status"] is None
+    assert event["stage"] == "issue_fetch"
+    assert event["source_role"] == "authoritative"
+    assert event["outcome"] == "fetch_failed"
+
+
 def test_crossref_non_article_issue_metadata_is_filtered():
     from papertrack import journal_fetch
 

@@ -3,6 +3,7 @@ import time
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 from urllib.parse import urlencode
+from urllib.parse import quote
 import json
 
 from .adapter_result import AdapterResult, FETCH_FAILED
@@ -158,8 +159,19 @@ def _record_crossref_abstract_fill(
     official.metadata["crossref_filled_abstracts"] = filled
 
 
-def _official_issue_url(provider: str, journal: str, volume: str, issue: str) -> str:
+def _official_issue_url(
+    provider: str,
+    journal: str,
+    volume: str,
+    issue: str,
+    *,
+    publisher_configured: bool = True,
+) -> str:
     template = _OFFICIAL_ISSUE_URL_TEMPLATES.get(provider, "")
+    if not template or not journal or not publisher_configured:
+        authority = quote(provider or "journal", safe="._-")
+        identifier = quote(journal or "unknown", safe="._-")
+        return f"unconfigured://{authority}/{identifier}/{volume}/{issue}"
     return template.format(journal=journal, volume=volume, issue=issue)
 
 
@@ -309,7 +321,13 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
         "no authoritative issue adapter configured",
         volume=volume,
         issue=issue,
-        url=_official_issue_url(provider, journal_slug, volume, issue),
+        url=_official_issue_url(
+            provider,
+            journal_slug or journal_name or issn,
+            volume,
+            issue,
+            publisher_configured=bool(journal_slug),
+        ),
         issn=issn,
         journal_name=journal_name,
     )
