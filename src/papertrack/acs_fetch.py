@@ -49,7 +49,7 @@ _last_fetch_result: HttpFetchResult | None = None
 
 def _fetch_acs_browser(url: str) -> dict:
     provider_throttle("acs", ACS_REQUEST_POLICY.min_interval)
-    cmd = ["xvfb-run", "-a", "/usr/bin/python3", "-m", "papertrack.acs_browser", url]
+    cmd = ["xvfb-run", "-a", sys.executable, "-m", "papertrack.acs_browser", url]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=ACS_BROWSER_TIMEOUT)

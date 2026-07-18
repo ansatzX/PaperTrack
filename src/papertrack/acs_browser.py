@@ -16,6 +16,10 @@ def _run(issue_url: str, timeout: int = 45) -> dict:
             context = browser.new_context()
             page = context.new_page()
             page.goto(issue_url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            try:
+                page.wait_for_selector("div.issue-item.clearfix", timeout=min(timeout * 1000, 15000))
+            except Exception:
+                pass
             html = page.content()
             status = None
             if "Just a moment" in html or "cf-chl" in html or page.title().lower().find("access denied") >= 0:
