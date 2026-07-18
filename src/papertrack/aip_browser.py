@@ -4,12 +4,21 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import json
+import math
 import sys
 import time
 from urllib.parse import urlencode, urlsplit
 
 from .adapter_result import BLOCKED, FETCH_FAILED, SUCCESS
-from .aip_fetch import AipAbstractResult, _clean_abstract_html, aip_abstract_url
+from .aip_fetch import (
+    AIP_BROWSER_ABSTRACT_RESPONSE_ALLOWANCE,
+    AIP_BROWSER_MAX_ABSTRACTS,
+    AipAbstractResult,
+    _clean_abstract_html,
+    aip_abstract_url,
+)
+
+AIP_BROWSER_ABSTRACT_FLOOR = 10.0
 
 
 def _browser_request_allowed(
@@ -39,6 +48,7 @@ def _wait_for_abstract_interval(
     last_request_at: float | None,
     interval: float,
 ) -> float:
+    interval = _browser_abstract_interval(interval)
     now = time.monotonic()
     if last_request_at is not None:
         delay = max(0.0, last_request_at + interval - now)
@@ -48,9 +58,28 @@ def _wait_for_abstract_interval(
     return now
 
 
-def _run(issue_url: str, journal_slug: str, abstract_interval: float) -> dict:
+def _browser_abstract_interval(raw: str | float) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("AIP browser abstract interval must be non-negative") from exc
+    if not math.isfinite(value) or value < 0:
+        raise RuntimeError("AIP browser abstract interval must be non-negative")
+    return max(AIP_BROWSER_ABSTRACT_FLOOR, value)
+
+
+def _validate_abstract_count(abstract_count: int) -> None:
+    if abstract_count > AIP_BROWSER_MAX_ABSTRACTS:
+        raise RuntimeError(
+            "AIP issue exceeds browser abstract request limit "
+            f"({abstract_count} > {AIP_BROWSER_MAX_ABSTRACTS})"
+        )
+
+
+def _run(issue_url: str, journal_slug: str, abstract_interval: str | float) -> dict:
     from playwright.sync_api import sync_playwright
 
+    abstract_interval = _browser_abstract_interval(abstract_interval)
     endpoint = aip_abstract_url(journal_slug)
     result = {"html": "", "abstracts": {}, "outcome": "", "message": ""}
     with sync_playwright() as playwright:
@@ -79,6 +108,7 @@ def _run(issue_url: str, journal_slug: str, abstract_interval: float) -> dict:
             article_ids = page.locator(".js-show-abstract[data-articleid]").evaluate_all(
                 "els => [...new Set(els.map(el => el.dataset.articleid).filter(Boolean))]"
             )
+            _validate_abstract_count(len(article_ids))
             last_abstract_request_at = None
             for article_id in article_ids:
                 url = endpoint + "?" + urlencode(
@@ -89,13 +119,31 @@ def _run(issue_url: str, journal_slug: str, abstract_interval: float) -> dict:
                     abstract_interval,
                 )
                 payload = page.evaluate(
-                    """async ({url, issueUrl}) => {
-                        const response = await fetch(url, {
-                          headers: {'X-Requested-With': 'XMLHttpRequest', 'Referer': issueUrl}
-                        });
-                        return {status: response.status, text: await response.text()};
+                    """async ({url, issueUrl, responseTimeoutMs}) => {
+                        const controller = new AbortController();
+                        const timer = setTimeout(
+                          () => controller.abort(), responseTimeoutMs
+                        );
+                        try {
+                          const response = await fetch(url, {
+                            headers: {
+                              'X-Requested-With': 'XMLHttpRequest',
+                              'Referer': issueUrl
+                            },
+                            signal: controller.signal
+                          });
+                          return {status: response.status, text: await response.text()};
+                        } finally {
+                          clearTimeout(timer);
+                        }
                     }""",
-                    {"url": url, "issueUrl": issue_url},
+                    {
+                        "url": url,
+                        "issueUrl": issue_url,
+                        "responseTimeoutMs": int(
+                            AIP_BROWSER_ABSTRACT_RESPONSE_ALLOWANCE * 1000
+                        ),
+                    },
                 )
                 status = payload["status"]
                 try:
@@ -145,7 +193,7 @@ def main() -> None:
         )
     print(
         json.dumps(
-            _run(sys.argv[1], sys.argv[2], float(sys.argv[3])),
+            _run(sys.argv[1], sys.argv[2], sys.argv[3]),
             ensure_ascii=False,
         )
     )

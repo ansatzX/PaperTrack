@@ -1,3 +1,5 @@
+import pytest
+
 from papertrack.adapter_result import BLOCKED, FETCH_FAILED, SUCCESS
 from papertrack.http_fetch import HttpFetchResult
 
@@ -216,7 +218,15 @@ def test_aip_browser_bundle_runs_once_under_xvfb(monkeypatch):
         "jcp",
         "10.0",
     ]
-    assert captured["kwargs"]["timeout"] == 120
+    timeout = captured["kwargs"]["timeout"]
+    assert timeout == aip_fetch._aip_browser_timeout(
+        aip_fetch.AIP_BROWSER_MAX_ABSTRACTS,
+        aip_fetch.AIP_ABSTRACT_INTERVAL,
+    )
+    minimum_pacing_duration = (
+        aip_fetch.AIP_BROWSER_MAX_ABSTRACTS - 1
+    ) * aip_fetch.AIP_ABSTRACT_INTERVAL
+    assert timeout > minimum_pacing_duration
     assert wait_roles == ["issue"]
 
 
@@ -267,12 +277,36 @@ def test_aip_browser_abstract_wait_uses_request_start_clock(monkeypatch):
     monkeypatch.setattr(aip_browser.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(aip_browser.time, "sleep", fake_sleep)
 
-    first_start = aip_browser._wait_for_abstract_interval(None, 10)
+    first_start = aip_browser._wait_for_abstract_interval(None, 5)
     clock[0] += 2
-    second_start = aip_browser._wait_for_abstract_interval(first_start, 10)
+    second_start = aip_browser._wait_for_abstract_interval(first_start, 5)
 
     assert sleeps == [8.0]
     assert second_start - first_start >= 10
+
+
+def test_aip_browser_abstract_interval_enforces_floor():
+    from papertrack import aip_browser
+
+    assert aip_browser._browser_abstract_interval("5") == 10
+    assert aip_browser._browser_abstract_interval("15") == 15
+
+
+@pytest.mark.parametrize("raw", ["-1", "nan", "inf", "-inf", "fast"])
+def test_aip_browser_abstract_interval_rejects_invalid_values(raw):
+    from papertrack import aip_browser
+
+    with pytest.raises(RuntimeError, match="abstract interval"):
+        aip_browser._browser_abstract_interval(raw)
+
+
+def test_aip_browser_rejects_abstract_count_above_timeout_bound():
+    from papertrack import aip_browser
+    from papertrack.aip_fetch import AIP_BROWSER_MAX_ABSTRACTS
+
+    assert aip_browser._validate_abstract_count(AIP_BROWSER_MAX_ABSTRACTS) is None
+    with pytest.raises(RuntimeError, match="exceeds browser abstract request limit"):
+        aip_browser._validate_abstract_count(AIP_BROWSER_MAX_ABSTRACTS + 1)
 
 
 def test_aip_browser_allows_challenge_query_but_blocks_article_navigation():

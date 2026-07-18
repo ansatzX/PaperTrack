@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import importlib
 import logging
+import math
 import os
 import time
 from typing import Mapping, Sequence
@@ -118,9 +119,12 @@ def configured_interval(
     if not raw:
         return float(floor)
     try:
-        return max(float(floor), float(raw))
+        value = float(raw)
     except ValueError as exc:
         raise RuntimeError(f"{name} must be a non-negative number") from exc
+    if not math.isfinite(value) or value < 0:
+        raise RuntimeError(f"{name} must be a non-negative number")
+    return max(float(floor), value)
 
 
 def clear_provider_throttles() -> None:

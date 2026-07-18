@@ -1,3 +1,5 @@
+import pytest
+
 from papertrack.adapter_result import BLOCKED, FETCH_FAILED
 from papertrack.http_fetch import (
     HttpRequestPolicy,
@@ -193,3 +195,18 @@ def test_configured_interval_rejects_non_numeric_value():
         assert str(exc) == "PAPERTRACK_TEST_INTERVAL must be a non-negative number"
     else:
         raise AssertionError("non-numeric interval was accepted")
+
+
+@pytest.mark.parametrize("raw", ["-1", "nan", "inf", "-inf"])
+def test_configured_interval_rejects_invalid_numeric_value(raw):
+    from papertrack import http_fetch
+
+    with pytest.raises(
+        RuntimeError,
+        match="PAPERTRACK_TEST_INTERVAL must be a non-negative number",
+    ):
+        http_fetch.configured_interval(
+            "PAPERTRACK_TEST_INTERVAL",
+            30,
+            {"PAPERTRACK_TEST_INTERVAL": raw},
+        )

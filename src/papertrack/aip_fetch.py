@@ -36,6 +36,9 @@ AIP_BACKOFF = (2.0, 5.0)
 AIP_ISSUE_INTERVAL = configured_interval("PAPERTRACK_AIP_ISSUE_INTERVAL", 30)
 AIP_ABSTRACT_INTERVAL = configured_interval("PAPERTRACK_AIP_ABSTRACT_INTERVAL", 10)
 AIP_IMPERSONATE = "chrome136"
+AIP_BROWSER_MAX_ABSTRACTS = 500
+AIP_BROWSER_STARTUP_ALLOWANCE = 180
+AIP_BROWSER_ABSTRACT_RESPONSE_ALLOWANCE = 30
 
 
 @dataclass(frozen=True)
@@ -382,7 +385,10 @@ def _fetch_aip_browser_bundle(url: str, journal_slug: str) -> AipBrowserBundle:
             check=False,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=_aip_browser_timeout(
+                AIP_BROWSER_MAX_ABSTRACTS,
+                AIP_ABSTRACT_INTERVAL,
+            ),
         )
     except Exception as exc:
         return AipBrowserBundle(outcome=FETCH_FAILED, message=repr(exc))
@@ -405,6 +411,15 @@ def _fetch_aip_browser_bundle(url: str, journal_slug: str) -> AipBrowserBundle:
         outcome=payload.get("outcome", ""),
         status_code=payload.get("status_code"),
         message=payload.get("message", ""),
+    )
+
+
+def _aip_browser_timeout(abstract_count: int, abstract_interval: float) -> float:
+    """Bound a browser run including navigation, pacing, and AJAX responses."""
+    return float(
+        AIP_BROWSER_STARTUP_ALLOWANCE
+        + abstract_count
+        * (abstract_interval + AIP_BROWSER_ABSTRACT_RESPONSE_ALLOWANCE)
     )
 
 
