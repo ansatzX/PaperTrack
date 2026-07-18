@@ -15,7 +15,7 @@ from typing import Iterable
 
 from .codex import journal_configs
 from .report import filter_journal_to_md
-from .source_policy import CrossrefMode, SourcePolicy
+from .source_policy import SourcePolicy
 
 
 logger = logging.getLogger(__name__)
@@ -684,7 +684,7 @@ def run_provider_rebuild(
                 zotero=None,
                 acs_code=config.get("acs_code", ""),
                 provider=config.get("provider", provider),
-                source_policy=SourcePolicy(CrossrefMode.METADATA),
+                source_policy=SourcePolicy.from_environment(),
                 existing_collected_dois=collected_dois,
             )
         except BaseException as exc:

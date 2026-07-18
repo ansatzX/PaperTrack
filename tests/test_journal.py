@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from papertrack.cli import _journal_output_root
 from papertrack.journal_entry import JournalEntry
 from papertrack.source_policy import SourcePolicy
@@ -733,6 +735,88 @@ def test_official_provider_does_not_use_crossref_for_issue_membership(monkeypatc
 
     assert result.outcome == OFFICIAL_EMPTY_SUSPICIOUS
     assert result.entries == {}
+
+
+@pytest.mark.parametrize(
+    ("provider", "journal_slug", "volume", "issue", "expected_url", "module_name"),
+    (
+        ("acs", "jcim", "66", "12", "https://pubs.acs.org/toc/jcisd8/66/12", "acs_fetch"),
+        ("aip", "jcp", "163", "24", "https://pubs.aip.org/aip/jcp/issue/163/24", "aip_fetch"),
+        ("aps", "prl", "136", "1", "https://journals.aps.org/prl/issues/136/1", "aps_fetch"),
+    ),
+)
+def test_official_exception_records_complete_failure_context(
+    monkeypatch,
+    provider,
+    journal_slug,
+    volume,
+    issue,
+    expected_url,
+    module_name,
+):
+    from papertrack import journal_fetch
+
+    adapter = __import__(f"papertrack.{module_name}", fromlist=["adapter"])
+    if provider == "acs":
+        monkeypatch.setattr(
+            adapter,
+            "query_acs_issue_result",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("adapter boom")),
+        )
+        kwargs = {"acs_code": "jcisd8", "journal_slug": journal_slug}
+    elif provider == "aip":
+        monkeypatch.setattr(
+            adapter,
+            "query_aip_issue_result",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("adapter boom")),
+        )
+        kwargs = {"provider": "aip", "journal_slug": journal_slug}
+    else:
+        monkeypatch.setattr(
+            adapter,
+            "query_aps_issue_result",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("adapter boom")),
+        )
+        kwargs = {"provider": "aps", "journal_slug": journal_slug}
+
+    events = []
+    monkeypatch.setattr(
+        journal_fetch,
+        "record_fetch_attempt",
+        lambda event, html=None: events.append(event),
+    )
+
+    result = journal_fetch.query_journal_issue_full_result(
+        "1234-5678",
+        volume,
+        issue,
+        "Example Journal",
+        year=2026,
+        **kwargs,
+    )
+
+    assert result.outcome == "fetch_failed"
+    assert result.entries == {}
+    assert len(events) == 1
+    event = events[0]
+    assert event["provider"] == provider
+    assert event["journal"] == journal_slug
+    assert event["volume"] == volume
+    assert event["issue"] == issue
+    assert event["url"] == expected_url
+    assert event["source"] == "journal"
+    assert event["source_role"] == "authoritative"
+    assert event["stage"] == "issue_fetch"
+    assert event["outcome"] == "fetch_failed"
+    assert event["status"] is None
+    assert event["status_code"] is None
+    assert event["exception"] == "RuntimeError: adapter boom"
+    assert event["message"] == "RuntimeError: adapter boom"
+    assert event["context"] == {
+        "issn": "1234-5678",
+        "journal_name": "Example Journal",
+        "adapter": provider,
+    }
 
 
 def test_crossref_non_article_issue_metadata_is_filtered():

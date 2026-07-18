@@ -330,6 +330,7 @@ def test_resolved_progress_skips_a_later_run(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "filter_journal_to_md", rebuild)
     candidate = _candidate()
 
+    monkeypatch.setenv("PAPERTRACK_CROSSREF_MODE", "metadata")
     first = run_provider_rebuild(
         "acs", (candidate,), tmp_path / "data", tmp_path / "diagnostics"
     )
@@ -342,6 +343,32 @@ def test_resolved_progress_skips_a_later_run(tmp_path, monkeypatch):
     assert len(calls) == 1
     assert calls[0]["source_policy"].crossref_mode is CrossrefMode.METADATA
     assert calls[0]["md_folder"] == str(tmp_path / "data" / "acs")
+
+
+def test_rebuild_runner_defaults_to_official_only_without_crossref_environment(
+    tmp_path, monkeypatch
+):
+    module = _configure(monkeypatch)
+    calls = []
+
+    def rebuild(**kwargs):
+        calls.append(kwargs)
+        path = tmp_path / "data" / "acs" / "jcim" / "66" / "12.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            _report(("10.1021/acs.jcim.1c00001", "Ordinary article", "Abstract")),
+            encoding="utf-8",
+        )
+        return True
+
+    monkeypatch.delenv("PAPERTRACK_CROSSREF_MODE", raising=False)
+    monkeypatch.setattr(module, "filter_journal_to_md", rebuild)
+
+    run_provider_rebuild(
+        "acs", (_candidate(),), tmp_path / "data", tmp_path / "diagnostics"
+    )
+
+    assert calls[0]["source_policy"].crossref_mode is CrossrefMode.DISABLED
 
 
 def test_successful_rebuild_preserves_exact_collected_doi_membership(

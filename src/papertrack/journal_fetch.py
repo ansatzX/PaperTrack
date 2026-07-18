@@ -20,6 +20,12 @@ RETRY_BACKOFF = (1, 2, 4)
 # from the same journal/year.
 _cache: dict[str, list[dict]] = {}
 
+_OFFICIAL_ISSUE_URL_TEMPLATES = {
+    "acs": "https://pubs.acs.org/toc/{journal}/{volume}/{issue}",
+    "aip": "https://pubs.aip.org/aip/{journal}/issue/{volume}/{issue}",
+    "aps": "https://journals.aps.org/{journal}/issues/{volume}/{issue}",
+}
+
 
 def _crossref_title(item: dict) -> str:
     titles = item.get("title", [])
@@ -152,13 +158,52 @@ def _record_crossref_abstract_fill(
     official.metadata["crossref_filled_abstracts"] = filled
 
 
-def _official_fetch_failed(provider: str, journal: str, message: str) -> AdapterResult[dict[str, JournalEntry]]:
+def _official_issue_url(provider: str, journal: str, volume: str, issue: str) -> str:
+    template = _OFFICIAL_ISSUE_URL_TEMPLATES.get(provider, "")
+    return template.format(journal=journal, volume=volume, issue=issue)
+
+
+def _official_fetch_failed(
+    provider: str,
+    journal: str,
+    message: str,
+    *,
+    volume: str,
+    issue: str,
+    url: str,
+    issn: str,
+    journal_name: str,
+    exception: BaseException | None = None,
+    status: int | None = None,
+) -> AdapterResult[dict[str, JournalEntry]]:
+    failure_message = message if exception is None else f"{type(exception).__name__}: {message}"
+    record_fetch_attempt({
+        "source_role": "authoritative",
+        "source": "journal",
+        "provider": provider,
+        "journal": journal,
+        "volume": volume,
+        "issue": issue,
+        "url": url,
+        "stage": "issue_fetch",
+        "outcome": FETCH_FAILED,
+        "status": status,
+        "status_code": status,
+        "exception": failure_message,
+        "message": failure_message,
+        "field": "issue_membership",
+        "context": {
+            "issn": issn,
+            "journal_name": journal_name,
+            "adapter": provider,
+        },
+    })
     return AdapterResult(
         entries={},
         outcome=FETCH_FAILED,
         provider=provider,
         source="journal",
-        message=f"{journal}: {message}",
+        message=f"{journal}: {failure_message}",
     )
 
 
@@ -189,10 +234,20 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
             return official
         except ImportError:
             logger.warning("ACS scraper unavailable; not using CrossRef for issue membership")
-            return _official_fetch_failed("acs", journal_slug or journal_name or issn, "ACS scraper unavailable")
+            return _official_fetch_failed(
+                "acs", journal_slug or journal_name or issn, "ACS scraper unavailable",
+                volume=volume, issue=issue,
+                url=_official_issue_url("acs", acs_code, volume, issue),
+                issn=issn, journal_name=journal_name,
+            )
         except Exception as exc:
             logger.exception("ACS scraping failed; not using CrossRef for issue membership")
-            return _official_fetch_failed("acs", journal_slug or journal_name or issn, repr(exc))
+            return _official_fetch_failed(
+                "acs", journal_slug or journal_name or issn, str(exc),
+                volume=volume, issue=issue,
+                url=_official_issue_url("acs", acs_code, volume, issue),
+                issn=issn, journal_name=journal_name, exception=exc,
+            )
 
     if provider == "aip" and journal_slug:
         try:
@@ -206,10 +261,20 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
             return official
         except ImportError:
             logger.warning("AIP scraper unavailable; not using CrossRef for issue membership")
-            return _official_fetch_failed("aip", journal_slug or journal_name or issn, "AIP scraper unavailable")
+            return _official_fetch_failed(
+                "aip", journal_slug or journal_name or issn, "AIP scraper unavailable",
+                volume=volume, issue=issue,
+                url=_official_issue_url("aip", journal_slug, volume, issue),
+                issn=issn, journal_name=journal_name,
+            )
         except Exception as exc:
             logger.exception("AIP scraping failed; not using CrossRef for issue membership")
-            return _official_fetch_failed("aip", journal_slug or journal_name or issn, repr(exc))
+            return _official_fetch_failed(
+                "aip", journal_slug or journal_name or issn, str(exc),
+                volume=volume, issue=issue,
+                url=_official_issue_url("aip", journal_slug, volume, issue),
+                issn=issn, journal_name=journal_name, exception=exc,
+            )
 
     if provider == "aps" and journal_slug:
         try:
@@ -223,15 +288,30 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
             return official
         except ImportError:
             logger.warning("APS scraper unavailable; not using CrossRef for issue membership")
-            return _official_fetch_failed("aps", journal_slug or journal_name or issn, "APS scraper unavailable")
+            return _official_fetch_failed(
+                "aps", journal_slug or journal_name or issn, "APS scraper unavailable",
+                volume=volume, issue=issue,
+                url=_official_issue_url("aps", journal_slug, volume, issue),
+                issn=issn, journal_name=journal_name,
+            )
         except Exception as exc:
             logger.exception("APS scraping failed; not using CrossRef for issue membership")
-            return _official_fetch_failed("aps", journal_slug or journal_name or issn, repr(exc))
+            return _official_fetch_failed(
+                "aps", journal_slug or journal_name or issn, str(exc),
+                volume=volume, issue=issue,
+                url=_official_issue_url("aps", journal_slug, volume, issue),
+                issn=issn, journal_name=journal_name, exception=exc,
+            )
 
     return _official_fetch_failed(
         provider or "journal",
         journal_slug or journal_name or issn,
         "no authoritative issue adapter configured",
+        volume=volume,
+        issue=issue,
+        url=_official_issue_url(provider, journal_slug, volume, issue),
+        issn=issn,
+        journal_name=journal_name,
     )
 
 
