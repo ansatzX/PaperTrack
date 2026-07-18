@@ -285,6 +285,10 @@ def _throttle(provider: str, min_interval: float) -> float:
     _last_request_at[provider] = now
     return delay
 
+def provider_throttle(provider: str, min_interval: float) -> float:
+    """Apply shared provider throttle for non-HTTP requests."""
+    return _throttle(provider, min_interval)
+
 
 def _backoff_delay(backoff: Sequence[float], attempt_idx: int) -> float:
     if not backoff:

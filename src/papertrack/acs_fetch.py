@@ -3,6 +3,9 @@
 from dataclasses import dataclass
 import logging
 import re
+import json
+import subprocess
+import sys
 
 from bs4 import BeautifulSoup
 
@@ -22,6 +25,7 @@ from .http_fetch import (
     configured_interval,
     fetch_html_resilient,
     is_blocked_response,
+    provider_throttle,
 )
 from .journal_entry import JournalEntry
 
@@ -42,6 +46,18 @@ ACS_REQUEST_POLICY = HttpRequestPolicy(
 # Per-issue cache to avoid re-scraping on repeated runs.
 _cache: dict[str, AdapterResult[dict[str, JournalEntry]]] = {}
 _last_fetch_result: HttpFetchResult | None = None
+
+def _fetch_acs_browser(url: str) -> dict:
+    provider_throttle("acs", ACS_REQUEST_POLICY.min_interval)
+    cmd = ["xvfb-run", "-a", "/usr/bin/python3", "-m", "papertrack.acs_browser", url]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=ACS_BROWSER_TIMEOUT)
+        return json.loads(proc.stdout or "{}")
+    except Exception as exc:
+        return {"outcome": FETCH_FAILED, "message": str(exc), "html": ""}
+
+ACS_BROWSER_TIMEOUT = 60
 
 
 @dataclass
@@ -233,8 +249,22 @@ def query_acs_issue_result(journal_code: str, volume: str, issue: str,
     html, failure_outcome, status_code = _fetch_html(url)
     if not html or failure_outcome:
         outcome = failure_outcome or FETCH_FAILED
-        fetch_result = _last_fetch_result
-        record_fetch_attempt(
+        browser_result = _fetch_acs_browser(url) if outcome == BLOCKED else {}
+        if browser_result:
+            record_fetch_attempt({"source_role":"authoritative", "source":"journal", "provider":"acs",
+                "journal":journal_code, "volume":volume, "issue":issue, "url":url,
+                "stage":"issue_page_browser_fallback", "outcome":browser_result.get("outcome", FETCH_FAILED),
+                "http_status":browser_result.get("status_code"), "message":browser_result.get("message", "")},
+                html=browser_result.get("html") or None)
+            if browser_result.get("html") and browser_result.get("outcome") in ("", SUCCESS):
+                html, failure_outcome, status_code = browser_result["html"], "", browser_result.get("status_code")
+            else:
+                outcome = browser_result.get("outcome") or outcome
+        if html and not failure_outcome:
+            pass
+        else:
+            fetch_result = _last_fetch_result
+            record_fetch_attempt(
             {
                 "source_role": "authoritative",
                 "source": "journal",
@@ -254,15 +284,15 @@ def query_acs_issue_result(journal_code: str, volume: str, issue: str,
                 "message": "ACS issue page could not be fetched",
             },
             html=html or None,
-        )
-        return AdapterResult(
+            )
+            return AdapterResult(
             entries={},
             outcome=outcome,
             provider="acs",
             source="journal",
             message="ACS issue page could not be fetched",
             metadata={"url": url},
-        )
+            )
 
     parsed = _parse_acs_toc_result(html, journal_name)
     metadata = {
