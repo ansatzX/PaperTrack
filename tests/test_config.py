@@ -72,6 +72,7 @@ def test_run_sh_runs_arxiv_sources_only():
     assert '--diagnostics-dir "$DIAGNOSTICS_DIR"' in content
     assert "run_papertrack journal" not in active_lines
     assert "JOURNAL" not in active_lines
+    assert run_sh.stat().st_mode & stat.S_IXUSR
 
 
 def test_run_j_sh_configures_exact_production_request_intervals():
@@ -117,10 +118,10 @@ def test_run_j_sh_defines_and_reaps_exactly_three_provider_workers():
     assert 'start_worker "$script" || break' in active_lines
     assert 'while ((${#owned_tokens[@]} > 0)); do' in active_lines
     assert 'wait -n -p completed_pid "${active_pids[@]}"' in active_lines
-    assert "unset 'owned_tokens[$completed_pid]'" in active_lines
+    assert 'remove_owned_supervisor "$completed_pid"' in active_lines
     assert "child_status != 0 && shutdown_status == 0 && final_status == 0" in active_lines
     assert 'kill -s "$signal" -- "-$pid"' in active_lines
-    assert '--verify-owner "$pid" "$token" "$starttime"' in active_lines
+    assert 'verify-owner "$pid" "$token" "$starttime"' in active_lines
     assert 'if [[ -n "$shutdown_signal" ]]; then' in active_lines
     assert "set -e" not in active_lines
     assert "trap 'forward_signal TERM' TERM" in active_lines
@@ -147,3 +148,14 @@ def test_run_j_sh_rejects_unknown_arguments_before_starting_workers():
 
     assert completed.returncode == 2
     assert "unknown argument: --not-a-worker-option" in completed.stderr
+
+
+def test_readme_documents_journal_wrapper_platform_dependencies():
+    content = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "Linux `/proc`" in content
+    assert "`prctl`" in content
+    assert "child-subreaper support" in content
+    assert "`/usr/bin/setsid`" in content
+    assert "Bash 5.1+" in content
+    assert "`wait -n -p`" in content

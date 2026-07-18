@@ -17,7 +17,10 @@ def _write_executable(path: Path, content: str) -> None:
 
 
 def _isolated_wrapper(
-    tmp_path: Path, *, signal_between_launch_and_record: bool = False
+    tmp_path: Path,
+    *,
+    signal_between_launch_and_record: bool = False,
+    supervisor_readiness_fault: str | None = None,
 ) -> tuple[Path, Path]:
     project_dir = tmp_path / "project"
     scripts_dir = project_dir / "scripts"
@@ -96,8 +99,38 @@ exec "$@"
 
     supervisor = ROOT / "scripts/run_j_worker_supervisor.py"
     if supervisor.exists():
+        supervisor_content = supervisor.read_text(encoding="utf-8")
+        if supervisor_readiness_fault is not None:
+            wait_for_child = """\
+        marker = Path(os.environ["PAPERTRACK_FAKE_MARKER_DIR"]) / "acs.started"
+        while not marker.exists():
+            time.sleep(0.01)
+"""
+            if supervisor_readiness_fault == "publication":
+                publication = "    os.replace(temporary, path)"
+                assert publication in supervisor_content
+                replacement = """\
+    marker = Path(os.environ["PAPERTRACK_FAKE_MARKER_DIR"]) / "acs.started"
+    while not marker.exists():
+        time.sleep(0.01)
+    raise OSError("injected readiness replace failure")
+"""
+            elif supervisor_readiness_fault == "timeout":
+                publication = "        _write_ready_file(ready_file, token)"
+                assert publication in supervisor_content
+                replacement = (
+                    wait_for_child
+                    + "        # Injected fault: suppress readiness publication."
+                )
+            else:
+                raise AssertionError(
+                    f"unknown readiness fault: {supervisor_readiness_fault}"
+                )
+            supervisor_content = supervisor_content.replace(
+                publication, replacement, 1
+            )
         (scripts_dir / supervisor.name).write_text(
-            supervisor.read_text(encoding="utf-8"), encoding="utf-8"
+            supervisor_content, encoding="utf-8"
         )
 
     wrapper_content = (ROOT / "run_j.sh").read_text(encoding="utf-8")
@@ -420,6 +453,8 @@ def test_supervisor_ownership_verifier_rejects_unrelated_session(tmp_path):
             "/usr/bin/python3",
             "-c",
             "import signal; signal.pause()",
+            str(supervisor),
+            "supervise",
             "--ownership-token",
             "spoofed-token",
         ],
@@ -435,7 +470,7 @@ def test_supervisor_ownership_verifier_rejects_unrelated_session(tmp_path):
             [
                 "/usr/bin/python3",
                 str(supervisor),
-                "--verify-owner",
+                "verify-owner",
                 str(unrelated.pid),
                 "spoofed-token",
                 _proc_starttime(unrelated.pid),
@@ -453,3 +488,37 @@ def test_supervisor_ownership_verifier_rejects_unrelated_session(tmp_path):
         except ProcessLookupError:
             pass
         unrelated.wait(timeout=5)
+
+
+@pytest.mark.parametrize("readiness_fault", ("publication", "timeout"))
+def test_run_j_readiness_failure_terminates_owned_tree_and_stops_launching(
+    tmp_path, readiness_fault
+):
+    wrapper, marker_dir = _isolated_wrapper(
+        tmp_path, supervisor_readiness_fault=readiness_fault
+    )
+    environment = os.environ | {
+        "PAPERTRACK_FAKE_MARKER_DIR": str(marker_dir),
+        "TMPDIR": str(tmp_path),
+    }
+    process = subprocess.Popen(
+        ["bash", str(wrapper)],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    try:
+        _, stderr = _communicate_bounded(process, marker_dir)
+
+        assert process.returncode == 1, stderr
+        assert (marker_dir / "acs.started").exists(), stderr
+        assert not (marker_dir / "aip.conda").exists()
+        assert not (marker_dir / "aps.conda").exists()
+        _assert_recorded_process_groups_are_gone(marker_dir)
+        assert not list(tmp_path.glob("papertrack-run-j.*"))
+    finally:
+        _cleanup_process_groups(process, marker_dir)

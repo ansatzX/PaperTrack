@@ -64,15 +64,28 @@ capture_owned_starttime() {
         if [[ -s "$ready_file" ]]; then
             starttime="$(<"$ready_file")"
             if /usr/bin/python3 "$SUPERVISOR" \
-                --verify-owner "$pid" "$token" "$starttime"; then
+                verify-owner "$pid" "$token" "$starttime"; then
                 owned_starttimes["$pid"]="$starttime"
                 return 0
             fi
+            [[ -e "/proc/$pid" ]] || return 2
         fi
         [[ -e "/proc/$pid" ]] || return 1
         sleep 0.01
     done
     return 1
+}
+
+reap_ready_completion() {
+    local pid="$1"
+    local child_status
+
+    wait "$pid"
+    child_status=$?
+    remove_owned_supervisor "$pid"
+    if (( child_status != 0 && shutdown_status == 0 && final_status == 0 )); then
+        final_status=1
+    fi
 }
 
 signal_owned_group() {
@@ -87,12 +100,48 @@ signal_owned_group() {
         starttime="${owned_starttimes[$pid]}"
     fi
     if /usr/bin/python3 "$SUPERVISOR" \
-        --verify-owner "$pid" "$token" "$starttime"; then
+        verify-owner "$pid" "$token" "$starttime"; then
         kill -s "$signal" -- "-$pid" 2>/dev/null || true
         return 0
     fi
     echo "refusing to signal unowned worker group $pid" >&2
     return 0
+}
+
+is_direct_wrapper_child() {
+    local expected_pid="$1"
+    local child
+
+    for child in $(<"/proc/$$/task/$$/children"); do
+        [[ "$child" == "$expected_pid" ]] && return 0
+    done
+    return 1
+}
+
+remove_owned_supervisor() {
+    local pid="$1"
+
+    unset 'owned_tokens[$pid]'
+    unset 'owned_starttimes[$pid]'
+    unset 'owned_scripts[$pid]'
+    unset 'owned_ready_files[$pid]'
+}
+
+fail_unready_launch() {
+    local pid="$1"
+    local signal_to_send="${shutdown_signal:-TERM}"
+
+    if is_direct_wrapper_child "$pid"; then
+        kill -s "$signal_to_send" -- "$pid" 2>/dev/null || true
+    fi
+    while is_direct_wrapper_child "$pid"; do
+        wait "$pid" || true
+    done
+    wait "$pid" 2>/dev/null || true
+    remove_owned_supervisor "$pid"
+    if (( shutdown_status == 0 )); then
+        final_status=1
+    fi
 }
 
 forward_signal() {
@@ -117,7 +166,7 @@ forward_signal() {
 
 start_worker() {
     local script="$1"
-    local pid provider ready_file token
+    local pid provider readiness_status ready_file token
 
     [[ -z "$shutdown_signal" ]] || return 1
 
@@ -126,7 +175,7 @@ start_worker() {
     token="papertrack-${provider}-$$-${RANDOM}-${#owned_tokens[@]}"
     ready_file="${ownership_dir}/${provider}.ready"
     /usr/bin/setsid /usr/bin/python3 "$SUPERVISOR" \
-        --ownership-token "$token" --ready-file "$ready_file" -- \
+        supervise --ownership-token "$token" --ready-file "$ready_file" -- \
         "$CONDA_BIN" run --no-capture-output -n "$CONDA_ENV" \
             python "$script" \
             --data-dir "$DATA_DIR" --diagnostics-dir "$DIAGNOSTICS_DIR" \
@@ -136,7 +185,17 @@ start_worker() {
     owned_starttimes["$pid"]=""
     owned_scripts["$pid"]="$script"
     owned_ready_files["$pid"]="$ready_file"
-    capture_owned_starttime "$pid" "$token" || true
+    capture_owned_starttime "$pid" "$token"
+    readiness_status=$?
+    if (( readiness_status == 2 )); then
+        reap_ready_completion "$pid"
+        return 0
+    fi
+    if (( readiness_status != 0 )); then
+        echo "journal worker failed readiness: $script" >&2
+        fail_unready_launch "$pid"
+        return 1
+    fi
 
     # A trap can run after the pre-launch check but before this PID is stored.
     # Persisted shutdown state closes that window for the newly created group.
@@ -161,10 +220,7 @@ while ((${#owned_tokens[@]} > 0)); do
     if [[ -z "${completed_pid:-}" ]]; then
         continue
     fi
-    unset 'owned_tokens[$completed_pid]'
-    unset 'owned_starttimes[$completed_pid]'
-    unset 'owned_scripts[$completed_pid]'
-    unset 'owned_ready_files[$completed_pid]'
+    remove_owned_supervisor "$completed_pid"
     if (( child_status != 0 && shutdown_status == 0 && final_status == 0 )); then
         final_status=1
     fi

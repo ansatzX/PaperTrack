@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import signal
 import sys
+import time
 
 
 _PR_SET_CHILD_SUBREAPER = 36
@@ -40,15 +41,15 @@ def _process_identity(pid: int, token: str) -> str | None:
 
     arguments = [item.decode(errors="surrogateescape") for item in command if item]
     expected_script = str(Path(__file__).resolve())
-    try:
-        token_index = arguments.index("--ownership-token")
-    except ValueError:
-        return None
-    if token_index + 1 >= len(arguments) or arguments[token_index + 1] != token:
-        return None
-    if not any(
-        argument == expected_script
-        for argument in arguments[: token_index + 1]
+    if (
+        len(arguments) < 8
+        or arguments[0] != "/usr/bin/python3"
+        or arguments[1] != expected_script
+        or arguments[2] != "supervise"
+        or arguments[3] != "--ownership-token"
+        or arguments[4] != token
+        or arguments[5] != "--ready-file"
+        or arguments[7] != "--"
     ):
         return None
     return starttime
@@ -74,6 +75,54 @@ def _exit_status(wait_status: int) -> int:
     if os.WIFSIGNALED(wait_status):
         return 128 + os.WTERMSIG(wait_status)
     return 1
+
+
+def _direct_children() -> tuple[int, ...]:
+    path = Path(f"/proc/{os.getpid()}/task/{os.getpid()}/children")
+    try:
+        return tuple(int(pid) for pid in path.read_text(encoding="utf-8").split())
+    except FileNotFoundError:
+        return ()
+
+
+def _signal_direct_children(signum: int) -> None:
+    for pid in _direct_children():
+        try:
+            os.kill(pid, signum)
+        except ProcessLookupError:
+            pass
+
+
+def _terminate_and_reap_after_setup_failure() -> None:
+    """Bound cleanup of every child adopted by this subreaper."""
+    signal.pthread_sigmask(signal.SIG_BLOCK, _MANAGED_SIGNALS)
+    started = time.monotonic()
+    hard_deadline = started + 2.0
+    while True:
+        while True:
+            try:
+                reaped_pid, _ = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                return
+            if reaped_pid == 0:
+                break
+
+        children = _direct_children()
+        if not children:
+            try:
+                os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                return
+        now = time.monotonic()
+        signum = signal.SIGTERM if now < started + 0.5 else signal.SIGKILL
+        for pid in children:
+            try:
+                os.kill(pid, signum)
+            except ProcessLookupError:
+                pass
+        if now >= hard_deadline:
+            raise RuntimeError("timed out reaping children after supervisor setup failure")
+        time.sleep(0.01)
 
 
 def _write_ready_file(path: Path, token: str) -> None:
@@ -106,19 +155,28 @@ def _supervise(command: list[str], token: str, ready_file: Path) -> int:
             os._exit(127)
 
     shutdown_status = 0
+    shutdown_signal = 0
 
     def record_shutdown(signum: int, _frame) -> None:
-        nonlocal shutdown_status
+        nonlocal shutdown_signal, shutdown_status
         if shutdown_status == 0:
+            shutdown_signal = signum
             shutdown_status = 128 + signum
+        _signal_direct_children(signum)
 
-    for managed_signal in _MANAGED_SIGNALS:
-        signal.signal(managed_signal, record_shutdown)
-    signal.pthread_sigmask(signal.SIG_UNBLOCK, _MANAGED_SIGNALS)
-    _write_ready_file(ready_file, token)
+    try:
+        for managed_signal in _MANAGED_SIGNALS:
+            signal.signal(managed_signal, record_shutdown)
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, _MANAGED_SIGNALS)
+        _write_ready_file(ready_file, token)
+    except BaseException:
+        _terminate_and_reap_after_setup_failure()
+        raise
 
     aggregate_status = 0
     while True:
+        if shutdown_signal:
+            _signal_direct_children(shutdown_signal)
         try:
             _, wait_status = os.wait()
         except ChildProcessError:
@@ -134,26 +192,27 @@ def _supervise(command: list[str], token: str, ready_file: Path) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if arguments[:1] == ["--verify-owner"] and len(arguments) == 4:
+    if arguments[:1] == ["verify-owner"] and len(arguments) == 4:
         return 0 if _verify_owner(
             int(arguments[1]), arguments[2], arguments[3]
         ) else 1
     if (
-        len(arguments) < 6
-        or arguments[0] != "--ownership-token"
-        or arguments[2] != "--ready-file"
+        len(arguments) < 7
+        or arguments[0] != "supervise"
+        or arguments[1] != "--ownership-token"
+        or arguments[3] != "--ready-file"
     ):
         print(
-            "usage: run_j_worker_supervisor.py --ownership-token TOKEN "
+            "usage: run_j_worker_supervisor.py supervise --ownership-token TOKEN "
             "--ready-file PATH -- COMMAND...",
             file=sys.stderr,
         )
         return 2
-    if arguments[4] != "--":
+    if arguments[5] != "--":
         print("supervisor command must follow --", file=sys.stderr)
         return 2
     try:
-        return _supervise(arguments[5:], arguments[1], Path(arguments[3]))
+        return _supervise(arguments[6:], arguments[2], Path(arguments[4]))
     except (OSError, RuntimeError, ValueError) as exc:
         if isinstance(exc, OSError) and exc.errno == errno.EINTR:
             return 1

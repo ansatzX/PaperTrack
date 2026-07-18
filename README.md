@@ -118,6 +118,10 @@ does not run general journal discovery or expand the candidate lists. The
 wrapper waits for all three providers even if one fails and returns nonzero if
 any provider leaves failed or unresolved work.
 
+The journal wrapper is Linux-specific and requires Linux `/proc` and `prctl`
+child-subreaper support. It also requires `/usr/bin/setsid`, `/usr/bin/python3`,
+and Bash 5.1+ for associative arrays and completion-driven `wait -n -p`.
+
 With no arguments, a journal run resumes each provider's durable progress and
 skips already resolved candidates. The only accepted optional arguments are
 passed identically to all three workers:
