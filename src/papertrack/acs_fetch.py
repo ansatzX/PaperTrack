@@ -53,6 +53,8 @@ def _fetch_acs_browser(url: str) -> dict:
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=ACS_BROWSER_TIMEOUT)
+        if proc.returncode != 0:
+            return {"outcome": FETCH_FAILED, "message": proc.stderr or "browser helper failed", "html": ""}
         return json.loads(proc.stdout or "{}")
     except Exception as exc:
         return {"outcome": FETCH_FAILED, "message": str(exc), "html": ""}
