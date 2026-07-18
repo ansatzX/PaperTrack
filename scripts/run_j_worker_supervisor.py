@@ -16,7 +16,9 @@ _PR_SET_CHILD_SUBREAPER = 36
 _MANAGED_SIGNALS = (signal.SIGINT, signal.SIGQUIT, signal.SIGTERM)
 
 
-def _process_identity(pid: int, token: str) -> str | None:
+def _process_identity(
+    pid: int, token: str, expected_ppid: int | None = None
+) -> str | None:
     """Return start time only for this live tokenized session leader."""
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
@@ -30,13 +32,19 @@ def _process_identity(pid: int, token: str) -> str | None:
     fields = stat[closing_paren + 2 :].split()
     if len(fields) < 20:
         return None
-    state, process_group, session_id, starttime = (
+    state, parent_pid, process_group, session_id, starttime = (
         fields[0],
+        fields[1],
         fields[2],
         fields[3],
         fields[19],
     )
-    if state == "Z" or process_group != str(pid) or session_id != str(pid):
+    if (
+        state == "Z"
+        or process_group != str(pid)
+        or session_id != str(pid)
+        or (expected_ppid is not None and parent_pid != str(expected_ppid))
+    ):
         return None
 
     arguments = [item.decode(errors="surrogateescape") for item in command if item]
@@ -60,6 +68,34 @@ def _verify_owner(pid: int, token: str, expected_starttime: str | None) -> bool:
     return actual_starttime is not None and (
         expected_starttime is None or actual_starttime == expected_starttime
     )
+
+
+def _pidfd_signal_owned_unready(
+    pid: int, token: str, expected_ppid: int, signum: int
+) -> bool:
+    """Pin, validate, then signal one pre-readiness supervisor."""
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
+    if pidfd_open is None or pidfd_send_signal is None:
+        print("pidfd signaling is unsupported by /usr/bin/python3", file=sys.stderr)
+        return False
+    try:
+        pidfd = pidfd_open(pid, 0)
+    except (OSError, ProcessLookupError) as exc:
+        print(f"unable to pin unready supervisor {pid}: {exc}", file=sys.stderr)
+        return False
+    try:
+        if _process_identity(pid, token, expected_ppid) is None:
+            print(f"refusing to signal unowned supervisor {pid}", file=sys.stderr)
+            return False
+        try:
+            pidfd_send_signal(pidfd, signum, None, 0)
+        except (OSError, ProcessLookupError) as exc:
+            print(f"unable to signal pinned supervisor {pid}: {exc}", file=sys.stderr)
+            return False
+        return True
+    finally:
+        os.close(pidfd)
 
 
 def _set_child_subreaper() -> None:
@@ -174,24 +210,44 @@ def _supervise(command: list[str], token: str, ready_file: Path) -> int:
         raise
 
     aggregate_status = 0
+    shutdown_started: float | None = None
     while True:
-        if shutdown_signal:
-            _signal_direct_children(shutdown_signal)
-        try:
-            _, wait_status = os.wait()
-        except ChildProcessError:
-            break
-        except InterruptedError:
-            continue
-        child_status = _exit_status(wait_status)
-        if child_status != 0 and aggregate_status == 0:
-            aggregate_status = child_status
+        while True:
+            try:
+                reaped_pid, wait_status = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                return shutdown_status or aggregate_status
+            if reaped_pid == 0:
+                break
+            child_status = _exit_status(wait_status)
+            if child_status != 0 and aggregate_status == 0:
+                aggregate_status = child_status
 
-    return shutdown_status or aggregate_status
+        if shutdown_signal:
+            now = time.monotonic()
+            if shutdown_started is None:
+                shutdown_started = now
+            elapsed = now - shutdown_started
+            signal_to_send = shutdown_signal if elapsed < 0.5 else signal.SIGKILL
+            _signal_direct_children(signal_to_send)
+            if elapsed >= 2.0:
+                raise RuntimeError("timed out reaping children during shutdown")
+        time.sleep(0.01)
 
 
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == ["signal-unready"] and len(arguments) == 5:
+        signal_name = arguments[4]
+        if signal_name not in {"INT", "TERM"}:
+            print(f"unsupported unready signal: {signal_name}", file=sys.stderr)
+            return 2
+        return 0 if _pidfd_signal_owned_unready(
+            int(arguments[1]),
+            arguments[2],
+            int(arguments[3]),
+            getattr(signal, f"SIG{signal_name}"),
+        ) else 1
     if arguments[:1] == ["verify-owner"] and len(arguments) == 4:
         return 0 if _verify_owner(
             int(arguments[1]), arguments[2], arguments[3]

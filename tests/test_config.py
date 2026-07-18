@@ -122,6 +122,9 @@ def test_run_j_sh_defines_and_reaps_exactly_three_provider_workers():
     assert "child_status != 0 && shutdown_status == 0 && final_status == 0" in active_lines
     assert 'kill -s "$signal" -- "-$pid"' in active_lines
     assert 'verify-owner "$pid" "$token" "$starttime"' in active_lines
+    assert '"$SUPERVISOR" signal-unready' in active_lines
+    assert '"$pid" "${owned_tokens[$pid]}" "$$" "$signal_to_send"' in active_lines
+    assert 'kill -s "$signal_to_send" -- "$pid"' not in active_lines
     assert 'if [[ -n "$shutdown_signal" ]]; then' in active_lines
     assert "set -e" not in active_lines
     assert "trap 'forward_signal TERM' TERM" in active_lines
@@ -159,3 +162,5 @@ def test_readme_documents_journal_wrapper_platform_dependencies():
     assert "`/usr/bin/setsid`" in content
     assert "Bash 5.1+" in content
     assert "`wait -n -p`" in content
+    assert "`os.pidfd_open`" in content
+    assert "`signal.pidfd_send_signal`" in content

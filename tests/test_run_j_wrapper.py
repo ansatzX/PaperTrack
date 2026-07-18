@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from scripts import run_j_worker_supervisor as worker_supervisor
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -55,9 +57,14 @@ def stop(signum, _frame):
     (marker_dir / f"{provider}.signal").write_text(str(signum))
     raise SystemExit(128 + signum)
 
-if os.environ.get("PAPERTRACK_FAKE_NO_INT_HANDLER_PROVIDER") != provider:
+if os.environ.get("PAPERTRACK_FAKE_IGNORE_SIGNALS_PROVIDER") == provider:
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+elif os.environ.get("PAPERTRACK_FAKE_NO_INT_HANDLER_PROVIDER") != provider:
     signal.signal(signal.SIGINT, stop)
-signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGTERM, stop)
+else:
+    signal.signal(signal.SIGTERM, stop)
 while True:
     signal.pause()
 """
@@ -115,7 +122,7 @@ exec "$@"
         time.sleep(0.01)
     raise OSError("injected readiness replace failure")
 """
-            elif supervisor_readiness_fault == "timeout":
+            elif supervisor_readiness_fault in {"timeout", "timeout_resistant"}:
                 publication = "        _write_ready_file(ready_file, token)"
                 assert publication in supervisor_content
                 replacement = (
@@ -520,5 +527,177 @@ def test_run_j_readiness_failure_terminates_owned_tree_and_stops_launching(
         assert not (marker_dir / "aps.conda").exists()
         _assert_recorded_process_groups_are_gone(marker_dir)
         assert not list(tmp_path.glob("papertrack-run-j.*"))
+    finally:
+        _cleanup_process_groups(process, marker_dir)
+
+
+def test_pidfd_signal_pins_before_identity_and_never_signals_spoof(monkeypatch):
+    events = []
+
+    monkeypatch.setattr(
+        worker_supervisor.os,
+        "pidfd_open",
+        lambda pid, flags=0: events.append(("open", pid, flags)) or 91,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        worker_supervisor,
+        "_process_identity",
+        lambda pid, token, expected_ppid=None: events.append(
+            ("identity", pid, token, expected_ppid)
+        )
+        or None,
+    )
+    monkeypatch.setattr(
+        worker_supervisor.signal,
+        "pidfd_send_signal",
+        lambda *args: events.append(("send", *args)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        worker_supervisor.os,
+        "close",
+        lambda fd: events.append(("close", fd)),
+    )
+
+    assert not worker_supervisor._pidfd_signal_owned_unready(
+        1234, "expected-token", 4321, signal.SIGTERM
+    )
+    assert events == [
+        ("open", 1234, 0),
+        ("identity", 1234, "expected-token", 4321),
+        ("close", 91),
+    ]
+
+
+def test_pidfd_signal_sends_only_after_pinned_identity_passes(monkeypatch):
+    events = []
+
+    monkeypatch.setattr(
+        worker_supervisor.os,
+        "pidfd_open",
+        lambda pid, flags=0: events.append(("open", pid, flags)) or 92,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        worker_supervisor,
+        "_process_identity",
+        lambda pid, token, expected_ppid=None: events.append(
+            ("identity", pid, token, expected_ppid)
+        )
+        or "starttime",
+    )
+    monkeypatch.setattr(
+        worker_supervisor.signal,
+        "pidfd_send_signal",
+        lambda fd, signum, info, flags: events.append(
+            ("send", fd, signum, info, flags)
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        worker_supervisor.os,
+        "close",
+        lambda fd: events.append(("close", fd)),
+    )
+
+    assert worker_supervisor._pidfd_signal_owned_unready(
+        1235, "expected-token", 4321, signal.SIGINT
+    )
+    assert events == [
+        ("open", 1235, 0),
+        ("identity", 1235, "expected-token", 4321),
+        ("send", 92, signal.SIGINT, None, 0),
+        ("close", 92),
+    ]
+
+
+def test_pidfd_cli_rejects_unrelated_direct_child_without_signaling(tmp_path):
+    supervisor = ROOT / "scripts/run_j_worker_supervisor.py"
+    unrelated = subprocess.Popen(
+        ["/usr/bin/python3", "-c", "import signal; signal.pause()"]
+    )
+
+    try:
+        completed = subprocess.run(
+            [
+                "/usr/bin/python3",
+                str(supervisor),
+                "signal-unready",
+                str(unrelated.pid),
+                "expected-token",
+                str(os.getpid()),
+                "TERM",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert completed.returncode == 1
+        assert "refusing" in completed.stderr or "unable" in completed.stderr
+        os.kill(unrelated.pid, 0)
+    finally:
+        unrelated.terminate()
+        unrelated.wait(timeout=5)
+
+
+def test_run_j_readiness_timeout_kills_signal_resistant_descendant(tmp_path):
+    wrapper, marker_dir = _isolated_wrapper(
+        tmp_path, supervisor_readiness_fault="timeout_resistant"
+    )
+    environment = os.environ | {
+        "PAPERTRACK_FAKE_MARKER_DIR": str(marker_dir),
+        "PAPERTRACK_FAKE_IGNORE_SIGNALS_PROVIDER": "acs",
+        "TMPDIR": str(tmp_path),
+    }
+    process = subprocess.Popen(
+        ["bash", str(wrapper)],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    try:
+        _, stderr = _communicate_bounded(process, marker_dir)
+
+        assert process.returncode == 1, stderr
+        assert (marker_dir / "acs.started").exists(), stderr
+        assert not (marker_dir / "aip.conda").exists()
+        assert not (marker_dir / "aps.conda").exists()
+        _assert_recorded_process_groups_are_gone(marker_dir)
+        assert not list(tmp_path.glob("papertrack-run-j.*"))
+    finally:
+        _cleanup_process_groups(process, marker_dir)
+
+
+def test_run_j_term_escalates_to_kill_for_ready_resistant_descendant(tmp_path):
+    wrapper, marker_dir = _isolated_wrapper(tmp_path)
+    environment = os.environ | {
+        "PAPERTRACK_FAKE_MARKER_DIR": str(marker_dir),
+        "PAPERTRACK_FAKE_IGNORE_SIGNALS_PROVIDER": "acs",
+    }
+    process = subprocess.Popen(
+        ["bash", str(wrapper)],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    try:
+        _wait_for_paths(
+            [marker_dir / f"{provider}.started" for provider in ("acs", "aip", "aps")]
+        )
+        process.send_signal(signal.SIGTERM)
+        _, stderr = _communicate_bounded(process, marker_dir)
+
+        assert process.returncode == 143, stderr
+        _assert_recorded_process_groups_are_gone(marker_dir)
     finally:
         _cleanup_process_groups(process, marker_dir)

@@ -108,16 +108,6 @@ signal_owned_group() {
     return 0
 }
 
-is_direct_wrapper_child() {
-    local expected_pid="$1"
-    local child
-
-    for child in $(<"/proc/$$/task/$$/children"); do
-        [[ "$child" == "$expected_pid" ]] && return 0
-    done
-    return 1
-}
-
 remove_owned_supervisor() {
     local pid="$1"
 
@@ -131,12 +121,8 @@ fail_unready_launch() {
     local pid="$1"
     local signal_to_send="${shutdown_signal:-TERM}"
 
-    if is_direct_wrapper_child "$pid"; then
-        kill -s "$signal_to_send" -- "$pid" 2>/dev/null || true
-    fi
-    while is_direct_wrapper_child "$pid"; do
-        wait "$pid" || true
-    done
+    /usr/bin/python3 "$SUPERVISOR" signal-unready \
+        "$pid" "${owned_tokens[$pid]}" "$$" "$signal_to_send" || true
     wait "$pid" 2>/dev/null || true
     remove_owned_supervisor "$pid"
     if (( shutdown_status == 0 )); then
