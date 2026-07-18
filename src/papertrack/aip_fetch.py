@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from html import unescape
 import json
 import logging
+import math
 import re
 import subprocess
 import sys
@@ -368,6 +369,10 @@ def _parse_aip_toc(
 
 def _fetch_aip_browser_bundle(url: str, journal_slug: str) -> AipBrowserBundle:
     """Run one headful Playwright issue session under Xvfb."""
+    timeout = _aip_browser_timeout(
+        AIP_BROWSER_MAX_ABSTRACTS,
+        AIP_ABSTRACT_INTERVAL,
+    )
     command = [
         "xvfb-run",
         "-a",
@@ -385,13 +390,12 @@ def _fetch_aip_browser_bundle(url: str, journal_slug: str) -> AipBrowserBundle:
             check=False,
             capture_output=True,
             text=True,
-            timeout=_aip_browser_timeout(
-                AIP_BROWSER_MAX_ABSTRACTS,
-                AIP_ABSTRACT_INTERVAL,
-            ),
+            timeout=timeout,
         )
     except Exception as exc:
         return AipBrowserBundle(outcome=FETCH_FAILED, message=repr(exc))
+    finally:
+        _record_aip_browser_completion()
     if completed.returncode != 0:
         return AipBrowserBundle(
             outcome=FETCH_FAILED,
@@ -416,11 +420,21 @@ def _fetch_aip_browser_bundle(url: str, journal_slug: str) -> AipBrowserBundle:
 
 def _aip_browser_timeout(abstract_count: int, abstract_interval: float) -> float:
     """Bound a browser run including navigation, pacing, and AJAX responses."""
-    return float(
+    timeout = float(
         AIP_BROWSER_STARTUP_ALLOWANCE
         + abstract_count
         * (abstract_interval + AIP_BROWSER_ABSTRACT_RESPONSE_ALLOWANCE)
     )
+    if not math.isfinite(timeout):
+        raise RuntimeError("AIP browser timeout must be finite")
+    return timeout
+
+
+def _record_aip_browser_completion() -> None:
+    """Conservatively hand browser request timing back to direct fetch clocks."""
+    completed_at = time.monotonic()
+    _last_request_at["issue"] = completed_at
+    _last_request_at["abstract"] = completed_at
 
 
 def _record_abstract_outcome(

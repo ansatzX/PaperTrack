@@ -230,6 +230,96 @@ def test_aip_browser_bundle_runs_once_under_xvfb(monkeypatch):
     assert wait_roles == ["issue"]
 
 
+def test_aip_browser_completion_paces_next_direct_issue_request(monkeypatch):
+    from papertrack import aip_fetch
+
+    clock = [100.0]
+    sleeps = []
+
+    class Completed:
+        returncode = 0
+        stderr = ""
+        stdout = '{"html":"<div class=\\"al-article-items\\"></div>","abstracts":{}}'
+
+    class Session:
+        def get(self, url, **kwargs):
+            return Response()
+
+    def fake_run(command, **kwargs):
+        clock[0] += 5
+        return Completed()
+
+    def fake_sleep(delay):
+        sleeps.append(delay)
+        clock[0] += delay
+
+    monkeypatch.setattr(aip_fetch.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(aip_fetch.time, "sleep", fake_sleep)
+    monkeypatch.setattr(aip_fetch.subprocess, "run", fake_run)
+    monkeypatch.setattr(aip_fetch, "_get_session", lambda: Session())
+    aip_fetch.clear_aip_caches()
+
+    aip_fetch._fetch_aip_browser_bundle("https://example.test/issue", "jcp")
+    clock[0] += 1
+    aip_fetch._aip_get("https://example.test/direct-issue", role="issue")
+
+    assert sleeps == [29.0]
+
+
+def test_aip_browser_timeout_paces_next_direct_abstract_request(monkeypatch):
+    from papertrack import aip_fetch
+
+    clock = [200.0]
+    sleeps = []
+
+    class Session:
+        def get(self, url, **kwargs):
+            return Response()
+
+    def fake_run(command, **kwargs):
+        clock[0] += 5
+        raise aip_fetch.subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    def fake_sleep(delay):
+        sleeps.append(delay)
+        clock[0] += delay
+
+    monkeypatch.setattr(aip_fetch.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(aip_fetch.time, "sleep", fake_sleep)
+    monkeypatch.setattr(aip_fetch.subprocess, "run", fake_run)
+    monkeypatch.setattr(aip_fetch, "_get_session", lambda: Session())
+    aip_fetch.clear_aip_caches()
+
+    bundle = aip_fetch._fetch_aip_browser_bundle(
+        "https://example.test/issue",
+        "jcp",
+    )
+    clock[0] += 1
+    aip_fetch._aip_get("https://example.test/direct-abstract", role="abstract")
+
+    assert bundle.outcome == FETCH_FAILED
+    assert sleeps == [9.0]
+
+
+def test_aip_browser_timeout_rejects_non_finite_result_before_launch(monkeypatch):
+    from papertrack import aip_fetch
+
+    subprocess_calls = []
+    monkeypatch.setattr(aip_fetch, "AIP_ABSTRACT_INTERVAL", 1e308)
+    monkeypatch.setattr(
+        aip_fetch.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess_calls.append((args, kwargs)),
+    )
+
+    with pytest.raises(RuntimeError, match="browser timeout must be finite"):
+        aip_fetch._fetch_aip_browser_bundle(
+            "https://example.test/issue",
+            "jcp",
+        )
+    assert subprocess_calls == []
+
+
 def test_aip_request_clocks_are_role_aware(monkeypatch):
     from papertrack import aip_fetch
 
