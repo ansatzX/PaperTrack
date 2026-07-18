@@ -23,7 +23,10 @@ def test_browser_command_is_official_url(monkeypatch):
     monkeypatch.setattr(acs_fetch, "provider_throttle", lambda *a: 0)
     class P:
         stdout='{"outcome":"success","html":""}'
-    monkeypatch.setattr(acs_fetch.subprocess, "run", lambda cmd, **kw: captured.setdefault("cmd", cmd) or P())
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return P()
+    monkeypatch.setattr(acs_fetch.subprocess, "run", fake_run)
     acs_fetch._fetch_acs_browser("https://pubs.acs.org/toc/jctcce/1/1")
     assert captured["cmd"][-1] == "https://pubs.acs.org/toc/jctcce/1/1"
     assert not any("article" in x.lower() for x in captured["cmd"])
