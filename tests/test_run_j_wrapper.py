@@ -23,6 +23,8 @@ def _isolated_wrapper(
     *,
     signal_between_launch_and_record: bool = False,
     supervisor_readiness_fault: str | None = None,
+    supervisor_pidfd_capability_fault: bool = False,
+    supervisor_signal_unready_fault: bool = False,
 ) -> tuple[Path, Path]:
     project_dir = tmp_path / "project"
     scripts_dir = project_dir / "scripts"
@@ -107,6 +109,29 @@ exec "$@"
     supervisor = ROOT / "scripts/run_j_worker_supervisor.py"
     if supervisor.exists():
         supervisor_content = supervisor.read_text(encoding="utf-8")
+        arguments_assignment = (
+            "    arguments = list(sys.argv[1:] if argv is None else argv)"
+        )
+        assert arguments_assignment in supervisor_content
+        injected_cli_faults = []
+        if supervisor_pidfd_capability_fault:
+            injected_cli_faults.append(
+                '    if arguments[:1] == ["check-pidfd"]:\n'
+                '        print("injected pidfd capability failure", file=sys.stderr)\n'
+                "        return 1"
+            )
+        if supervisor_signal_unready_fault:
+            injected_cli_faults.append(
+                '    if arguments[:1] == ["signal-unready"]:\n'
+                '        print("injected signal-unready refusal", file=sys.stderr)\n'
+                "        return 1"
+            )
+        if injected_cli_faults:
+            supervisor_content = supervisor_content.replace(
+                arguments_assignment,
+                arguments_assignment + "\n" + "\n".join(injected_cli_faults),
+                1,
+            )
         if supervisor_readiness_fault is not None:
             wait_for_child = """\
         marker = Path(os.environ["PAPERTRACK_FAKE_MARKER_DIR"]) / "acs.started"
@@ -640,6 +665,74 @@ def test_pidfd_cli_rejects_unrelated_direct_child_without_signaling(tmp_path):
     finally:
         unrelated.terminate()
         unrelated.wait(timeout=5)
+
+
+def test_run_j_pidfd_preflight_fails_before_any_provider_starts(tmp_path):
+    wrapper, marker_dir = _isolated_wrapper(
+        tmp_path, supervisor_pidfd_capability_fault=True
+    )
+    environment = os.environ | {
+        "PAPERTRACK_FAKE_MARKER_DIR": str(marker_dir),
+        "PAPERTRACK_FAKE_ACS_EXIT": "0",
+        "PAPERTRACK_FAKE_AIP_EXIT": "0",
+        "PAPERTRACK_FAKE_APS_EXIT": "0",
+        "TMPDIR": str(tmp_path),
+    }
+
+    completed = subprocess.run(
+        ["bash", str(wrapper)],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+
+    assert completed.returncode == 1, completed.stderr
+    assert "pidfd" in completed.stderr
+    assert not list(marker_dir.iterdir())
+    assert not list(tmp_path.glob("papertrack-run-j.*"))
+
+
+def test_run_j_signal_unready_refusal_relies_on_supervisor_watchdog_cleanup(
+    tmp_path,
+):
+    wrapper, marker_dir = _isolated_wrapper(
+        tmp_path,
+        supervisor_readiness_fault="timeout_resistant",
+        supervisor_signal_unready_fault=True,
+    )
+    environment = os.environ | {
+        "PAPERTRACK_FAKE_MARKER_DIR": str(marker_dir),
+        "PAPERTRACK_FAKE_IGNORE_SIGNALS_PROVIDER": "acs",
+        "TMPDIR": str(tmp_path),
+    }
+    process = subprocess.Popen(
+        ["bash", str(wrapper)],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    _, stderr = process.communicate(timeout=5)
+
+    assert process.returncode == 1, stderr
+    assert "injected signal-unready refusal" in stderr
+    assert (marker_dir / "acs.started").exists(), stderr
+    assert not (marker_dir / "aip.conda").exists()
+    assert not (marker_dir / "aps.conda").exists()
+    _wait_until(
+        lambda: all(
+            not Path(f"/proc/{int(marker.read_text(encoding='utf-8'))}").exists()
+            for marker in (*marker_dir.glob("*.started"), *marker_dir.glob("*.conda"))
+        ),
+        "supervisor-owned watchdog cleanup",
+    )
+    assert not list(tmp_path.glob("papertrack-run-j.*"))
 
 
 def test_run_j_readiness_timeout_kills_signal_resistant_descendant(tmp_path):

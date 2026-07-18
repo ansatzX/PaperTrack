@@ -13,7 +13,9 @@ import time
 
 
 _PR_SET_CHILD_SUBREAPER = 36
+_PR_SET_PDEATHSIG = 1
 _MANAGED_SIGNALS = (signal.SIGINT, signal.SIGQUIT, signal.SIGTERM)
+_STARTUP_ACK_TIMEOUT = 1.25
 
 
 def _process_identity(
@@ -50,14 +52,20 @@ def _process_identity(
     arguments = [item.decode(errors="surrogateescape") for item in command if item]
     expected_script = str(Path(__file__).resolve())
     if (
-        len(arguments) < 8
+        len(arguments) < 13
         or arguments[0] != "/usr/bin/python3"
         or arguments[1] != expected_script
         or arguments[2] != "supervise"
         or arguments[3] != "--ownership-token"
         or arguments[4] != token
         or arguments[5] != "--ready-file"
-        or arguments[7] != "--"
+        or arguments[7] != "--ack-file"
+        or arguments[9] != "--parent-pid"
+        or (
+            expected_ppid is not None
+            and arguments[10] != str(expected_ppid)
+        )
+        or arguments[11] != "--"
     ):
         return None
     return starttime
@@ -98,11 +106,34 @@ def _pidfd_signal_owned_unready(
         os.close(pidfd)
 
 
+def _check_pidfd_capability() -> bool:
+    if getattr(os, "pidfd_open", None) is None:
+        print("os.pidfd_open is unavailable in /usr/bin/python3", file=sys.stderr)
+        return False
+    if getattr(signal, "pidfd_send_signal", None) is None:
+        print(
+            "signal.pidfd_send_signal is unavailable in /usr/bin/python3",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def _set_child_subreaper() -> None:
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error))
+
+
+def _set_parent_death_signal(expected_parent_pid: int) -> None:
+    """Arm cleanup if the wrapper exits before or during supervision."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    if os.getppid() != expected_parent_pid:
+        raise RuntimeError("journal wrapper exited before supervisor setup")
 
 
 def _exit_status(wait_status: int) -> int:
@@ -170,7 +201,13 @@ def _write_ready_file(path: Path, token: str) -> None:
     os.replace(temporary, path)
 
 
-def _supervise(command: list[str], token: str, ready_file: Path) -> int:
+def _supervise(
+    command: list[str],
+    token: str,
+    ready_file: Path,
+    ack_file: Path,
+    expected_parent_pid: int,
+) -> int:
     if not command:
         raise ValueError("supervisor command must not be empty")
 
@@ -178,6 +215,7 @@ def _supervise(command: list[str], token: str, ready_file: Path) -> int:
     for managed_signal in _MANAGED_SIGNALS:
         signal.signal(managed_signal, signal.SIG_DFL)
     _set_child_subreaper()
+    _set_parent_death_signal(expected_parent_pid)
 
     child_pid = os.fork()
     if child_pid == 0:
@@ -211,6 +249,8 @@ def _supervise(command: list[str], token: str, ready_file: Path) -> int:
 
     aggregate_status = 0
     shutdown_started: float | None = None
+    startup_deadline = time.monotonic() + _STARTUP_ACK_TIMEOUT
+    startup_acknowledged = False
     while True:
         while True:
             try:
@@ -223,8 +263,20 @@ def _supervise(command: list[str], token: str, ready_file: Path) -> int:
             if child_status != 0 and aggregate_status == 0:
                 aggregate_status = child_status
 
+        now = time.monotonic()
+        if not startup_acknowledged and not shutdown_signal:
+            if ack_file.exists():
+                startup_acknowledged = True
+            elif now >= startup_deadline:
+                print(
+                    "journal worker startup acknowledgement timed out",
+                    file=sys.stderr,
+                )
+                shutdown_signal = signal.SIGTERM
+                shutdown_status = 1
+                _signal_direct_children(shutdown_signal)
+
         if shutdown_signal:
-            now = time.monotonic()
             if shutdown_started is None:
                 shutdown_started = now
             elapsed = now - shutdown_started
@@ -237,6 +289,8 @@ def _supervise(command: list[str], token: str, ready_file: Path) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments == ["check-pidfd"]:
+        return 0 if _check_pidfd_capability() else 1
     if arguments[:1] == ["signal-unready"] and len(arguments) == 5:
         signal_name = arguments[4]
         if signal_name not in {"INT", "TERM"}:
@@ -253,22 +307,30 @@ def main(argv: list[str] | None = None) -> int:
             int(arguments[1]), arguments[2], arguments[3]
         ) else 1
     if (
-        len(arguments) < 7
+        len(arguments) < 11
         or arguments[0] != "supervise"
         or arguments[1] != "--ownership-token"
         or arguments[3] != "--ready-file"
+        or arguments[5] != "--ack-file"
+        or arguments[7] != "--parent-pid"
     ):
         print(
             "usage: run_j_worker_supervisor.py supervise --ownership-token TOKEN "
-            "--ready-file PATH -- COMMAND...",
+            "--ready-file PATH --ack-file PATH --parent-pid PID -- COMMAND...",
             file=sys.stderr,
         )
         return 2
-    if arguments[5] != "--":
+    if arguments[9] != "--":
         print("supervisor command must follow --", file=sys.stderr)
         return 2
     try:
-        return _supervise(arguments[6:], arguments[2], Path(arguments[4]))
+        return _supervise(
+            arguments[10:],
+            arguments[2],
+            Path(arguments[4]),
+            Path(arguments[6]),
+            int(arguments[8]),
+        )
     except (OSError, RuntimeError, ValueError) as exc:
         if isinstance(exc, OSError) and exc.errno == errno.EINTR:
             return 1

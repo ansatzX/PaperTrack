@@ -32,6 +32,11 @@ export PAPERTRACK_APS_ISSUE_INTERVAL=30
 
 cd "$PROJECT_DIR"
 
+if ! /usr/bin/python3 "$SUPERVISOR" check-pidfd; then
+    echo "journal worker pidfd capability preflight failed" >&2
+    exit 1
+fi
+
 ownership_dir="$(mktemp -d "${TMPDIR:-/tmp}/papertrack-run-j.XXXXXX")" || {
     echo "unable to create journal worker ownership directory" >&2
     exit 1
@@ -50,6 +55,7 @@ declare -A owned_tokens=()
 declare -A owned_starttimes=()
 declare -A owned_scripts=()
 declare -A owned_ready_files=()
+declare -A owned_ack_files=()
 final_status=0
 shutdown_signal=""
 shutdown_status=0
@@ -58,6 +64,7 @@ capture_owned_starttime() {
     local pid="$1"
     local token="$2"
     local ready_file="${owned_ready_files[$pid]:-}"
+    local ack_file="${owned_ack_files[$pid]:-}"
     local attempt starttime
 
     for ((attempt = 0; attempt < 100; attempt++)); do
@@ -66,6 +73,7 @@ capture_owned_starttime() {
             if /usr/bin/python3 "$SUPERVISOR" \
                 verify-owner "$pid" "$token" "$starttime"; then
                 owned_starttimes["$pid"]="$starttime"
+                : > "$ack_file"
                 return 0
             fi
             [[ -e "/proc/$pid" ]] || return 2
@@ -115,15 +123,42 @@ remove_owned_supervisor() {
     unset 'owned_starttimes[$pid]'
     unset 'owned_scripts[$pid]'
     unset 'owned_ready_files[$pid]'
+    unset 'owned_ack_files[$pid]'
+}
+
+bounded_reap_unready_supervisor() {
+    local pid="$1"
+    local attempt stat remainder state
+
+    for ((attempt = 0; attempt < 300; attempt++)); do
+        if [[ ! -e "/proc/$pid" ]]; then
+            wait "$pid" 2>/dev/null || true
+            return 0
+        fi
+        if [[ -r "/proc/$pid/stat" ]]; then
+            stat="$(<"/proc/$pid/stat")"
+            remainder="${stat##*) }"
+            state="${remainder%% *}"
+            if [[ "$state" == Z ]]; then
+                wait "$pid" 2>/dev/null || true
+                return 0
+            fi
+        fi
+        sleep 0.01
+    done
+    echo "timed out awaiting unready supervisor cleanup: $pid" >&2
+    return 1
 }
 
 fail_unready_launch() {
     local pid="$1"
     local signal_to_send="${shutdown_signal:-TERM}"
 
-    /usr/bin/python3 "$SUPERVISOR" signal-unready \
-        "$pid" "${owned_tokens[$pid]}" "$$" "$signal_to_send" || true
-    wait "$pid" 2>/dev/null || true
+    if ! /usr/bin/python3 "$SUPERVISOR" signal-unready \
+        "$pid" "${owned_tokens[$pid]}" "$$" "$signal_to_send"; then
+        echo "pinned signal refused; awaiting supervisor-owned cleanup: $pid" >&2
+    fi
+    bounded_reap_unready_supervisor "$pid" || true
     remove_owned_supervisor "$pid"
     if (( shutdown_status == 0 )); then
         final_status=1
@@ -152,7 +187,7 @@ forward_signal() {
 
 start_worker() {
     local script="$1"
-    local pid provider readiness_status ready_file token
+    local pid provider readiness_status ready_file ack_file token
 
     [[ -z "$shutdown_signal" ]] || return 1
 
@@ -160,8 +195,10 @@ start_worker() {
     provider="${provider%_candidates.py}"
     token="papertrack-${provider}-$$-${RANDOM}-${#owned_tokens[@]}"
     ready_file="${ownership_dir}/${provider}.ready"
+    ack_file="${ownership_dir}/${provider}.ack"
     /usr/bin/setsid /usr/bin/python3 "$SUPERVISOR" \
-        supervise --ownership-token "$token" --ready-file "$ready_file" -- \
+        supervise --ownership-token "$token" --ready-file "$ready_file" \
+        --ack-file "$ack_file" --parent-pid "$$" -- \
         "$CONDA_BIN" run --no-capture-output -n "$CONDA_ENV" \
             python "$script" \
             --data-dir "$DATA_DIR" --diagnostics-dir "$DIAGNOSTICS_DIR" \
@@ -171,6 +208,7 @@ start_worker() {
     owned_starttimes["$pid"]=""
     owned_scripts["$pid"]="$script"
     owned_ready_files["$pid"]="$ready_file"
+    owned_ack_files["$pid"]="$ack_file"
     capture_owned_starttime "$pid" "$token"
     readiness_status=$?
     if (( readiness_status == 2 )); then

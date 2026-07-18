@@ -122,6 +122,10 @@ The journal wrapper is Linux-specific and requires Linux `/proc` and `prctl`
 child-subreaper support. It also requires `/usr/bin/setsid`, `/usr/bin/python3`,
 and Bash 5.1+ for associative arrays and completion-driven `wait -n -p`. The
 deployed Python must expose `os.pidfd_open` and `signal.pidfd_send_signal`.
+The wrapper checks those APIs before creating launch state or starting a
+provider. Each supervisor also requires a verified startup acknowledgement and
+arms a parent-death signal; if the wrapper cannot safely command or acknowledge
+it, the supervisor boundedly terminates and reaps its own provider descendants.
 
 With no arguments, a journal run resumes each provider's durable progress and
 skips already resolved candidates. The only accepted optional arguments are
