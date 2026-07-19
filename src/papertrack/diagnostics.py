@@ -19,6 +19,7 @@ ABNORMAL_OUTCOMES = {
     "blocked",
     "rate_limited",
     "fetch_failed",
+    "circuit_open",
     "parse_failed",
     "official_empty_suspicious",
     "official_field_absent",
