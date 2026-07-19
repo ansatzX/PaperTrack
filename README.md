@@ -233,15 +233,16 @@ provider = "aip"
 
 For each issue, PaperTrack:
 
-1. Fetches the AIP issue page, for example
+1. Navigates the canonical AIP issue page in the publisher worker's single
+   persistent Chrome context, for example
    `https://pubs.aip.org/aip/jcp/issue/164/16`.
 2. Extracts the official issue article list, DOI, title, authors, page, year,
    and `data-articleid`.
-3. Fetches abstracts from AIP's official issue-page AJAX endpoint:
-   `https://pubs.aip.org/aip/jcp/PlatformArticle/ArticleAbstractAjax`.
-4. If direct HTTP receives a Cloudflare challenge, makes one bounded headful
-   Playwright attempt under Xvfb, reusing one browser context for that issue and
-   blocking images, fonts, media, and article-page navigation.
+3. Requests required abstracts through the official same-origin issue handler
+   in that same browser context:
+   `https://pubs.aip.org/Handlers/ArticleAbstractHandler.ashx`.
+4. On a challenge, keeps that context and profile, waits once, and reloads the
+   canonical issue page according to the bounded provider runtime policy.
 5. Validates the complete issue result before committing its official snapshot.
 
 PaperTrack does not visit each AIP article page. The production journal wrapper

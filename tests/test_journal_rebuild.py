@@ -15,7 +15,7 @@ from papertrack.journal_rebuild import (
     run_provider_rebuild as _run_provider_rebuild,
 )
 from papertrack.source_policy import CrossrefMode
-from papertrack.adapter_result import SUCCESS
+from papertrack.adapter_result import RATE_LIMITED, SUCCESS
 from papertrack.official_snapshot import (
     OfficialSnapshotStore,
     SnapshotKey,
@@ -490,6 +490,70 @@ def test_progress_loader_requires_exact_contextual_top_level_schema(tmp_path, pa
     assert str(progress) in str(error.value)
 
 
+def test_progress_v1_is_migrated_with_precise_source_outcome_on_write(tmp_path):
+    progress_path = tmp_path / "journal_rebuild_acs_state.json"
+    progress_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "provider": "acs",
+                "issues": {
+                    "acs/jcim/66/12.md": {"outcome": FETCH_FAILED}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    progress = _load_progress(progress_path, "acs")
+
+    assert progress.schema_version == 2
+    assert progress.issues["acs/jcim/66/12.md"].outcome == FETCH_FAILED
+    assert progress.issues["acs/jcim/66/12.md"].source_outcome == FETCH_FAILED
+
+
+def test_candidate_terminal_accounting_reconciles_with_attempted_keys(
+    tmp_path, monkeypatch
+):
+    module = _configure(monkeypatch)
+    candidates = _two_acs_candidates()
+    calls = 0
+
+    def rebuild(**kwargs):
+        nonlocal calls
+        runtime = kwargs["provider_runtime"]
+        calls += 1
+        runtime.last_source_outcome = (
+            SUCCESS if calls == 1 else "parse_failed"
+        )
+        runtime.last_source_metadata = {
+            "official_transport": "snapshot" if calls == 1 else "live"
+        }
+        if calls == 1:
+            candidate = candidates[0]
+            path = tmp_path / "data" / candidate.relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                _report(("10.1021/example", "Article", "Abstract")),
+                encoding="utf-8",
+            )
+            runtime.stats.snapshot_hit += 1
+            return True
+        return False
+
+    monkeypatch.setattr(module, "filter_journal_to_md", rebuild)
+    summary = run_provider_rebuild(
+        "acs", candidates, tmp_path / "data", tmp_path / "diagnostics"
+    )
+    stats = summary.runtime_stats
+
+    assert stats.candidate_attempted == len(summary.attempted_keys) == 2
+    assert stats.terminal_accounted == stats.candidate_attempted
+    assert stats.terminal_resolved == 1
+    assert stats.parse_validation_failure == 1
+    assert stats.fetch_failed == 1
+
+
 def test_progress_loader_wraps_malformed_json_with_path_context(tmp_path):
     progress = tmp_path / "journal_rebuild_acs_state.json"
     progress.write_text("not-json", encoding="utf-8")
@@ -857,6 +921,12 @@ def test_aip_incomplete_abstract_response_restores_report_and_records_failure(
     assert report_path.read_bytes() == original
     assert summary.fetch_failed_keys == (candidate.key,)
     assert progress.issues[candidate.key].outcome == FETCH_FAILED
+    assert progress.issues[candidate.key].source_outcome == (
+        RATE_LIMITED if abstract_status == 429 else FETCH_FAILED
+    )
+    assert runtime.stats.candidate_attempted == 1
+    assert runtime.stats.terminal_accounted == 1
+    assert runtime.stats.endpoint_failure == 1
 
 
 def test_assessment_exception_closes_runtime_restores_report_and_records_failure(

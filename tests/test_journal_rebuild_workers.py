@@ -196,11 +196,16 @@ def test_worker_summary_reports_rates_and_structured_runtime_counts(
         skipped_keys=(),
         outcomes={keys[0]: RESOLVED, keys[1]: FETCH_FAILED},
         runtime_stats=ProviderRunStats(
+            candidate_attempted=2,
+            terminal_resolved=1,
+            navigation_failure=1,
+            endpoint_success=1,
+            endpoint_failure=0,
             snapshot_hit=1,
             live_success=0,
-            blocked=2,
-            fetch_failed=3,
-            circuit_skipped=4,
+            blocked=0,
+            fetch_failed=1,
+            circuit_skipped=0,
         ),
     )
     monkeypatch.setattr(worker, "run_provider_rebuild", lambda *args, **kwargs: summary)
@@ -219,9 +224,16 @@ def test_worker_summary_reports_rates_and_structured_runtime_counts(
     assert "complete_report_rate=0.5000" in output
     assert "snapshot_hit=1" in output
     assert "live_success=0" in output
-    assert "blocked=2" in output
-    assert "fetch_failed=3" in output
-    assert "circuit_skipped=4" in output
+    assert "blocked=0" in output
+    assert "fetch_failed=1" in output
+    assert "circuit_skipped=0" in output
+    assert "terminal_accounted=2" in output
+    assert "navigation_failure=1" in output
+    assert "parse_validation_failure=0" in output
+    assert "cache_failure=0" in output
+    assert "endpoint_success=1" in output
+    assert "endpoint_failure=0" in output
+    assert "unresolved_metadata=0" in output
 
 
 @pytest.mark.parametrize(

@@ -14,6 +14,15 @@ import tempfile
 from typing import Iterable
 
 from .codex import journal_configs
+from .adapter_result import (
+    BLOCKED,
+    CIRCUIT_OPEN,
+    FETCH_FAILED as SOURCE_FETCH_FAILED,
+    OFFICIAL_EMPTY_SUSPICIOUS,
+    PARSE_FAILED,
+    RATE_LIMITED,
+    SUCCESS as SOURCE_SUCCESS,
+)
 from .report import filter_journal_to_md
 from .provider_runtime import ProviderRuntime, ProviderRunStats
 from .source_policy import SourcePolicy
@@ -22,6 +31,7 @@ from .source_policy import SourcePolicy
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
+PROGRESS_SCHEMA_VERSION = 2
 RESOLVED = "resolved"
 OFFICIAL_SUCCESS_UNRESOLVED = "official_success_unresolved"
 FETCH_FAILED = "fetch_failed"
@@ -108,19 +118,22 @@ class RebuildCandidate:
 @dataclass(frozen=True)
 class ProgressRecord:
     outcome: str
+    source_outcome: str = ""
 
     def __post_init__(self) -> None:
         if type(self.outcome) is not str:
             raise ValueError("journal rebuild outcome must be a string")
         if self.outcome not in _TERMINAL_OUTCOMES:
             raise ValueError(f"unknown journal rebuild outcome: {self.outcome!r}")
+        if type(self.source_outcome) is not str or not self.source_outcome:
+            raise ValueError("journal source outcome must be a non-empty string")
 
 
 @dataclass
 class ProviderProgress:
     provider: str
     issues: dict[str, ProgressRecord]
-    schema_version: int = SCHEMA_VERSION
+    schema_version: int = PROGRESS_SCHEMA_VERSION
 
     def to_json(self) -> dict:
         return {
@@ -300,7 +313,8 @@ def _load_progress(path: Path, provider: str) -> ProviderProgress:
     _require_exact_keys(payload, {"schema_version", "provider", "issues"}, context)
     if type(payload.get("schema_version")) is not int:
         raise ValueError(f"invalid {context}: schema_version must be an integer")
-    if payload.get("schema_version") != SCHEMA_VERSION:
+    source_schema = payload.get("schema_version")
+    if source_schema not in {1, PROGRESS_SCHEMA_VERSION}:
         raise ValueError(f"invalid {context}: unsupported schema_version")
     if type(payload.get("provider")) is not str:
         raise ValueError(f"invalid {context}: provider must be a string")
@@ -322,12 +336,25 @@ def _load_progress(path: Path, provider: str) -> ProviderProgress:
             or any(part in {".", ".."} for part in key_parts)
         ):
             raise ValueError(f"invalid {record_context}: invalid provider issue path")
-        if type(record) is not dict or set(record) != {"outcome"}:
+        expected_record_keys = (
+            {"outcome"} if source_schema == 1
+            else {"outcome", "source_outcome"}
+        )
+        if type(record) is not dict or set(record) != expected_record_keys:
             raise ValueError(
-                f"invalid {record_context}: record must contain exactly outcome"
+                f"invalid {record_context}: record has invalid fields"
             )
         try:
-            issues[key] = ProgressRecord(**record)
+            if source_schema == 1:
+                rebuild_outcome = record["outcome"]
+                source_outcome = (
+                    SOURCE_SUCCESS
+                    if rebuild_outcome in {RESOLVED, OFFICIAL_SUCCESS_UNRESOLVED}
+                    else SOURCE_FETCH_FAILED
+                )
+                issues[key] = ProgressRecord(rebuild_outcome, source_outcome)
+            else:
+                issues[key] = ProgressRecord(**record)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"invalid {record_context}: {exc}") from exc
     return ProviderProgress(provider=provider, issues=issues)
@@ -633,15 +660,26 @@ def _journal_config(candidate: RebuildCandidate) -> dict[str, str]:
     return config
 
 
+@dataclass(frozen=True)
+class _CandidateExecution:
+    rebuild_outcome: str
+    source_outcome: str
+    source_metadata: dict = field(default_factory=dict)
+    source_message: str = ""
+
+
 def _rebuild_candidate(
     candidate: RebuildCandidate,
     data_path: Path,
     provider_runtime: ProviderRuntime,
-) -> str:
+) -> _CandidateExecution:
     """Rebuild one candidate while preserving its prior report on failure."""
     config = _journal_config(candidate)
     report_path = data_path / PurePosixPath(candidate.relative_path)
     backup = _create_report_backup(report_path)
+    provider_runtime.last_source_outcome = ""
+    provider_runtime.last_source_metadata = {}
+    provider_runtime.last_source_message = ""
     try:
         collected_dois = (
             _existing_collected_dois(backup.read_text(encoding="utf-8"))
@@ -669,11 +707,23 @@ def _rebuild_candidate(
         _restore_report(report_path, backup)
         if not isinstance(exc, Exception):
             raise
-        return FETCH_FAILED
+        return _CandidateExecution(
+            FETCH_FAILED,
+            getattr(provider_runtime, "last_source_outcome", "")
+            or SOURCE_FETCH_FAILED,
+            getattr(provider_runtime, "last_source_metadata", {}),
+            getattr(provider_runtime, "last_source_message", "") or str(exc),
+        )
 
     if not success:
         _restore_report(report_path, backup)
-        return FETCH_FAILED
+        return _CandidateExecution(
+            FETCH_FAILED,
+            getattr(provider_runtime, "last_source_outcome", "")
+            or SOURCE_FETCH_FAILED,
+            getattr(provider_runtime, "last_source_metadata", {}),
+            getattr(provider_runtime, "last_source_message", ""),
+        )
 
     try:
         outcome = _assess_report(report_path, candidate)
@@ -688,10 +738,83 @@ def _rebuild_candidate(
             report_path,
             exc,
         )
-        return FETCH_FAILED
+        return _CandidateExecution(
+            FETCH_FAILED,
+            getattr(provider_runtime, "last_source_outcome", "")
+            or SOURCE_SUCCESS,
+            getattr(provider_runtime, "last_source_metadata", {}),
+            getattr(provider_runtime, "last_source_message", "") or str(exc),
+        )
 
     _discard_report_backup(backup)
-    return outcome
+    return _CandidateExecution(
+        outcome,
+        getattr(provider_runtime, "last_source_outcome", "") or SOURCE_SUCCESS,
+        getattr(provider_runtime, "last_source_metadata", {}),
+        getattr(provider_runtime, "last_source_message", ""),
+    )
+
+
+def _account_candidate(
+    stats: ProviderRunStats,
+    provider: str,
+    execution: _CandidateExecution,
+) -> None:
+    """Assign one terminal category and separate non-terminal provenance."""
+    stats.candidate_attempted += 1
+    source = execution.source_outcome
+    metadata = execution.source_metadata or {}
+    missing_fields = metadata.get("missing_fields") or []
+
+    if provider == "aip":
+        if (
+            source == SOURCE_SUCCESS
+            and not missing_fields
+            and metadata.get("official_transport") == "live"
+        ):
+            stats.endpoint_success += 1
+        elif missing_fields:
+            # Endpoint health is useful evidence but only a terminal category
+            # when it caused the candidate failure below.
+            stats.endpoint_failure += 1
+
+    if execution.rebuild_outcome == RESOLVED:
+        stats.terminal_resolved += 1
+    elif execution.rebuild_outcome == OFFICIAL_SUCCESS_UNRESOLVED:
+        stats.unresolved_metadata += 1
+    elif source == BLOCKED:
+        stats.terminal_blocked += 1
+    elif source == CIRCUIT_OPEN:
+        stats.terminal_circuit_skipped += 1
+    elif source in {PARSE_FAILED, OFFICIAL_EMPTY_SUSPICIOUS}:
+        stats.parse_validation_failure += 1
+    elif provider == "aip" and (
+        source == RATE_LIMITED or bool(missing_fields)
+    ):
+        # endpoint_failure was already recorded as an observation; it is also
+        # this candidate's one terminal category.
+        if not missing_fields:
+            stats.endpoint_failure += 1
+        stats.terminal_endpoint_failure += 1
+    elif "snapshot commit failed" in execution.source_message.lower():
+        stats.cache_failure += 1
+    elif source == SOURCE_FETCH_FAILED:
+        stats.navigation_failure += 1
+    else:
+        stats.terminal_other_failure += 1
+
+    stats.fetch_failed = sum(
+        (
+            stats.navigation_failure,
+            stats.parse_validation_failure,
+            stats.cache_failure,
+            stats.terminal_endpoint_failure,
+            stats.terminal_other_failure,
+        )
+    )
+
+    if stats.terminal_accounted != stats.candidate_attempted:
+        raise RuntimeError("candidate terminal accounting is not reconcilable")
 
 
 def run_provider_rebuild(
@@ -764,13 +887,17 @@ def run_provider_rebuild(
     ) as provider_runtime:
         for candidate in pending:
             attempted.append(candidate.key)
-            outcome = _rebuild_candidate(
+            execution = _rebuild_candidate(
                 candidate,
                 data_path,
                 provider_runtime,
             )
+            outcome = execution.rebuild_outcome
+            _account_candidate(provider_runtime.stats, provider, execution)
             outcomes[candidate.key] = outcome
-            progress.issues[candidate.key] = ProgressRecord(outcome)
+            progress.issues[candidate.key] = ProgressRecord(
+                outcome, execution.source_outcome
+            )
             _write_progress(progress_path, progress)
 
     return RebuildSummary(

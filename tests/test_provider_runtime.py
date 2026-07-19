@@ -21,7 +21,8 @@ class FakeClock:
 
 
 class FakeNavigationResponse:
-    status = 200
+    def __init__(self, status=200):
+        self.status = status
 
 
 class FakeApiResponse:
@@ -77,7 +78,7 @@ class FakePage:
             self.browser.challenge_pages -= 1
         for response in self.browser.navigation_responses:
             self._response_handler(response)
-        return FakeNavigationResponse()
+        return FakeNavigationResponse(self.browser.navigation_status)
 
     def reload(self):
         self.browser.reload_count += 1
@@ -85,7 +86,7 @@ class FakePage:
         self._challenge = self.browser.challenge_pages > 0
         if self._challenge:
             self.browser.challenge_pages -= 1
-        return FakeNavigationResponse()
+        return FakeNavigationResponse(self.browser.navigation_status)
 
     def wait_for_selector(self, selector):
         if self._challenge:
@@ -152,6 +153,7 @@ class FakePlaywright:
         self.stopped = False
         self.launch_kwargs = {}
         self.navigation_final_url = ""
+        self.navigation_status = 200
         self.explicit_response_url = ""
         self.navigation_responses = []
         self.context_close_error = context_close_error
@@ -306,18 +308,48 @@ def test_issue_navigation_rejects_same_origin_non_issue_redirect(tmp_path):
     assert result.message == "issue navigation changed the canonical issue location"
 
 
-def test_issue_navigation_permits_query_change_on_canonical_path(tmp_path):
+@pytest.mark.parametrize("status", [403, 500])
+def test_issue_navigation_rejects_http_error_with_valid_selector(tmp_path, status):
     clock = FakeClock()
     fake = FakePlaywright(clock)
-    fake.navigation_final_url = (
-        "https://journals.aps.org/pra/issues/1/1?view=expanded"
-    )
+    fake.navigation_status = status
     runtime = make_runtime(tmp_path, fake, clock)
 
     with runtime:
         result = runtime.fetch_issue(aps_request(0))
 
-    assert result.outcome == SUCCESS
+    assert result.outcome == FETCH_FAILED
+    assert result.status_code == status
+    assert result.html == ""
+    assert result.captured == ()
+
+
+@pytest.mark.parametrize(
+    "final_url",
+    [
+        "http://journals.aps.org/pra/issues/1/1",
+        "https://user:secret@journals.aps.org/pra/issues/1/1",
+        "https://journals.aps.org:444/pra/issues/1/1",
+        "https://pubs.acs.org/pra/issues/1/1",
+        "https://journals.aps.org/pra/issues/1/2",
+        "https://journals.aps.org/pra/issues/1/1?view=expanded",
+        "https://journals.aps.org/pra/issues/1/1#papers",
+    ],
+)
+def test_issue_navigation_rejects_noncanonical_final_url_before_content_exposure(
+    tmp_path, final_url
+):
+    clock = FakeClock()
+    fake = FakePlaywright(clock)
+    fake.navigation_final_url = final_url
+    runtime = make_runtime(tmp_path, fake, clock)
+
+    with runtime:
+        result = runtime.fetch_issue(aps_request(0))
+
+    assert result.outcome == FETCH_FAILED
+    assert result.html == ""
+    assert result.captured == ()
 
 
 def test_transport_success_does_not_claim_adapter_live_success(tmp_path):

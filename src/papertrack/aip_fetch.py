@@ -648,6 +648,12 @@ def _snapshot_attachment(
         separators=(",", ":"),
     ).encode("utf-8")
     _snapshot_response(body)
+    abstract_result = _abstract_result_from_response(response, article_id)
+    if abstract_result.outcome != SUCCESS:
+        raise ValueError(
+            "AIP abstract response is incomplete and not durable: "
+            f"{abstract_result.outcome}"
+        )
     return SnapshotAttachment(
         _attachment_name(article_id), "application/json", body
     )
@@ -682,15 +688,11 @@ def _snapshot_response(body: bytes) -> CapturedResponse:
         or parsed_url.fragment
     ):
         raise ValueError("AIP abstract attachment URL is not official")
-    if status_code not in {200, 403}:
+    if status_code != 200:
         raise ValueError(
-            "AIP abstract attachment status is retryable and not durable"
+            "AIP abstract attachment status is not a durable success"
         )
-    approved_media_types = (
-        {"application/json", "text/html"}
-        if status_code == 200
-        else None
-    )
+    approved_media_types = {"application/json", "text/html"}
     normalized_media_type = media_type.partition(";")[0].strip().lower()
     if (
         approved_media_types is not None
@@ -898,7 +900,12 @@ def _load_snapshot_abstracts(snapshot) -> dict[str, AipAbstractResult]:
             raise ValueError("unexpected AIP snapshot attachment name")
         article_id = match.group(1)
         response = _snapshot_response(path.read_bytes())
-        results[article_id] = _abstract_result_from_response(response, article_id)
+        result = _abstract_result_from_response(response, article_id)
+        if result.outcome != SUCCESS:
+            raise ValueError(
+                "AIP snapshot contains incomplete required abstract metadata"
+            )
+        results[article_id] = result
     return results
 
 
@@ -1094,6 +1101,15 @@ def _query_aip_with_runtime(
                 article_id=article_id,
             )
             continue
+        if response is None:
+            response_missing = True
+            responses_by_id[article_id] = AipAbstractResult(
+                outcome=FETCH_FAILED,
+                message="official AIP abstract endpoint returned no response",
+                url=aip_abstract_url(journal_slug),
+                article_id=article_id,
+            )
+            continue
         responses_by_id[article_id] = _abstract_result_from_response(
             response, article_id
         )
@@ -1119,6 +1135,26 @@ def _query_aip_with_runtime(
     expected_attachment_ids = {
         article_id for article_id in abstract_ids.values() if article_id
     }
+    incomplete_outcomes = set()
+    for article_id in expected_attachment_ids:
+        abstract_result = responses_by_id.get(article_id)
+        if abstract_result is None:
+            incomplete_outcomes.add(FETCH_FAILED)
+        elif abstract_result.outcome != SUCCESS:
+            incomplete_outcomes.add(abstract_result.outcome)
+    if incomplete_outcomes:
+        if BLOCKED in incomplete_outcomes:
+            result.outcome = BLOCKED
+        elif RATE_LIMITED in incomplete_outcomes:
+            result.outcome = RATE_LIMITED
+        else:
+            result.outcome = FETCH_FAILED
+        result.message = (
+            "AIP issue membership succeeded but required official abstract "
+            "metadata is incomplete"
+        )
+        result.metadata["snapshot_committed"] = False
+        return result
     if response_missing or set(attachments_by_id) != expected_attachment_ids:
         unavailable_outcomes = {
             responses_by_id[article_id].outcome

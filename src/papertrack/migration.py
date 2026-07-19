@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -55,27 +56,51 @@ def preserve_task_state(new_content: str, old_content: str | None) -> str:
 
 def write_report_file(path: str, content: str, source: str) -> None:
     """Write generated Markdown with backup, validation, and rollback."""
+    if not validate_report_content(content, source=source):
+        raise ValueError(f"generated {source} report failed format validation")
+
     report_path = Path(path)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     backup_path = _backup_path(report_path)
     had_existing = report_path.exists()
     if had_existing:
         shutil.copy2(report_path, backup_path)
+        with backup_path.open("rb") as backup:
+            os.fsync(backup.fileno())
+        _fsync_directory(report_path.parent)
 
+    temporary_path: Path | None = None
     try:
-        report_path.write_text(content, encoding="utf-8")
-        written = report_path.read_text(encoding="utf-8")
-        if not validate_report_content(written, source=source):
-            raise ValueError(f"generated {source} report failed format validation")
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=report_path.parent,
+            prefix=f".{report_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_path, report_path)
+        temporary_path = None
+        _fsync_directory(report_path.parent)
     except Exception:
         if had_existing and backup_path.exists():
-            shutil.move(str(backup_path), str(report_path))
+            os.replace(backup_path, report_path)
+            _fsync_directory(report_path.parent)
         elif not had_existing and report_path.exists():
             report_path.unlink()
+            _fsync_directory(report_path.parent)
         raise
     else:
         if had_existing and backup_path.exists():
             backup_path.unlink()
+            _fsync_directory(report_path.parent)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
 
 def migrate_reports(data_dir: str) -> list[MigrationResult]:
@@ -522,3 +547,11 @@ def _task_link_match(rest: str) -> re.Match[str] | None:
 
 def _backup_path(path: Path) -> Path:
     return path.with_suffix(path.suffix + ".bak")
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)

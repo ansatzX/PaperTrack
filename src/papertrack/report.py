@@ -431,6 +431,10 @@ def filter_journal_to_md(journal_name: str, journal_slug: str,
         source_policy=source_policy,
         provider_runtime=provider_runtime,
     )
+    if provider_runtime is not None and hasattr(provider_runtime, "stats"):
+        provider_runtime.last_source_outcome = fetch_result.outcome
+        provider_runtime.last_source_metadata = dict(fetch_result.metadata)
+        provider_runtime.last_source_message = fetch_result.message
     if not fetch_result.ok:
         logger.warning(
             "Skipping %s Vol.%s Iss.%s because fetch outcome was %s",

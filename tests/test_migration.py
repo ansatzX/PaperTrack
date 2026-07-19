@@ -1,3 +1,12 @@
+import os
+import select
+import signal
+import subprocess
+import sys
+import textwrap
+
+import pytest
+
 from papertrack.migration import (
     CURRENT_JOURNAL_FORMAT,
     classify_report_file,
@@ -7,6 +16,26 @@ from papertrack.migration import (
     preserve_task_state,
     validate_report_content,
 )
+
+
+def _current_journal_report(title: str) -> str:
+    return f"""---
+papertrack_format: journal-v2
+papertrack_source: journal
+---
+
+```dataview
+TASK
+```
+
+## collected
+
+## not collected
+
+### 10.1063/example
+
+Title:  {title}
+"""
 
 
 def test_aps_official_doi_casing_is_not_crossref_provenance():
@@ -92,6 +121,93 @@ def test_migration_validation_failure_restores_backup(tmp_path, monkeypatch):
 
     assert result.status == "failed"
     assert report_file.read_text(encoding="utf-8") == original
+
+
+def test_write_report_file_validates_before_touching_filesystem(tmp_path):
+    from papertrack import migration
+
+    report_file = tmp_path / "missing-parent" / "report.md"
+
+    with pytest.raises(ValueError, match="failed format validation"):
+        migration.write_report_file(
+            str(report_file), "invalid rendered Markdown", source="journal"
+        )
+
+    assert not report_file.parent.exists()
+
+
+@pytest.mark.parametrize("replacement_phase", ["before", "after"])
+def test_write_report_file_sigterm_leaves_complete_report_and_backup(
+    tmp_path, replacement_phase
+):
+    report_file = tmp_path / "report.md"
+    content_file = tmp_path / "new-content.md"
+    original = _current_journal_report("Original")
+    replacement = _current_journal_report("Replacement")
+    report_file.write_text(original, encoding="utf-8")
+    content_file.write_text(replacement, encoding="utf-8")
+    worker = textwrap.dedent(
+        """
+        import signal
+        import sys
+        from pathlib import Path
+
+        from papertrack import migration
+
+        report_path = Path(sys.argv[1])
+        content_path = Path(sys.argv[2])
+        replacement_phase = sys.argv[3]
+        real_replace = migration.os.replace
+
+        def pause_at_report_replacement(source, target):
+            if Path(target) != report_path:
+                return real_replace(source, target)
+            if replacement_phase == "before":
+                print("replacement-boundary", flush=True)
+                signal.pause()
+            real_replace(source, target)
+            print("replacement-boundary", flush=True)
+            signal.pause()
+
+        migration.os.replace = pause_at_report_replacement
+        migration.write_report_file(
+            str(report_path),
+            content_path.read_text(encoding="utf-8"),
+            source="journal",
+        )
+        """
+    )
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            worker,
+            str(report_file),
+            str(content_file),
+            replacement_phase,
+        ],
+        cwd=os.getcwd(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        ready, _, _ = select.select([process.stdout], [], [], 10)
+        assert ready, process.stderr.read()
+        boundary = process.stdout.readline().strip()
+        assert boundary == "replacement-boundary", process.stderr.read()
+        process.terminate()
+        _, stderr = process.communicate(timeout=10)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+
+    assert process.returncode == -signal.SIGTERM
+    expected = original if replacement_phase == "before" else replacement
+    assert report_file.read_text(encoding="utf-8") == expected
+    assert report_file.with_suffix(".md.bak").read_text(encoding="utf-8") == original
+    assert stderr == ""
 
 
 def test_current_journal_report_with_bad_issue_metadata_is_corrupt(tmp_path):

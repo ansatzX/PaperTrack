@@ -73,6 +73,35 @@ class ProviderRunStats:
     blocked: int = 0
     fetch_failed: int = 0
     circuit_skipped: int = 0
+    candidate_attempted: int = 0
+    terminal_resolved: int = 0
+    unresolved_metadata: int = 0
+    terminal_blocked: int = 0
+    terminal_circuit_skipped: int = 0
+    navigation_failure: int = 0
+    parse_validation_failure: int = 0
+    cache_failure: int = 0
+    endpoint_success: int = 0
+    endpoint_failure: int = 0
+    terminal_endpoint_failure: int = 0
+    terminal_other_failure: int = 0
+
+    @property
+    def terminal_accounted(self) -> int:
+        """Number of candidates assigned exactly one terminal category."""
+        return sum(
+            (
+                self.terminal_resolved,
+                self.unresolved_metadata,
+                self.terminal_blocked,
+                self.terminal_circuit_skipped,
+                self.navigation_failure,
+                self.parse_validation_failure,
+                self.cache_failure,
+                self.terminal_endpoint_failure,
+                self.terminal_other_failure,
+            )
+        )
 
 
 class ProviderRuntime:
@@ -226,6 +255,21 @@ class ProviderRuntime:
             selector_error = self._wait_for_selector(request.required_selector)
             html, final_url = self._page.content(), self._page.url
 
+            if not self._is_exact_final_issue_url(
+                final_url, request.canonical_url
+            ):
+                self._captured_responses = []
+                result = self._failed_result(
+                    request,
+                    final_url,
+                    status_code,
+                    "",
+                    "issue navigation changed the canonical issue location",
+                    attempt_count,
+                )
+                self._record_result(result)
+                return result
+
             if self._is_challenge(request, html):
                 self._sleep(self.challenge_retry_delay)
                 attempt_count = 2
@@ -235,19 +279,33 @@ class ProviderRuntime:
                 selector_error = self._wait_for_selector(request.required_selector)
                 html, final_url = self._page.content(), self._page.url
 
+                if not self._is_exact_final_issue_url(
+                    final_url, request.canonical_url
+                ):
+                    self._captured_responses = []
+                    result = self._failed_result(
+                        request,
+                        final_url,
+                        status_code,
+                        "",
+                        "issue navigation changed the canonical issue location",
+                        attempt_count,
+                    )
+                    self._record_result(result)
+                    return result
+
             if self._is_challenge(request, html):
                 result = self._blocked_result(
                     request, final_url, status_code, html, attempt_count
                 )
-            elif _issue_location(final_url) != _issue_location(
-                request.canonical_url
-            ):
+            elif status_code != 200:
+                self._captured_responses = []
                 result = self._failed_result(
                     request,
                     final_url,
                     status_code,
-                    html,
-                    "issue navigation changed the canonical issue location",
+                    "",
+                    f"official issue navigation returned HTTP {status_code}",
                     attempt_count,
                 )
             elif selector_error:
@@ -450,6 +508,32 @@ class ProviderRuntime:
         )
         if not valid:
             raise ValueError(f"{self.provider} requires an official issue URL")
+
+    def _is_exact_final_issue_url(
+        self, final_url: str, canonical_url: str
+    ) -> bool:
+        """Accept only the canonical issue location, without URL decorations."""
+        try:
+            final = urlsplit(final_url)
+            canonical = urlsplit(canonical_url)
+            return (
+                final.scheme == canonical.scheme == "https"
+                and final.username is None
+                and final.password is None
+                and canonical.username is None
+                and canonical.password is None
+                and final.hostname == canonical.hostname
+                and final.hostname in OFFICIAL_HOSTS[self.provider]
+                and final.port in {None, 443}
+                and canonical.port in {None, 443}
+                and final.path == canonical.path
+                and not final.query
+                and not final.fragment
+                and not canonical.query
+                and not canonical.fragment
+            )
+        except ValueError:
+            return False
 
     def _acquire_profile(self) -> None:
         self.profile_dir.mkdir(parents=True, exist_ok=True, mode=0o700)

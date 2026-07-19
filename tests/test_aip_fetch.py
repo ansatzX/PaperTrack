@@ -162,28 +162,23 @@ def test_aip_abstract_failures_remain_distinguishable(
 
     result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
 
-    assert result.outcome == SUCCESS
+    assert result.outcome == (BLOCKED if outcome == BLOCKED else FETCH_FAILED)
     assert result.entries["10.1063/example"].abstract == ""
     assert result.metadata["missing_fields"] == [
         {"doi": "10.1063/example", "field": "abstract", "outcome": outcome}
     ]
 
 
-def test_aip_snapshot_reload_preserves_blocked_abstract_outcome(
+def test_aip_blocked_abstract_remains_retryable_and_is_not_snapshotted(
     runtime, snapshot_store
 ):
     runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
     runtime.queue_response(status=403, body=b"forbidden", media_type="text/html")
     live = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+    assert live.outcome == BLOCKED
     assert live.metadata["missing_fields"][0]["outcome"] == BLOCKED
-
-    cached_runtime = Runtime(snapshot_store)
-    cached = aip_fetch.query_aip_issue_result(
-        "jcp", "160", "4", "JCP", cached_runtime
-    )
-
-    assert cached.metadata["missing_fields"][0]["outcome"] == BLOCKED
-    assert cached_runtime.fetch_calls == []
+    assert snapshot_store.load(SnapshotKey("aip", "jcp", "160", "4")) is None
+    assert runtime.stats.live_success == 0
 
 
 def test_aip_force_live_bypasses_but_preserves_valid_snapshot(
@@ -197,10 +192,12 @@ def test_aip_force_live_bypasses_but_preserves_valid_snapshot(
     stored = snapshot_store.load(SnapshotKey("aip", "jcp", "160", "4"))
     assert live.outcome == SUCCESS
     assert stored is not None
-    before = stored.body_path.read_bytes()
+    manifest = snapshot_store.root / "aip/jcp/160/4/manifest.json"
+    before = manifest.read_bytes()
 
     blocked_runtime = Runtime(snapshot_store)
-    blocked_runtime.queue_issue_html("challenge", outcome=BLOCKED)
+    blocked_runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    blocked_runtime.queue_response(status=403, body=b"forbidden", media_type="text/html")
     result = aip_fetch.query_aip_issue_result(
         "jcp", "160", "4", "JCP", blocked_runtime, force_live=True
     )
@@ -208,7 +205,16 @@ def test_aip_force_live_bypasses_but_preserves_valid_snapshot(
     assert result.outcome == BLOCKED
     assert len(blocked_runtime.fetch_calls) == 1
     assert blocked_runtime.stats.snapshot_hit == 0
-    assert stored.body_path.read_bytes() == before
+    assert blocked_runtime.stats.live_success == 0
+    assert manifest.read_bytes() == before
+
+    reload_runtime = Runtime(snapshot_store)
+    reloaded = aip_fetch.query_aip_issue_result(
+        "jcp", "160", "4", "JCP", reload_runtime
+    )
+    assert reloaded.outcome == SUCCESS
+    assert reloaded.entries["10.1063/example"].abstract == "Official abstract."
+    assert reload_runtime.fetch_calls == []
 
 
 def test_aip_absent_official_abstract_control_is_distinguishable(runtime):
@@ -381,7 +387,10 @@ def _attachment_envelope(
         _attachment_envelope(url="http://pubs.aip.org/Handlers/ArticleAbstractHandler.ashx"),
         _attachment_envelope(url="https://pubs.aip.org/not-approved"),
         _attachment_envelope(status=302),
+        _attachment_envelope(status=403, body=b"forbidden"),
         _attachment_envelope(media_type="text/plain"),
+        _attachment_envelope(body=b"not-json"),
+        _attachment_envelope(body=b'{"Success": false, "Html": ""}'),
     ],
 )
 def test_aip_rejects_untrusted_attachment_envelope(
@@ -654,6 +663,18 @@ def test_aip_abstract_transport_exception_fails_and_is_not_snapshotted(
     assert runtime.stats.live_success == 0
 
 
+def test_aip_missing_abstract_response_fails_without_manifest(runtime, snapshot_store):
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    runtime.abstract_results.append(None)
+
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert result.outcome == FETCH_FAILED
+    assert result.metadata["snapshot_committed"] is False
+    assert snapshot_store.load(SnapshotKey("aip", "jcp", "160", "4")) is None
+    assert runtime.stats.live_success == 0
+
+
 def test_aip_transport_retry_then_snapshot_reload_is_consistent(snapshot_store):
     failed_runtime = Runtime(snapshot_store)
     failed_runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
@@ -712,22 +733,17 @@ def test_aip_abstract_transport_failure_preserves_prior_snapshot_manifest(
 
 
 @pytest.mark.parametrize("media_type", ["text/plain", ""])
-def test_aip_non_200_error_envelope_reloads_with_blocked_outcome(
+def test_aip_non_200_error_envelope_is_not_durable(
     media_type, runtime, snapshot_store
 ):
     runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
     runtime.queue_response(status=403, body=b"forbidden", media_type=media_type)
 
     live = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
-    cached_runtime = Runtime(snapshot_store)
-    cached = aip_fetch.query_aip_issue_result(
-        "jcp", "160", "4", "JCP", cached_runtime
-    )
-
-    assert live.outcome == cached.outcome == SUCCESS
+    assert live.outcome == BLOCKED
     assert live.metadata["missing_fields"][0]["outcome"] == BLOCKED
-    assert cached.metadata["missing_fields"][0]["outcome"] == BLOCKED
-    assert cached_runtime.fetch_calls == []
+    assert snapshot_store.load(SnapshotKey("aip", "jcp", "160", "4")) is None
+    assert runtime.stats.live_success == 0
 
 
 @pytest.mark.parametrize(
