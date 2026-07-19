@@ -124,7 +124,9 @@ def _strip_escaped_inline_markup(value: str) -> str:
 def query_arxiv_result(date_from_date: str = "2025-02-01",
                        date_to_date: str = "2025-02-02",
                        query_args: dict | None = None,
-                       required_category: str = "") -> AdapterResult[dict[str, ArxivEntry]]:
+                       required_category: str = "",
+                       request_delay: float | None = None,
+                       ) -> AdapterResult[dict[str, ArxivEntry]]:
     """Query arXiv advanced search for papers submitted on a date range.
 
     Returns an AdapterResult whose entries map arxiv_id to ArxivEntry.
@@ -146,15 +148,14 @@ def query_arxiv_result(date_from_date: str = "2025-02-01",
     page_size = _page_size(query_args)
     result: dict[str, ArxivEntry] = {}
     seen_candidate_ids: set[str] = set()
-    candidate_count = 0
-    rejected_count = 0
+    raw_candidate_count = 0
     urls: list[str] = []
     start = 0
 
     while True:
         url = _advanced_search_url(query_args, start)
         urls.append(url)
-        page_fetch = _fetch_arxiv_page(url)
+        page_fetch = _fetch_arxiv_page(url, request_delay=request_delay)
         if page_fetch.results is None:
             return AdapterResult(
                 entries={},
@@ -184,7 +185,7 @@ def query_arxiv_result(date_from_date: str = "2025-02-01",
         page_count = len(page_entries)
         new_candidate_ids = set(page_entries) - seen_candidate_ids
         seen_candidate_ids.update(page_entries)
-        candidate_count += page_count
+        raw_candidate_count += page_count
 
         if required_category:
             missing_subject_ids = [
@@ -221,7 +222,6 @@ def query_arxiv_result(date_from_date: str = "2025-02-01",
                 for arxiv_id, entry in page_entries.items()
                 if required_category in entry.subjects
             }
-            rejected_count += page_count - len(accepted_entries)
             result.update(accepted_entries)
         else:
             result.update(page_entries)
@@ -244,9 +244,13 @@ def query_arxiv_result(date_from_date: str = "2025-02-01",
         metadata={
             "url": urls[0] if urls else "",
             "urls": urls,
-            "candidate_count": candidate_count,
+            "candidate_count": len(seen_candidate_ids),
+            "raw_candidate_count": raw_candidate_count,
+            "duplicate_count": raw_candidate_count - len(seen_candidate_ids),
             "accepted_count": len(result),
-            "rejected_count": rejected_count,
+            "rejected_count": (
+                len(seen_candidate_ids - set(result)) if required_category else 0
+            ),
         },
     )
 
@@ -267,7 +271,10 @@ def _page_size(query_args: dict) -> int:
     return page_size if page_size > 0 else 200
 
 
-def _fetch_arxiv_page(url: str) -> _PageFetchResult:
+def _fetch_arxiv_page(
+    url: str,
+    request_delay: float | None = None,
+) -> _PageFetchResult:
     # arXiv sometimes returns transient errors under load; retry with backoff.
     last_exc = None
     last_status = None
@@ -275,7 +282,7 @@ def _fetch_arxiv_page(url: str) -> _PageFetchResult:
     last_message = "arXiv advanced search fetch failed"
     for attempt in range(MAX_RETRIES):
         try:
-            _throttle_arxiv_request()
+            _throttle_arxiv_request(request_delay)
             parsed = feedparser.parse(url)
             status = getattr(parsed, "status", None)
             last_status = status
@@ -334,8 +341,12 @@ def _fetch_arxiv_page(url: str) -> _PageFetchResult:
     )
 
 
-def _throttle_arxiv_request() -> None:
-    delay = _float_env("PAPERTRACK_ARXIV_REQUEST_DELAY", 0.0)
+def _throttle_arxiv_request(request_delay: float | None = None) -> None:
+    delay = (
+        _float_env("PAPERTRACK_ARXIV_REQUEST_DELAY", 0.0)
+        if request_delay is None
+        else request_delay
+    )
     if delay <= 0:
         return
     global _last_request_at
@@ -387,6 +398,18 @@ def _parse_arxiv_page(results, url: str) -> dict[str, ArxivEntry] | None:
     soup = BeautifulSoup(summary_text, "lxml")
     find_results = soup.find_all(class_="arxiv-result")
 
+    if not find_results and not _is_verified_empty_arxiv_page(soup):
+        record_fetch_attempt({
+            "source_role": "authoritative",
+            "source": "arxiv",
+            "provider": "arxiv",
+            "url": url,
+            "stage": "advanced_search_parse",
+            "outcome": PARSE_FAILED,
+            "message": "page had neither arXiv results nor the official no-results marker",
+        })
+        return None
+
     for res in find_results:
         entry = _parse_arxiv_result(res)
         if entry is None:
@@ -405,6 +428,14 @@ def _parse_arxiv_page(results, url: str) -> dict[str, ArxivEntry] | None:
         result[entry.arxiv_id] = entry
 
     return result
+
+
+def _is_verified_empty_arxiv_page(soup: BeautifulSoup) -> bool:
+    heading = soup.find("h1")
+    if heading is None:
+        return False
+    text = " ".join(heading.get_text(" ", strip=True).lower().split())
+    return text == "sorry, your query returned no results"
 
 
 def _missing_arxiv_result_field(res) -> str:

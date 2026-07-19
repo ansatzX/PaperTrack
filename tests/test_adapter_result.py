@@ -190,7 +190,7 @@ def test_arxiv_category_filter_paginates_by_raw_candidate_count(monkeypatch):
     def fake_parse(url):
         seen_urls.append(url)
         if "start=2" in url:
-            summary = "<ol></ol>"
+            summary = _arxiv_empty_summary()
         elif "start=1" in url:
             summary = "<ol>" + _arxiv_item(2, ["cs.AI"]) + "</ol>"
         else:
@@ -212,6 +212,95 @@ def test_arxiv_category_filter_paginates_by_raw_candidate_count(monkeypatch):
     assert result.metadata["candidate_count"] == 2
     assert result.metadata["accepted_count"] == 1
     assert result.metadata["rejected_count"] == 1
+
+
+def test_arxiv_result_rejects_unrecognized_successful_empty_page(monkeypatch):
+    from papertrack import arxiv_index_fetch
+
+    monkeypatch.setattr(
+        arxiv_index_fetch.feedparser,
+        "parse",
+        lambda url: {"feed": {"summary": "<html><main>unexpected page</main></html>"}},
+    )
+
+    result = arxiv_index_fetch.query_arxiv_result(
+        "2026-06-01",
+        "2026-06-02",
+        query_args={"size": "200"},
+    )
+
+    assert result.outcome == PARSE_FAILED
+    assert result.entries == {}
+
+
+def test_arxiv_result_accepts_verified_no_results_page(monkeypatch):
+    from papertrack import arxiv_index_fetch
+
+    monkeypatch.setattr(
+        arxiv_index_fetch.feedparser,
+        "parse",
+        lambda url: {"feed": {"summary": _arxiv_empty_summary()}},
+    )
+
+    result = arxiv_index_fetch.query_arxiv_result(
+        "2026-06-01",
+        "2026-06-02",
+        query_args={"size": "200"},
+    )
+
+    assert result.outcome == SUCCESS
+    assert result.entries == {}
+
+
+def test_arxiv_request_delay_applies_between_paginated_http_requests(monkeypatch):
+    from papertrack import arxiv_index_fetch
+
+    summaries = iter([_arxiv_summary(0, 1), _arxiv_empty_summary()])
+    monotonic_values = iter([100.0, 100.0, 102.0, 107.0])
+    sleeps = []
+    arxiv_index_fetch._last_request_at = 0.0
+    monkeypatch.setattr(
+        arxiv_index_fetch.feedparser,
+        "parse",
+        lambda url: {"feed": {"summary": next(summaries)}},
+    )
+    monkeypatch.setattr(arxiv_index_fetch.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(arxiv_index_fetch.time, "sleep", sleeps.append)
+
+    result = arxiv_index_fetch.query_arxiv_result(
+        "2026-06-01",
+        "2026-06-02",
+        query_args={"size": "1"},
+        request_delay=7,
+    )
+
+    assert result.outcome == SUCCESS
+    assert sleeps == [5.0]
+
+
+def test_arxiv_diagnostic_counts_deduplicate_repeated_page_candidates(monkeypatch):
+    from papertrack import arxiv_index_fetch
+
+    summaries = iter([_arxiv_summary(1, 1), _arxiv_summary(1, 1)])
+    monkeypatch.setattr(
+        arxiv_index_fetch.feedparser,
+        "parse",
+        lambda url: {"feed": {"summary": next(summaries)}},
+    )
+
+    result = arxiv_index_fetch.query_arxiv_result(
+        "2026-06-01",
+        "2026-06-02",
+        query_args={"size": "1"},
+        required_category="cs.AI",
+    )
+
+    assert result.outcome == SUCCESS
+    assert result.metadata["candidate_count"] == 1
+    assert result.metadata["raw_candidate_count"] == 2
+    assert result.metadata["duplicate_count"] == 1
+    assert result.metadata["accepted_count"] == 1
+    assert result.metadata["rejected_count"] == 0
 
 
 def test_arxiv_category_filter_fails_closed_when_subjects_are_missing(monkeypatch):
@@ -283,3 +372,7 @@ def _arxiv_item(index: int, subjects: list[str]) -> str:
           {tags}
         </li>
         """
+
+
+def _arxiv_empty_summary() -> str:
+    return '<h1 class="title is-clearfix">Sorry, your query returned no results</h1>'

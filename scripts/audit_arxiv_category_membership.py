@@ -9,7 +9,6 @@ import json
 from pathlib import Path
 import re
 import sys
-import time
 from typing import Callable
 
 from papertrack.adapter_result import AdapterResult
@@ -20,15 +19,33 @@ from papertrack.codex import get_query_args, official_arxiv_category
 _ARXIV_HEADING = re.compile(r"^###\s*(arXiv:\S+)", re.MULTILINE)
 
 
-def _report_path(data_dir: Path, category: str, day: date) -> Path:
-    return (
-        data_dir
-        / "arxiv"
-        / category
-        / f"{day.year:04d}"
-        / f"{day.month:02d}"
-        / f"{day.day:02d}.md"
-    )
+def _report_candidates(data_dir: Path, category: str, day: date) -> list[Path]:
+    root = data_dir / "arxiv"
+    category_root = root / category
+    year = f"{day.year:04d}"
+    month = f"{day.month:02d}"
+    day_name = f"{day.day:02d}"
+    filename = f"{day_name}.md"
+    return [
+        category_root / year / month / filename,
+        category_root / year / month / day_name / category / filename,
+        category_root / year / month / category / filename,
+        root / year / month / day_name / category / filename,
+        root / year / month / category / filename,
+    ]
+
+
+def _find_report_path(data_dir: Path, category: str, day: date) -> Path | None:
+    matches = [
+        path for path in _report_candidates(data_dir, category, day)
+        if path.is_file()
+    ]
+    if len(matches) > 1:
+        joined = ", ".join(str(path) for path in matches)
+        raise ValueError(
+            f"multiple arXiv reports found for {category} {day.isoformat()}: {joined}"
+        )
+    return matches[0] if matches else None
 
 
 def _local_ids(path: Path) -> set[str]:
@@ -50,7 +67,6 @@ def audit_category_membership(
     to_date: date,
     request_interval: float,
     query: Callable[..., AdapterResult] = query_arxiv_result,
-    sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, list[dict]]:
     """Audit existing reports without modifying them or creating new reports."""
     if from_date > to_date:
@@ -63,12 +79,12 @@ def audit_category_membership(
     if unknown:
         raise ValueError(f"unknown arXiv categories: {', '.join(unknown)}")
 
-    scopes = [
-        (category, day, report_path)
-        for category in sorted(set(categories))
-        for day in _days(from_date, to_date)
-        if (report_path := _report_path(data_dir, category, day)).is_file()
-    ]
+    scopes = []
+    for category in sorted(set(categories)):
+        for day in _days(from_date, to_date):
+            report_path = _find_report_path(data_dir, category, day)
+            if report_path is not None:
+                scopes.append((category, day, report_path))
     manifest: dict[str, list[dict]] = {
         "exact": [],
         "missing_official": [],
@@ -76,7 +92,7 @@ def audit_category_membership(
         "fetch_failed": [],
     }
 
-    for index, (category, day, report_path) in enumerate(scopes):
+    for category, day, report_path in scopes:
         day_string = day.isoformat()
         next_day_string = (day + timedelta(days=1)).isoformat()
         result = query(
@@ -84,6 +100,7 @@ def audit_category_membership(
             next_day_string,
             query_args[category],
             required_category=official_arxiv_category(category),
+            request_delay=request_interval,
         )
         if not result.ok:
             manifest["fetch_failed"].append({
@@ -122,9 +139,6 @@ def audit_category_membership(
                     "official_ids": common["official_ids"],
                 })
 
-        if request_interval and index < len(scopes) - 1:
-            sleep(request_interval)
-
     return manifest
 
 
@@ -158,12 +172,23 @@ def _write_manifest(path: Path, manifest: dict[str, list[dict]]) -> None:
     temporary.replace(path)
 
 
+def _validate_output_path(path: Path, data_dir: Path) -> None:
+    output_path = path.resolve()
+    arxiv_ledger = (data_dir / "arxiv").resolve()
+    if output_path == arxiv_ledger or output_path.is_relative_to(arxiv_ledger):
+        raise ValueError("manifest output must be outside the arXiv ledger")
+    if path.suffix.lower() in {".md", ".markdown"}:
+        raise ValueError("manifest output must not be Markdown")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     categories = [item.strip() for item in args.categories.split(",") if item.strip()]
     if not categories:
         raise SystemExit("--categories must contain at least one category")
     try:
+        if args.output:
+            _validate_output_path(args.output, args.data_dir)
         manifest = audit_category_membership(
             data_dir=args.data_dir,
             categories=categories,

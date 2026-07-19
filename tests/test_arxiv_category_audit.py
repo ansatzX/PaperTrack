@@ -1,8 +1,11 @@
 from datetime import date
 from pathlib import Path
 
+import pytest
+
 from papertrack.adapter_result import AdapterResult, FETCH_FAILED, SUCCESS
 from papertrack.arxiv_entry import ArxivEntry
+from scripts import audit_arxiv_category_membership as audit_module
 from scripts.audit_arxiv_category_membership import audit_category_membership
 
 
@@ -37,10 +40,15 @@ def test_audit_classifies_differences_without_writing_markdown(tmp_path):
         "2026-07-03": ["arXiv:official-b"],
     }
     calls = []
-    sleeps = []
 
-    def fake_query(date_from, date_to, query_args, required_category=""):
-        calls.append((date_from, date_to, required_category))
+    def fake_query(
+        date_from,
+        date_to,
+        query_args,
+        required_category="",
+        request_delay=None,
+    ):
+        calls.append((date_from, date_to, required_category, request_delay))
         if date_from == "2026-07-04":
             return AdapterResult(
                 entries={},
@@ -63,7 +71,6 @@ def test_audit_classifies_differences_without_writing_markdown(tmp_path):
         to_date=days[-1],
         request_interval=7,
         query=fake_query,
-        sleep=sleeps.append,
     )
 
     assert manifest == {
@@ -110,12 +117,11 @@ def test_audit_classifies_differences_without_writing_markdown(tmp_path):
         ],
     }
     assert calls == [
-        ("2026-07-01", "2026-07-02", "cs.AI"),
-        ("2026-07-02", "2026-07-03", "cs.AI"),
-        ("2026-07-03", "2026-07-04", "cs.AI"),
-        ("2026-07-04", "2026-07-05", "cs.AI"),
+        ("2026-07-01", "2026-07-02", "cs.AI", 7),
+        ("2026-07-02", "2026-07-03", "cs.AI", 7),
+        ("2026-07-03", "2026-07-04", "cs.AI", 7),
+        ("2026-07-04", "2026-07-05", "cs.AI", 7),
     ]
-    assert sleeps == [7, 7, 7]
     assert {path: path.read_bytes() for path in reports} == before
 
 
@@ -123,7 +129,7 @@ def test_audit_skips_dates_without_local_reports(tmp_path):
     report = _write_report(tmp_path, date(2026, 7, 2), ["arXiv:local-a"])
     calls = []
 
-    def fake_query(date_from, date_to, query_args, required_category=""):
+    def fake_query(date_from, date_to, query_args, **kwargs):
         calls.append(date_from)
         return AdapterResult(
             entries={"arXiv:local-a": _entry("arXiv:local-a")},
@@ -139,8 +145,84 @@ def test_audit_skips_dates_without_local_reports(tmp_path):
         to_date=date(2026, 7, 3),
         request_interval=0,
         query=fake_query,
-        sleep=lambda seconds: None,
     )
 
     assert calls == ["2026-07-02"]
     assert report.exists()
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        Path("arxiv/cs.AI/2026/07/02/cs.AI/02.md"),
+        Path("arxiv/cs.AI/2026/07/cs.AI/02.md"),
+    ],
+)
+def test_audit_discovers_supported_alternate_report_layouts(tmp_path, relative_path):
+    report = tmp_path / relative_path
+    report.parent.mkdir(parents=True)
+    report.write_text(
+        "## collected\n\n## not collected\n\n### arXiv:local-a\n",
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_query(date_from, date_to, query_args, **kwargs):
+        calls.append(date_from)
+        return AdapterResult(
+            entries={"arXiv:local-a": _entry("arXiv:local-a")},
+            outcome=SUCCESS,
+            provider="arxiv",
+            source="arxiv",
+        )
+
+    manifest = audit_category_membership(
+        data_dir=tmp_path,
+        categories=["cs.AI"],
+        from_date=date(2026, 7, 2),
+        to_date=date(2026, 7, 2),
+        request_interval=0,
+        query=fake_query,
+    )
+
+    assert calls == ["2026-07-02"]
+    assert len(manifest["exact"]) == 1
+
+
+def test_cli_rejects_manifest_output_inside_arxiv_ledger(tmp_path, monkeypatch):
+    report = _write_report(tmp_path, date(2026, 7, 2), ["arXiv:local-a"])
+    before = report.read_bytes()
+    monkeypatch.setattr(
+        audit_module,
+        "audit_category_membership",
+        lambda **kwargs: pytest.fail("audit must not start for an unsafe output path"),
+    )
+
+    with pytest.raises(SystemExit, match="outside the arXiv ledger"):
+        audit_module.main([
+            "--data-dir", str(tmp_path),
+            "--categories", "cs.AI",
+            "--from-date", "2026-07-02",
+            "--to-date", "2026-07-02",
+            "--output", str(report),
+        ])
+
+    assert report.read_bytes() == before
+
+
+def test_cli_rejects_markdown_manifest_output(tmp_path, monkeypatch):
+    output = tmp_path / "membership.md"
+    monkeypatch.setattr(
+        audit_module,
+        "audit_category_membership",
+        lambda **kwargs: pytest.fail("audit must not start for a Markdown output path"),
+    )
+
+    with pytest.raises(SystemExit, match="must not be Markdown"):
+        audit_module.main([
+            "--data-dir", str(tmp_path / "data"),
+            "--categories", "cs.AI",
+            "--from-date", "2026-07-02",
+            "--to-date", "2026-07-02",
+            "--output", str(output),
+        ])
