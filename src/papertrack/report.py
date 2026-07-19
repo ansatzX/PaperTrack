@@ -176,13 +176,14 @@ def _filter_one_arxiv_day_to_md(day_date: date, md_folder: str,
                                 query_args: dict | None,
                                 category: str,
                                 zotero: ZoteroQuery | None,
-                                output_format: str = "category/year/month/day"):
+                                output_format: str = "category/year/month/day",
+                                refresh_existing: bool = False):
     date_string = day_date.strftime("%Y-%m-%d")
     next_date = day_date + timedelta(days=1)
     date_to_date = next_date.strftime("%Y-%m-%d")
     oneday_report_file = _arxiv_report_file(md_folder, day_date, category, output_format)
 
-    if _existing_arxiv_report_is_written(oneday_report_file):
+    if not refresh_existing and _existing_arxiv_report_is_written(oneday_report_file):
         logger.info("Skipping existing arXiv report: %s %s", category, date_string)
         return
 
@@ -225,7 +226,8 @@ def _filter_one_arxiv_day_to_md(day_date: date, md_folder: str,
 def filter_arxiv_days_to_md(days: list[date], md_folder: str,
                             query_args: dict | None = None,
                             category: str = "quant-ph",
-                            zotero: ZoteroQuery | None = None):
+                            zotero: ZoteroQuery | None = None,
+                            refresh_existing: bool = False):
     """Fetch exact arXiv day buckets and write Markdown reports.
 
     This is the production path for rolling refresh. The caller owns calendar
@@ -233,7 +235,14 @@ def filter_arxiv_days_to_md(days: list[date], md_folder: str,
     and writing.
     """
     for day_date in days:
-        _filter_one_arxiv_day_to_md(day_date, md_folder, query_args, category, zotero)
+        _filter_one_arxiv_day_to_md(
+            day_date,
+            md_folder,
+            query_args,
+            category,
+            zotero,
+            refresh_existing=refresh_existing,
+        )
 
 
 def filter_arxiv_to_md(year: int, month: int, md_folder: str,

@@ -816,6 +816,135 @@ Title:  Existing paper
     assert (tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "09.md").exists()
 
 
+def test_filter_arxiv_days_to_md_refreshes_existing_day_and_preserves_task_state(
+    tmp_path, monkeypatch
+):
+    from papertrack import report
+    from papertrack.adapter_result import AdapterResult, SUCCESS
+    from papertrack.arxiv_entry import ArxivEntry
+
+    existing = tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "08.md"
+    existing.parent.mkdir(parents=True)
+    existing.write_text(
+        """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+papertrack_category: quant-ph
+papertrack_date: "2026-06-08"
+tags:
+  - #quant-ph-2026-06-08
+---
+
+```dataview
+TASK
+from #quant-ph-2026-06-08
+```
+
+## collected
+
+## not collected
+
+### arXiv:2606.00001
+
+Links:
+
+- [x] [arXiv:2606.00001](https://arxiv.org/abs/2606.00001) ✅ 2026-06-09
+
+Title:  Stale title
+
+Authors:  A Author,
+
+Abstract:
+> [!quote]- Abstract
+> Stale abstract
+""",
+        encoding="utf-8",
+    )
+
+    calls = []
+
+    def fake_query(date_from_date, date_to_date, query_args):
+        calls.append((date_from_date, date_to_date))
+        return AdapterResult(
+            entries={
+                "arXiv:2606.00001": ArxivEntry(
+                    arxiv_id="arXiv:2606.00001",
+                    title="Fresh title",
+                    authors=["A Author"],
+                    abstract="Fresh abstract",
+                )
+            },
+            outcome=SUCCESS,
+            provider="arxiv",
+            source="arxiv",
+        )
+
+    monkeypatch.setattr(report, "query_arxiv_result", fake_query)
+
+    report.filter_arxiv_days_to_md(
+        days=[date(2026, 6, 8)],
+        md_folder=str(tmp_path / "arxiv" / "quant-ph"),
+        query_args={"size": "200"},
+        category="quant-ph",
+        zotero=None,
+        refresh_existing=True,
+    )
+
+    refreshed = existing.read_text(encoding="utf-8")
+    assert calls == [("2026-06-08", "2026-06-09")]
+    assert "Title:  Fresh title" in refreshed
+    assert "Fresh abstract" in refreshed
+    assert "- [x] [arXiv:2606.00001]" in refreshed
+    assert "✅ 2026-06-09" in refreshed
+
+
+def test_refresh_fetch_failure_preserves_existing_report_byte_for_byte(
+    tmp_path, monkeypatch
+):
+    from papertrack import report
+    from papertrack.adapter_result import AdapterResult, FETCH_FAILED
+
+    existing = tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "08.md"
+    existing.parent.mkdir(parents=True)
+    original = """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+---
+
+```dataview
+TASK
+from #quant-ph-2026-06-08
+```
+
+## collected
+
+### arXiv:2606.00001
+
+## not collected
+"""
+    existing.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(
+        report,
+        "query_arxiv_result",
+        lambda *args, **kwargs: AdapterResult(
+            entries={},
+            outcome=FETCH_FAILED,
+            provider="arxiv",
+            source="arxiv",
+            message="network down",
+        ),
+    )
+
+    report.filter_arxiv_days_to_md(
+        days=[date(2026, 6, 8)],
+        md_folder=str(tmp_path / "arxiv" / "quant-ph"),
+        category="quant-ph",
+        refresh_existing=True,
+    )
+
+    assert existing.read_bytes() == original.encode()
+
+
 def test_filter_arxiv_days_to_md_skips_empty_days(tmp_path, monkeypatch):
     from papertrack import report
     from papertrack.adapter_result import AdapterResult, SUCCESS

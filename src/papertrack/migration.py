@@ -126,7 +126,30 @@ def migrate_report_file(path: str, data_dir: str = "") -> MigrationResult:
     current_format = report_format(old_content)
     source = _detect_source(old_content, report_path, data_dir)
 
-    if current_format in {CURRENT_ARXIV_FORMAT, CURRENT_JOURNAL_FORMAT}:
+    if current_format == CURRENT_ARXIV_FORMAT:
+        new_content = _repair_current_arxiv_identity(
+            old_content,
+            report_path,
+            data_dir,
+        )
+        if new_content != old_content:
+            return _write_migrated_content(
+                report_path=report_path,
+                old_content=old_content,
+                new_content=new_content,
+                source="arxiv",
+                from_format=current_format,
+                to_format=current_format,
+                status="repaired",
+            )
+        return MigrationResult(
+            path=path,
+            status="current",
+            source="arxiv",
+            from_format=current_format,
+            to_format=current_format,
+        )
+    if current_format == CURRENT_JOURNAL_FORMAT:
         if _has_markdown_images(old_content):
             new_content = _remove_markdown_images(old_content)
             return _write_migrated_content(
@@ -307,6 +330,37 @@ def _migrate_arxiv_legacy(content: str, path: Path, data_dir: str) -> str:
         "",
     ]
     return "\n".join(frontmatter) + body.lstrip()
+
+
+def _repair_current_arxiv_identity(content: str, path: Path, data_dir: str) -> str:
+    """Make generated arXiv identity fields agree with the stable file path."""
+    parts = _relative_parts(path, data_dir)
+    if len(parts) < 5 or parts[0] != "arxiv":
+        return content
+
+    category = parts[1]
+    report_date = f"{parts[2]}-{parts[3]}-{path.stem}"
+    expected_lines = (
+        f"papertrack_category: {category}",
+        f'papertrack_date: "{report_date}"',
+        f"  - #{category}-{report_date}",
+        f"from #{category}-{report_date}",
+    )
+    if all(re.search(rf"^{re.escape(line)}$", content, re.MULTILINE) for line in expected_lines):
+        return content
+
+    replacements = (
+        (r"^papertrack_category:[ \t]*\S+[ \t]*$", expected_lines[0]),
+        (r'^papertrack_date:[ \t]*["\']?\d{4}-\d{2}-\d{2}["\']?[ \t]*$', expected_lines[1]),
+        (r"^  - #\S+-\d{4}-\d{2}-\d{2}[ \t]*$", expected_lines[2]),
+        (r"^from #\S+-\d{4}-\d{2}-\d{2}[ \t]*$", expected_lines[3]),
+    )
+    repaired = content
+    for pattern, replacement in replacements:
+        repaired, count = re.subn(pattern, replacement, repaired, count=1, flags=re.MULTILINE)
+        if count != 1:
+            raise ValueError(f"current arXiv report is missing identity field: {pattern}")
+    return repaired
 
 
 def _journal_metadata(content: str, path: Path, data_dir: str) -> dict[str, str]:

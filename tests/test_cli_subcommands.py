@@ -48,6 +48,7 @@ def test_arxiv_refresh_dispatches_rolling_days(monkeypatch, tmp_path):
     assert captured["category"] == "quant-ph"
     assert captured["query_args"] == {"size": "200"}
     assert isinstance(captured["zotero"], FakeZotero)
+    assert captured["refresh_existing"] is True
 
 
 def test_journal_issue_passes_official_only_source_policy(monkeypatch, tmp_path):
@@ -190,6 +191,7 @@ def test_arxiv_backfill_month_dispatches_month_days(monkeypatch, tmp_path):
     assert captured["days"][0] == date(2026, 2, 1)
     assert captured["days"][-1] == date(2026, 2, 28)
     assert len(captured["days"]) == 28
+    assert captured["refresh_existing"] is False
 
 
 def test_arxiv_backfill_date_range_dispatches_exact_range(monkeypatch, tmp_path):

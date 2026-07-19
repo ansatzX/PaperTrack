@@ -192,7 +192,13 @@ def _run_arxiv_refresh(args, zotero: ZoteroQuery | None) -> None:
         localtime = time.localtime()
         anchor = date(localtime.tm_year, localtime.tm_mon, localtime.tm_mday)
     days = rolling_refresh_days(anchor, args.refresh_days)
-    _run_arxiv_days(args.data_dir, args.category, days, zotero)
+    _run_arxiv_days(
+        args.data_dir,
+        args.category,
+        days,
+        zotero,
+        refresh_existing=True,
+    )
 
 
 def _run_arxiv_backfill(args, zotero: ZoteroQuery | None) -> None:
@@ -206,7 +212,13 @@ def _run_arxiv_backfill(args, zotero: ZoteroQuery | None) -> None:
         if not args.from_date or not args.to_date:
             raise RuntimeError("arxiv backfill date range requires both --from-date and --to-date")
         days = iter_date_range(parse_iso_date(args.from_date), parse_iso_date(args.to_date))
-    _run_arxiv_days(args.data_dir, args.category, days, zotero)
+    _run_arxiv_days(
+        args.data_dir,
+        args.category,
+        days,
+        zotero,
+        refresh_existing=False,
+    )
 
 
 def _run_arxiv_days(
@@ -214,6 +226,7 @@ def _run_arxiv_days(
     categories: str,
     days: list[date],
     zotero: ZoteroQuery | None,
+    refresh_existing: bool = False,
 ) -> None:
     for cat_ in categories.split(","):
         cat_ = cat_.strip()
@@ -231,6 +244,7 @@ def _run_arxiv_days(
             query_args=qa,
             category=cat_,
             zotero=zotero,
+            refresh_existing=refresh_existing,
         )
 
 
