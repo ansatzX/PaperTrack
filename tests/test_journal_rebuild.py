@@ -148,6 +148,63 @@ def test_provider_rebuild_owns_one_runtime_for_all_candidates(
     assert summary.runtime_stats is runtime.stats
 
 
+def test_empty_provider_rebuild_does_not_construct_runtime(tmp_path):
+    calls = []
+
+    summary = _run_provider_rebuild(
+        "acs",
+        (),
+        data_dir=tmp_path / "data",
+        diagnostics_dir=tmp_path / "diagnostics",
+        profile_root=tmp_path / "profiles",
+        snapshot_root=tmp_path / "snapshots",
+        runtime_factory=lambda **kwargs: calls.append(kwargs),
+    )
+
+    assert calls == []
+    assert summary.ordered_candidate_keys == ()
+    assert summary.attempted_keys == ()
+    assert summary.skipped_keys == ()
+    assert summary.outcomes == {}
+    assert summary.runtime_stats == ProviderRunStats()
+
+
+def test_all_terminal_candidates_skip_without_constructing_runtime(
+    tmp_path, monkeypatch
+):
+    _configure(monkeypatch)
+    candidate = _candidate()
+    diagnostics = tmp_path / "diagnostics"
+    diagnostics.mkdir()
+    (diagnostics / "journal_rebuild_acs_state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "provider": "acs",
+                "issues": {candidate.key: {"outcome": RESOLVED}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+
+    summary = _run_provider_rebuild(
+        "acs",
+        (candidate,),
+        data_dir=tmp_path / "data",
+        diagnostics_dir=diagnostics,
+        profile_root=tmp_path / "profiles",
+        snapshot_root=tmp_path / "snapshots",
+        runtime_factory=lambda **kwargs: calls.append(kwargs),
+    )
+
+    assert calls == []
+    assert summary.attempted_keys == ()
+    assert summary.skipped_keys == (candidate.key,)
+    assert summary.outcomes == {candidate.key: RESOLVED}
+    assert summary.runtime_stats == ProviderRunStats()
+
+
 def test_candidate_manifest_round_trip_is_stably_priority_ordered(tmp_path):
     later = _candidate("raw_html", priority=20)
     first = RebuildCandidate(
@@ -696,6 +753,55 @@ def test_assessment_exception_closes_runtime_restores_report_and_records_failure
     assert path.read_bytes() == original
     assert progress.issues[_candidate().key].outcome == FETCH_FAILED
     assert summary.fetch_failed_keys == (_candidate().key,)
+
+
+@pytest.mark.parametrize("exception_type", [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize("stage", ["fetch", "assessment"])
+def test_base_exception_restores_report_closes_runtime_and_does_not_persist_failure(
+    tmp_path, monkeypatch, exception_type, stage
+):
+    module = _configure(monkeypatch)
+    candidate = _candidate()
+    path = tmp_path / "data" / "acs" / "jcim" / "66" / "12.md"
+    path.parent.mkdir(parents=True)
+    original = b"durable user report\n"
+    path.write_bytes(original)
+    runtime = FakeRuntime("acs")
+
+    def rebuild(**kwargs):
+        path.write_text("replacement", encoding="utf-8")
+        if stage == "fetch":
+            raise exception_type("interrupted")
+        return True
+
+    monkeypatch.setattr(module, "filter_journal_to_md", rebuild)
+    if stage == "assessment":
+        monkeypatch.setattr(
+            module,
+            "_assess_report",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                exception_type("interrupted")
+            ),
+        )
+
+    with pytest.raises(exception_type):
+        module.run_provider_rebuild(
+            "acs",
+            (candidate,),
+            data_dir=tmp_path / "data",
+            diagnostics_dir=tmp_path / "diagnostics",
+            profile_root=tmp_path / "profiles",
+            snapshot_root=tmp_path / "snapshots",
+            runtime_factory=lambda **kwargs: runtime,
+        )
+
+    progress = _load_progress(
+        tmp_path / "diagnostics" / "journal_rebuild_acs_state.json", "acs"
+    )
+    assert path.read_bytes() == original
+    assert runtime.enter_count == 1
+    assert runtime.exit_count == 1
+    assert candidate.key not in progress.issues
 
 
 def test_failed_new_report_removes_partial_file(tmp_path, monkeypatch):

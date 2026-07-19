@@ -715,24 +715,36 @@ def run_provider_rebuild(
     attempted: list[str] = []
     skipped: list[str] = []
     outcomes: dict[str, str] = {}
+    pending: list[RebuildCandidate] = []
+    for candidate in ordered:
+        previous = progress.issues.get(candidate.key)
+        if previous and (
+            previous.outcome == RESOLVED
+            or (
+                previous.outcome == OFFICIAL_SUCCESS_UNRESOLVED
+                and not retry_unresolved
+            )
+        ):
+            skipped.append(candidate.key)
+            outcomes[candidate.key] = previous.outcome
+        else:
+            pending.append(candidate)
+
+    if not pending:
+        return RebuildSummary(
+            provider=provider,
+            ordered_candidate_keys=ordered_keys,
+            attempted_keys=(),
+            skipped_keys=tuple(skipped),
+            outcomes=outcomes,
+        )
+
     with runtime_factory(
         provider=provider,
         profile_root=profile_root,
         snapshot_root=snapshot_root,
     ) as provider_runtime:
-        for candidate in ordered:
-            previous = progress.issues.get(candidate.key)
-            if previous and (
-                previous.outcome == RESOLVED
-                or (
-                    previous.outcome == OFFICIAL_SUCCESS_UNRESOLVED
-                    and not retry_unresolved
-                )
-            ):
-                skipped.append(candidate.key)
-                outcomes[candidate.key] = previous.outcome
-                continue
-
+        for candidate in pending:
             attempted.append(candidate.key)
             outcome = _rebuild_candidate(
                 candidate,
