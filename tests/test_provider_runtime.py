@@ -78,6 +78,8 @@ class FakePage:
             self.browser.challenge_pages -= 1
         for response in self.browser.navigation_responses:
             self._response_handler(response)
+        if self.browser.navigation_error_after_responses:
+            raise RuntimeError("navigation failed after responses")
         return FakeNavigationResponse(self.browser.navigation_status)
 
     def reload(self):
@@ -156,6 +158,7 @@ class FakePlaywright:
         self.navigation_status = 200
         self.explicit_response_url = ""
         self.navigation_responses = []
+        self.navigation_error_after_responses = False
         self.context_close_error = context_close_error
         self.manager_close_error = manager_close_error
         self.failure_stage = failure_stage
@@ -182,6 +185,15 @@ def aps_request(index):
         canonical_url=f"https://journals.aps.org/pra/issues/1/{index + 1}",
         required_selector="main.issue",
         challenge_markers=("just a moment", "cloudflare"),
+    )
+
+
+def aps_request_with_capture(index):
+    return IssueRequest(
+        canonical_url=f"https://journals.aps.org/pra/issues/1/{index + 1}",
+        required_selector="main.issue",
+        challenge_markers=("just a moment", "cloudflare"),
+        capture_url_patterns=(re.compile(r"/api/"),),
     )
 
 
@@ -336,15 +348,19 @@ def test_issue_navigation_rejects_http_error_with_valid_selector(tmp_path, statu
     clock = FakeClock()
     fake = FakePlaywright(clock)
     fake.navigation_status = status
+    fake.navigation_responses = [
+        FakeApiResponse("https://journals.aps.org/api/http-error")
+    ]
     runtime = make_runtime(tmp_path, fake, clock)
 
     with runtime:
-        result = runtime.fetch_issue(aps_request(0))
+        result = runtime.fetch_issue(aps_request_with_capture(0))
 
     assert result.outcome == FETCH_FAILED
     assert result.status_code == status
     assert result.html == ""
     assert result.captured == ()
+    assert runtime.captured_responses == ()
 
 
 @pytest.mark.parametrize(
@@ -367,14 +383,18 @@ def test_issue_navigation_rejects_noncanonical_final_url_before_content_exposure
     clock = FakeClock()
     fake = FakePlaywright(clock)
     fake.navigation_final_url = final_url
+    fake.navigation_responses = [
+        FakeApiResponse("https://journals.aps.org/api/noncanonical")
+    ]
     runtime = make_runtime(tmp_path, fake, clock)
 
     with runtime:
-        result = runtime.fetch_issue(aps_request(0))
+        result = runtime.fetch_issue(aps_request_with_capture(0))
 
     assert result.outcome == FETCH_FAILED
     assert result.html == ""
     assert result.captured == ()
+    assert runtime.captured_responses == ()
 
 
 def test_selector_failure_is_sanitized_but_diagnostic_keeps_raw_material(
@@ -396,11 +416,12 @@ def test_selector_failure_is_sanitized_but_diagnostic_keeps_raw_material(
     )
 
     with runtime:
-        result = runtime.fetch_issue(aps_request(0))
+        result = runtime.fetch_issue(aps_request_with_capture(0))
 
     assert result.outcome == FETCH_FAILED
     assert result.html == ""
     assert result.captured == ()
+    assert runtime.captured_responses == ()
     event, diagnostic_html = events[-1]
     assert diagnostic_html == "<main class='issue'>papers</main>"
     assert event["captured_response_evidence"][0]["url"] == (
@@ -413,6 +434,12 @@ def test_blocked_result_is_sanitized_but_diagnostic_keeps_challenge(
 ):
     clock = FakeClock()
     fake = FakePlaywright(clock, challenge_pages=2)
+    fake.navigation_responses = [
+        FakeApiResponse(
+            "https://journals.aps.org/api/blocked",
+            body=b'{"challenge": "raw"}',
+        )
+    ]
     runtime = make_runtime(tmp_path, fake, clock)
     events = []
     monkeypatch.setattr(
@@ -421,11 +448,12 @@ def test_blocked_result_is_sanitized_but_diagnostic_keeps_challenge(
     )
 
     with runtime:
-        result = runtime.fetch_issue(aps_request(0))
+        result = runtime.fetch_issue(aps_request_with_capture(0))
 
     assert result.outcome == BLOCKED
     assert result.html == ""
     assert result.captured == ()
+    assert runtime.captured_responses == ()
     event, diagnostic_html = events[-1]
     assert "Cloudflare challenge" in diagnostic_html
     assert event["challenge_indicators"]
@@ -665,10 +693,46 @@ def test_capture_patterns_admit_only_selected_safe_response_bodies(tmp_path):
         result = runtime.fetch_issue(request)
 
     assert [item.url for item in result.captured] == [selected.url]
+    assert [item.url for item in runtime.captured_responses] == [selected.url]
     assert [item["url"] for item in runtime._response_evidence] == [
         selected.url,
         unselected.url,
     ]
+
+
+def test_navigation_exception_clears_public_captured_response_bodies(
+    tmp_path, monkeypatch
+):
+    clock = FakeClock()
+    fake = FakePlaywright(clock)
+    captured = FakeApiResponse(
+        "https://journals.aps.org/api/selected",
+        body=b'{"papers": ["raw"]}',
+    )
+    fake.navigation_responses = [captured]
+    fake.navigation_error_after_responses = True
+    runtime = make_runtime(tmp_path, fake, clock)
+    events = []
+    monkeypatch.setattr(
+        "papertrack.provider_runtime.record_fetch_attempt",
+        lambda event, html=None: events.append((event, html)),
+    )
+    request = IssueRequest(
+        canonical_url="https://journals.aps.org/pra/issues/1/1",
+        required_selector="main.issue",
+        challenge_markers=("cloudflare",),
+        capture_url_patterns=(re.compile(r"/api/selected$"),),
+    )
+
+    with runtime:
+        result = runtime.fetch_issue(request)
+
+    assert result.outcome == FETCH_FAILED
+    assert result.captured == ()
+    assert runtime.captured_responses == ()
+    evidence = events[-1][0]["captured_response_evidence"]
+    assert evidence[0]["url"] == captured.url
+    assert "body" not in evidence[0]
 
 
 def test_capture_filters_size_type_origin_and_resource_role(tmp_path):
@@ -736,8 +800,13 @@ def test_circuit_skip_diagnostics_do_not_reuse_previous_capture_evidence(
 
     with runtime:
         for index in range(3):
-            assert runtime.fetch_issue(aps_request(index)).outcome == BLOCKED
-        assert runtime.fetch_issue(aps_request(3)).outcome == CIRCUIT_OPEN
+            assert (
+                runtime.fetch_issue(aps_request_with_capture(index)).outcome
+                == BLOCKED
+            )
+            assert runtime.captured_responses == ()
+        assert runtime.fetch_issue(aps_request_with_capture(3)).outcome == CIRCUIT_OPEN
+        assert runtime.captured_responses == ()
 
     assert events[-1]["captured_response_evidence"] == []
 

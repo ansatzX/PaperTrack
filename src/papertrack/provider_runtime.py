@@ -542,32 +542,36 @@ class ProviderRuntime:
         journal, volume, issue = _issue_identity(
             self.provider, result.canonical_url
         )
-        record_fetch_attempt(
-            {
-                "source_role": "authoritative",
-                "source": "journal",
-                "provider": self.provider,
-                "journal": journal,
-                "volume": volume,
-                "issue": issue,
-                "url": result.canonical_url,
-                "final_url": result.final_url,
-                "stage": "issue_page_browser",
-                "outcome": result.outcome,
-                "http_status": result.status_code,
-                "client": "playwright",
-                "browser_mode": "headed_chrome",
-                "profile_mode": "persistent",
-                "challenge_indicators": list(self._challenge_indicators),
-                "attempt": result.attempt_count,
-                "attempt_count": result.attempt_count,
-                "circuit_state": "open" if self._circuit_open else "closed",
-                "circuit_open": self._circuit_open,
-                "message": result.message,
-                "captured_response_evidence": self._response_evidence,
-            },
-            html=diagnostic_html or result.html or None,
-        )
+        try:
+            record_fetch_attempt(
+                {
+                    "source_role": "authoritative",
+                    "source": "journal",
+                    "provider": self.provider,
+                    "journal": journal,
+                    "volume": volume,
+                    "issue": issue,
+                    "url": result.canonical_url,
+                    "final_url": result.final_url,
+                    "stage": "issue_page_browser",
+                    "outcome": result.outcome,
+                    "http_status": result.status_code,
+                    "client": "playwright",
+                    "browser_mode": "headed_chrome",
+                    "profile_mode": "persistent",
+                    "challenge_indicators": list(self._challenge_indicators),
+                    "attempt": result.attempt_count,
+                    "attempt_count": result.attempt_count,
+                    "circuit_state": "open" if self._circuit_open else "closed",
+                    "circuit_open": self._circuit_open,
+                    "message": result.message,
+                    "captured_response_evidence": self._response_evidence,
+                },
+                html=diagnostic_html or result.html or None,
+            )
+        finally:
+            if result.outcome != SUCCESS:
+                self._captured_responses = []
 
     @staticmethod
     def _validate_interval(name: str, value: float) -> None:

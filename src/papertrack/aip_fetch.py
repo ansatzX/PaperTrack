@@ -970,7 +970,7 @@ def _query_aip_with_runtime(
                     abstract_results=abstracts,
                     snapshot=snapshot,
                 )
-            except (OSError, UnicodeError, ValueError) as exc:
+            except Exception as exc:
                 _record_snapshot_rejection(
                     journal_slug,
                     volume,

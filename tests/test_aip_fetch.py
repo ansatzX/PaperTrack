@@ -358,6 +358,131 @@ def test_aip_snapshot_missing_expected_attachment_refetches(runtime, snapshot_st
     assert runtime.stats.cache_rejected == 1
 
 
+def test_aip_force_live_repairs_snapshot_rejected_by_current_parser(
+    monkeypatch, runtime, snapshot_store
+):
+    snapshot_store.commit(
+        SnapshotKey("aip", "jcp", "160", "4"),
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "text/html",
+        AIP_ISSUE_FIXTURE.encode(),
+        SnapshotValidation(
+            selector_counts={".al-article-items": 1},
+            membership_dois=("10.1063/example",),
+            parser_version="aip-issue-v1",
+        ),
+        (
+            aip_fetch.SnapshotAttachment(
+                "abstract-12345.json", "application/json", _attachment_envelope()
+            ),
+        ),
+    )
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    runtime.queue_json({"Success": True, "Html": "<p>Repaired.</p>"})
+    original = aip_fetch._result_from_official_material
+    events = []
+
+    def fail_snapshot_current_parser(*args, **kwargs):
+        if kwargs["transport"] == "snapshot":
+            raise RuntimeError("current parser rejected trusted baseline")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        aip_fetch, "_result_from_official_material", fail_snapshot_current_parser
+    )
+    monkeypatch.setattr(
+        aip_fetch,
+        "record_fetch_attempt",
+        lambda event, html=None: events.append((event, html)),
+    )
+
+    result = aip_fetch.query_aip_issue_result(
+        "jcp", "160", "4", "JCP", runtime, force_live=True
+    )
+
+    assert result.outcome == SUCCESS
+    assert result.entries["10.1063/example"].abstract == "Repaired."
+    assert len(runtime.fetch_calls) == 1
+    assert runtime.stats.cache_rejected == 1
+    rejection = next(
+        event for event, _ in events if event["stage"] == "snapshot_validation"
+    )
+    assert rejection["message"] == "current parser rejected trusted baseline"
+
+
+def test_aip_snapshot_validation_does_not_catch_base_exception(
+    monkeypatch, runtime, snapshot_store
+):
+    snapshot_store.commit(
+        SnapshotKey("aip", "jcp", "160", "4"),
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "text/html",
+        AIP_ISSUE_FIXTURE.encode(),
+        SnapshotValidation(
+            selector_counts={".al-article-items": 1},
+            membership_dois=("10.1063/example",),
+            parser_version="aip-issue-v1",
+        ),
+        (
+            aip_fetch.SnapshotAttachment(
+                "abstract-12345.json", "application/json", _attachment_envelope()
+            ),
+        ),
+    )
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt("stop baseline validation")
+
+    monkeypatch.setattr(aip_fetch, "_result_from_official_material", interrupt)
+
+    with pytest.raises(KeyboardInterrupt, match="stop baseline validation"):
+        aip_fetch.query_aip_issue_result(
+            "jcp", "160", "4", "JCP", runtime, force_live=True
+        )
+
+    assert runtime.fetch_calls == []
+
+
+def test_aip_baseline_recovery_does_not_catch_live_parser_error(
+    monkeypatch, runtime, snapshot_store
+):
+    snapshot_store.commit(
+        SnapshotKey("aip", "jcp", "160", "4"),
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "text/html",
+        AIP_ISSUE_FIXTURE.encode(),
+        SnapshotValidation(
+            selector_counts={".al-article-items": 1},
+            membership_dois=("10.1063/example",),
+            parser_version="aip-issue-v1",
+        ),
+        (
+            aip_fetch.SnapshotAttachment(
+                "abstract-12345.json", "application/json", _attachment_envelope()
+            ),
+        ),
+    )
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    original = aip_fetch._result_from_official_material
+
+    def fail_live_parser(*args, **kwargs):
+        if kwargs["transport"] == "live":
+            raise RuntimeError("live parser failed")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(aip_fetch, "_result_from_official_material", fail_live_parser)
+
+    with pytest.raises(RuntimeError, match="live parser failed"):
+        aip_fetch.query_aip_issue_result(
+            "jcp", "160", "4", "JCP", runtime, force_live=True
+        )
+
+    assert len(runtime.fetch_calls) == 1
+
+
 def _attachment_envelope(
     *,
     url="https://pubs.aip.org/Handlers/ArticleAbstractHandler.ashx",
