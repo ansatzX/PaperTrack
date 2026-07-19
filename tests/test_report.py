@@ -809,8 +809,8 @@ def test_filter_arxiv_days_to_md_processes_exact_days(tmp_path, monkeypatch):
 
     calls = []
 
-    def fake_query(date_from_date, date_to_date, query_args):
-        calls.append((date_from_date, date_to_date))
+    def fake_query(date_from_date, date_to_date, query_args, required_category=""):
+        calls.append((date_from_date, date_to_date, required_category))
         return AdapterResult(entries={
             "arXiv:2606.00001": ArxivEntry(
                 arxiv_id="arXiv:2606.00001",
@@ -831,8 +831,8 @@ def test_filter_arxiv_days_to_md_processes_exact_days(tmp_path, monkeypatch):
     )
 
     assert calls == [
-        ("2026-06-08", "2026-06-09"),
-        ("2026-06-09", "2026-06-10"),
+        ("2026-06-08", "2026-06-09", "quant-ph"),
+        ("2026-06-09", "2026-06-10", "quant-ph"),
     ]
     assert (tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "08.md").exists()
     assert (tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "09.md").exists()
@@ -869,8 +869,8 @@ Title:  Existing paper
 
     calls = []
 
-    def fake_query(date_from_date, date_to_date, query_args):
-        calls.append((date_from_date, date_to_date))
+    def fake_query(date_from_date, date_to_date, query_args, required_category=""):
+        calls.append((date_from_date, date_to_date, required_category))
         return AdapterResult(entries={
             "arXiv:2606.00001": ArxivEntry(
                 arxiv_id="arXiv:2606.00001",
@@ -890,7 +890,7 @@ Title:  Existing paper
         zotero=None,
     )
 
-    assert calls == [("2026-06-09", "2026-06-10")]
+    assert calls == [("2026-06-09", "2026-06-10", "quant-ph")]
     assert (tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "09.md").exists()
 
 
@@ -941,8 +941,8 @@ Abstract:
 
     calls = []
 
-    def fake_query(date_from_date, date_to_date, query_args):
-        calls.append((date_from_date, date_to_date))
+    def fake_query(date_from_date, date_to_date, query_args, required_category=""):
+        calls.append((date_from_date, date_to_date, required_category))
         return AdapterResult(
             entries={
                 "arXiv:2606.00001": ArxivEntry(
@@ -969,7 +969,7 @@ Abstract:
     )
 
     refreshed = existing.read_text(encoding="utf-8")
-    assert calls == [("2026-06-08", "2026-06-09")]
+    assert calls == [("2026-06-08", "2026-06-09", "quant-ph")]
     assert "Title:  Fresh title" in refreshed
     assert "Fresh abstract" in refreshed
     assert "- [x] [arXiv:2606.00001]" in refreshed
@@ -1290,7 +1290,7 @@ def test_filter_arxiv_days_to_md_stops_on_rate_limit(tmp_path, monkeypatch):
 
     calls = []
 
-    def fake_query(date_from_date, date_to_date, query_args):
+    def fake_query(date_from_date, date_to_date, query_args, required_category=""):
         calls.append(date_from_date)
         return AdapterResult(
             entries={},

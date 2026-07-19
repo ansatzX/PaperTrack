@@ -215,7 +215,12 @@ def _filter_one_arxiv_day_to_md(day_date: date, md_folder: str,
         logger.info("Skipping existing arXiv report: %s %s", category, date_string)
         return
 
-    arxiv_fetch = query_arxiv_result(date_string, date_to_date, query_args)
+    arxiv_fetch = query_arxiv_result(
+        date_string,
+        date_to_date,
+        query_args,
+        required_category=category,
+    )
     if not arxiv_fetch.ok:
         if arxiv_fetch.outcome == RATE_LIMITED:
             raise RuntimeError(

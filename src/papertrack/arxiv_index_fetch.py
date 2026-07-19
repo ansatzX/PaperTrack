@@ -123,7 +123,8 @@ def _strip_escaped_inline_markup(value: str) -> str:
 
 def query_arxiv_result(date_from_date: str = "2025-02-01",
                        date_to_date: str = "2025-02-02",
-                       query_args: dict | None = None) -> AdapterResult[dict[str, ArxivEntry]]:
+                       query_args: dict | None = None,
+                       required_category: str = "") -> AdapterResult[dict[str, ArxivEntry]]:
     """Query arXiv advanced search for papers submitted on a date range.
 
     Returns an AdapterResult whose entries map arxiv_id to ArxivEntry.
@@ -144,6 +145,9 @@ def query_arxiv_result(date_from_date: str = "2025-02-01",
 
     page_size = _page_size(query_args)
     result: dict[str, ArxivEntry] = {}
+    seen_candidate_ids: set[str] = set()
+    candidate_count = 0
+    rejected_count = 0
     urls: list[str] = []
     start = 0
 
@@ -177,13 +181,58 @@ def query_arxiv_result(date_from_date: str = "2025-02-01",
                 metadata={"url": url, "urls": urls, "start": start},
             )
 
-        before_count = len(result)
-        result.update(page_entries)
         page_count = len(page_entries)
+        new_candidate_ids = set(page_entries) - seen_candidate_ids
+        seen_candidate_ids.update(page_entries)
+        candidate_count += page_count
+
+        if required_category:
+            missing_subject_ids = [
+                arxiv_id for arxiv_id, entry in page_entries.items()
+                if not entry.subjects
+            ]
+            if missing_subject_ids:
+                record_fetch_attempt({
+                    "source_role": "authoritative",
+                    "source": "arxiv",
+                    "provider": "arxiv",
+                    "url": url,
+                    "stage": "advanced_search_category_filter",
+                    "outcome": PARSE_FAILED,
+                    "field": "subjects",
+                    "message": "arXiv result missing subjects required for exact category filtering",
+                })
+                return AdapterResult(
+                    entries={},
+                    outcome=PARSE_FAILED,
+                    provider="arxiv",
+                    source="arxiv",
+                    message="arXiv category membership could not be verified",
+                    metadata={
+                        "url": url,
+                        "urls": urls,
+                        "start": start,
+                        "field": "subjects",
+                        "arxiv_ids": missing_subject_ids,
+                    },
+                )
+            accepted_entries = {
+                arxiv_id: entry
+                for arxiv_id, entry in page_entries.items()
+                if required_category in entry.subjects
+            }
+            rejected_count += page_count - len(accepted_entries)
+            result.update(accepted_entries)
+        else:
+            result.update(page_entries)
+
         if page_count < page_size:
             break
-        if len(result) == before_count:
-            logger.warning("arXiv pagination produced no new entries at start=%d; stopping", start)
+        if not new_candidate_ids:
+            logger.warning(
+                "arXiv pagination produced no new candidates at start=%d; stopping",
+                start,
+            )
             break
         start += page_size
 
@@ -192,7 +241,13 @@ def query_arxiv_result(date_from_date: str = "2025-02-01",
         outcome=SUCCESS,
         provider="arxiv",
         source="arxiv",
-        metadata={"url": urls[0] if urls else "", "urls": urls},
+        metadata={
+            "url": urls[0] if urls else "",
+            "urls": urls,
+            "candidate_count": candidate_count,
+            "accepted_count": len(result),
+            "rejected_count": rejected_count,
+        },
     )
 
 

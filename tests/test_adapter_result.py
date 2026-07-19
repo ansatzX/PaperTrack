@@ -154,6 +154,88 @@ def test_arxiv_result_parse_failure_on_second_page_is_not_partial_success(monkey
     assert result.entries == {}
 
 
+def test_arxiv_result_keeps_exact_primary_and_cross_list_members(monkeypatch):
+    from papertrack import arxiv_index_fetch
+
+    summary = "<ol>" + "".join([
+        _arxiv_item(1, ["cs.AI", "cs.LG"]),
+        _arxiv_item(2, ["cs.LG", "cs.AI"]),
+        _arxiv_item(3, ["cs.LG"]),
+    ]) + "</ol>"
+    monkeypatch.setattr(
+        arxiv_index_fetch.feedparser,
+        "parse",
+        lambda url: {"feed": {"summary": summary}},
+    )
+
+    result = arxiv_index_fetch.query_arxiv_result(
+        "2026-06-01",
+        "2026-06-02",
+        query_args={"size": "200"},
+        required_category="cs.AI",
+    )
+
+    assert result.outcome == SUCCESS
+    assert set(result.entries) == {"arXiv:2606.00001", "arXiv:2606.00002"}
+    assert result.metadata["candidate_count"] == 3
+    assert result.metadata["accepted_count"] == 2
+    assert result.metadata["rejected_count"] == 1
+
+
+def test_arxiv_category_filter_paginates_by_raw_candidate_count(monkeypatch):
+    from papertrack import arxiv_index_fetch
+
+    seen_urls = []
+
+    def fake_parse(url):
+        seen_urls.append(url)
+        if "start=2" in url:
+            summary = "<ol></ol>"
+        elif "start=1" in url:
+            summary = "<ol>" + _arxiv_item(2, ["cs.AI"]) + "</ol>"
+        else:
+            summary = "<ol>" + _arxiv_item(1, ["cs.LG"]) + "</ol>"
+        return {"feed": {"summary": summary}}
+
+    monkeypatch.setattr(arxiv_index_fetch.feedparser, "parse", fake_parse)
+
+    result = arxiv_index_fetch.query_arxiv_result(
+        "2026-06-01",
+        "2026-06-02",
+        query_args={"size": "1"},
+        required_category="cs.AI",
+    )
+
+    assert result.outcome == SUCCESS
+    assert set(result.entries) == {"arXiv:2606.00002"}
+    assert any("start=1" in url for url in seen_urls)
+    assert result.metadata["candidate_count"] == 2
+    assert result.metadata["accepted_count"] == 1
+    assert result.metadata["rejected_count"] == 1
+
+
+def test_arxiv_category_filter_fails_closed_when_subjects_are_missing(monkeypatch):
+    from papertrack import arxiv_index_fetch
+
+    summary = "<ol>" + _arxiv_item(1, []) + "</ol>"
+    monkeypatch.setattr(
+        arxiv_index_fetch.feedparser,
+        "parse",
+        lambda url: {"feed": {"summary": summary}},
+    )
+
+    result = arxiv_index_fetch.query_arxiv_result(
+        "2026-06-01",
+        "2026-06-02",
+        query_args={"size": "200"},
+        required_category="cs.AI",
+    )
+
+    assert result.outcome == PARSE_FAILED
+    assert result.entries == {}
+    assert result.metadata["field"] == "subjects"
+
+
 def test_arxiv_result_distinguishes_rate_limit(monkeypatch):
     from papertrack import arxiv_index_fetch
 
@@ -180,19 +262,24 @@ def test_arxiv_result_distinguishes_rate_limit(monkeypatch):
 
 
 def _arxiv_summary(start: int, count: int) -> str:
-    items = []
-    for i in range(start, start + count):
-        items.append(
-            f"""
-            <li class="arxiv-result">
-              <p class="list-title is-inline-block">
-                <a href="https://arxiv.org/abs/2606.{i:05d}">arXiv:2606.{i:05d}</a>
-              </p>
-              <p class="title is-5 mathjax">Paper {i}</p>
-              <p class="authors"><a>Author {i}</a></p>
-              <p class="abstract mathjax"><span class="abstract-full">Abstract {i}</span></p>
-              <span class="tag is-small is-link tooltip is-tooltip-top">cs.AI</span>
-            </li>
-            """
-        )
+    items = [_arxiv_item(i, ["cs.AI"]) for i in range(start, start + count)]
     return "<ol>" + "\n".join(items) + "</ol>"
+
+
+def _arxiv_item(index: int, subjects: list[str]) -> str:
+    tags = "".join(
+        f'<span class="tag is-small {"is-link" if position == 0 else "is-grey"}">'
+        f"{subject}</span>"
+        for position, subject in enumerate(subjects)
+    )
+    return f"""
+        <li class="arxiv-result">
+          <p class="list-title is-inline-block">
+            <a href="https://arxiv.org/abs/2606.{index:05d}">arXiv:2606.{index:05d}</a>
+          </p>
+          <p class="title is-5 mathjax">Paper {index}</p>
+          <p class="authors"><a>Author {index}</a></p>
+          <p class="abstract mathjax"><span class="abstract-full">Abstract {index}</span></p>
+          {tags}
+        </li>
+        """
