@@ -930,8 +930,12 @@ def test_crossref_non_article_issue_metadata_is_filtered():
     assert articles == [article_item]
 
 
-def test_acs_issue_page_defines_membership_and_records_absent_abstract(monkeypatch):
+def test_acs_issue_page_defines_membership_and_records_absent_abstract(
+    monkeypatch, tmp_path
+):
     from papertrack import acs_fetch
+    from papertrack.official_snapshot import OfficialSnapshotStore
+    from papertrack.provider_runtime import OfficialBrowserResult
 
     acs_fetch._cache.clear()
     html = """
@@ -958,18 +962,29 @@ def test_acs_issue_page_defines_membership_and_records_absent_abstract(monkeypat
     fetched = []
     events = []
 
-    def fake_fetch(url):
-        fetched.append(url)
-        return html, "", 200
+    class Runtime:
+        snapshot_store = OfficialSnapshotStore(tmp_path / "snapshots")
 
-    monkeypatch.setattr(acs_fetch, "_fetch_html", fake_fetch)
+        def fetch_issue(self, request):
+            fetched.append(request.canonical_url)
+            return OfficialBrowserResult(
+                outcome="success",
+                canonical_url=request.canonical_url,
+                final_url=request.canonical_url,
+                status_code=200,
+                html=html,
+                captured=(),
+            )
+
     monkeypatch.setattr(
         acs_fetch,
         "record_fetch_attempt",
         lambda event, html=None: events.append(event),
     )
 
-    result = acs_fetch.query_acs_issue_result("jcisd8", "66", "12", "JCIM")
+    result = acs_fetch.query_acs_issue_result(
+        "jcisd8", "66", "12", "JCIM", Runtime()
+    )
 
     assert list(result.entries) == [
         "10.1021/acs.jcim.6c00001",

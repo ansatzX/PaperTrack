@@ -1,11 +1,9 @@
 """Direct ACS journal TOC scraper with resilient official-page fetching."""
 
 from dataclasses import dataclass
+import hashlib
 import logging
 import re
-import json
-import subprocess
-import sys
 
 from bs4 import BeautifulSoup
 
@@ -25,13 +23,17 @@ from .http_fetch import (
     configured_interval,
     fetch_html_resilient,
     is_blocked_response,
-    provider_throttle,
 )
 from .journal_entry import JournalEntry
+from .official_snapshot import SnapshotKey, SnapshotValidation
+from .provider_runtime import IssueRequest
 
 logger = logging.getLogger(__name__)
 
 ACS_TOC_URL = "https://pubs.acs.org/toc/{journal_code}/{volume}/{issue}"
+ACS_ISSUE_URL = ACS_TOC_URL
+ACS_ISSUE_SELECTOR = "div.issue-item.clearfix"
+ACS_PARSER_VERSION = "acs-toc-v1"
 ACS_FETCH_STRATEGIES = (
     ("curl_cffi", "chrome136"),
     ("requests", "default"),
@@ -46,21 +48,6 @@ ACS_REQUEST_POLICY = HttpRequestPolicy(
 # Per-issue cache to avoid re-scraping on repeated runs.
 _cache: dict[str, AdapterResult[dict[str, JournalEntry]]] = {}
 _last_fetch_result: HttpFetchResult | None = None
-
-def _fetch_acs_browser(url: str) -> dict:
-    provider_throttle("acs", ACS_REQUEST_POLICY.min_interval)
-    cmd = ["xvfb-run", "-a", sys.executable, "-m", "papertrack.acs_browser", url]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=ACS_BROWSER_TIMEOUT)
-        if proc.returncode != 0:
-            return {"outcome": FETCH_FAILED, "message": proc.stderr or "browser helper failed", "html": ""}
-        return json.loads(proc.stdout or "{}")
-    except Exception as exc:
-        return {"outcome": FETCH_FAILED, "message": str(exc), "html": ""}
-
-ACS_BROWSER_TIMEOUT = 60
-
 
 @dataclass
 class AcsParseResult:
@@ -226,6 +213,212 @@ def _normalize_date(raw: str) -> str:
     return cleaned
 
 
+def _membership_dois(entries: dict[str, JournalEntry]) -> tuple[str, ...]:
+    return tuple(sorted(doi.strip().lower() for doi in entries))
+
+
+def _membership_hash(dois: tuple[str, ...]) -> str:
+    return hashlib.sha256("\n".join(sorted(dois)).encode("utf-8")).hexdigest()
+
+
+def _selector_counts(html: str) -> dict[str, int]:
+    soup = BeautifulSoup(html, "lxml")
+    return {ACS_ISSUE_SELECTOR: len(soup.select(ACS_ISSUE_SELECTOR))}
+
+
+def _valid_acs_membership(dois: tuple[str, ...]) -> bool:
+    return bool(dois) and all(
+        re.fullmatch(r"10\.1021/[^\s]+", doi, re.IGNORECASE) for doi in dois
+    )
+
+
+def _diagnostic_context(journal_code: str, volume: str, issue: str,
+                        url: str, stage: str, outcome: str, **extra) -> dict:
+    event = {
+        "source_role": "authoritative",
+        "source": "journal",
+        "provider": "acs",
+        "journal": journal_code,
+        "volume": volume,
+        "issue": issue,
+        "url": url,
+        "stage": stage,
+        "outcome": outcome,
+    }
+    event.update(extra)
+    return event
+
+
+def _result_from_html(html: str, journal_name: str, *, url: str,
+                      journal_code: str, volume: str, issue: str,
+                      transport: str, snapshot=None):
+    try:
+        parsed = _parse_acs_toc_result(html, journal_name)
+        selector_counts = _selector_counts(html)
+    except Exception as exc:
+        record_fetch_attempt(
+            _diagnostic_context(
+                journal_code, volume, issue, url, "issue_page_parse",
+                PARSE_FAILED, message=str(exc),
+            ),
+            html=html,
+        )
+        return AdapterResult(
+            entries={}, outcome=PARSE_FAILED, provider="acs", source="journal",
+            message=f"ACS issue page parser failed: {exc}", metadata={"url": url},
+        ), None, None
+
+    metadata = {
+        "url": url,
+        "article_count": len(parsed.entries),
+        "issue_item_count": parsed.issue_item_count,
+        "missing_fields": parsed.missing_fields,
+        "critical_field_failures": parsed.critical_field_failures,
+        "official_transport": transport,
+        "selector_counts": selector_counts,
+    }
+    membership_dois = _membership_dois(parsed.entries)
+    if snapshot is not None:
+        metadata.update(
+            snapshot_path=str(snapshot.body_path),
+            membership_hash=snapshot.membership_hash,
+        )
+
+    if selector_counts[ACS_ISSUE_SELECTOR] < 1 or parsed.issue_item_count < 1:
+        record_fetch_attempt(
+            _diagnostic_context(
+                journal_code, volume, issue, url, "issue_page_parse",
+                OFFICIAL_EMPTY_SUSPICIOUS, article_count=0,
+            ),
+            html=html,
+        )
+        return AdapterResult(
+            entries={}, outcome=OFFICIAL_EMPTY_SUSPICIOUS, provider="acs",
+            source="journal",
+            message="ACS issue page parsed to zero official articles",
+            metadata=metadata,
+        ), parsed, membership_dois
+
+    if parsed.critical_field_failures or not _valid_acs_membership(membership_dois):
+        record_fetch_attempt(
+            _diagnostic_context(
+                journal_code, volume, issue, url, "issue_page_parse",
+                PARSE_FAILED, article_count=len(parsed.entries),
+                critical_field_failures=parsed.critical_field_failures,
+            ),
+            html=html,
+        )
+        return AdapterResult(
+            entries={}, outcome=PARSE_FAILED, provider="acs", source="journal",
+            message="ACS article card is missing a valid DOI or title",
+            metadata=metadata,
+        ), parsed, membership_dois
+
+    return AdapterResult(
+        entries=parsed.entries, outcome=SUCCESS, provider="acs", source="journal",
+        metadata=metadata,
+    ), parsed, membership_dois
+
+
+def _query_acs_with_runtime(journal_code: str, volume: str, issue: str,
+                            journal_name: str, provider_runtime):
+    url = ACS_ISSUE_URL.format(
+        journal_code=journal_code, volume=volume, issue=issue
+    )
+    key = SnapshotKey("acs", journal_code, volume, issue)
+    snapshot = provider_runtime.snapshot_store.load(key)
+    if snapshot is not None:
+        try:
+            html = snapshot.body_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            snapshot = None
+        else:
+            cached, _, membership_dois = _result_from_html(
+                html, journal_name, url=url, journal_code=journal_code,
+                volume=volume, issue=issue, transport="snapshot",
+                snapshot=snapshot,
+            )
+            if (
+                cached.outcome == SUCCESS
+                and membership_dois is not None
+                and _membership_hash(membership_dois) == snapshot.membership_hash
+            ):
+                if hasattr(provider_runtime, "stats"):
+                    provider_runtime.stats.snapshot_hit += 1
+                return cached
+
+    request = IssueRequest(
+        canonical_url=ACS_ISSUE_URL.format(
+            journal_code=journal_code,
+            volume=volume,
+            issue=issue,
+        ),
+        required_selector=ACS_ISSUE_SELECTOR,
+        challenge_markers=("Just a moment", "cf-chl", "Access denied"),
+    )
+    fetched = provider_runtime.fetch_issue(request)
+    if fetched.outcome != SUCCESS:
+        record_fetch_attempt(
+            _diagnostic_context(
+                journal_code, volume, issue, url, "issue_page_fetch",
+                fetched.outcome, http_status=fetched.status_code,
+                attempt_count=fetched.attempt_count, message=fetched.message,
+            ),
+            html=fetched.html or None,
+        )
+        return AdapterResult(
+            entries={}, outcome=fetched.outcome, provider="acs", source="journal",
+            message=fetched.message or "ACS issue page could not be fetched",
+            metadata={"url": url, "official_transport": "live"},
+        )
+
+    result, parsed, membership_dois = _result_from_html(
+        fetched.html, journal_name, url=url, journal_code=journal_code,
+        volume=volume, issue=issue, transport="live",
+    )
+    if result.outcome != SUCCESS:
+        return result
+
+    validation = SnapshotValidation(
+        selector_counts=result.metadata["selector_counts"],
+        membership_dois=membership_dois,
+        parser_version=ACS_PARSER_VERSION,
+    )
+    try:
+        stored = provider_runtime.snapshot_store.commit(
+            key=key,
+            canonical_url=request.canonical_url,
+            final_url=fetched.final_url,
+            media_type="text/html",
+            body=fetched.html.encode("utf-8"),
+            validation=validation,
+        )
+    except Exception as exc:
+        record_fetch_attempt(
+            _diagnostic_context(
+                journal_code, volume, issue, url, "snapshot_commit",
+                FETCH_FAILED, message=str(exc),
+            )
+        )
+        return AdapterResult(
+            entries={}, outcome=FETCH_FAILED, provider="acs", source="journal",
+            message=f"ACS snapshot commit failed: {exc}", metadata=result.metadata,
+        )
+    result.metadata.update(
+        snapshot_path=str(stored.body_path),
+        membership_hash=stored.membership_hash,
+    )
+    for missing in parsed.missing_fields:
+        record_fetch_attempt(
+            _diagnostic_context(
+                journal_code, volume, issue, url, "issue_page_parse",
+                OFFICIAL_FIELD_ABSENT, doi=missing["doi"],
+                field=missing["field"],
+            )
+        )
+    return result
+
+
 def query_acs_issue_result(journal_code: str, volume: str, issue: str,
                            journal_name: str = "", provider_runtime=None,
                            ) -> AdapterResult[dict[str, JournalEntry]]:
@@ -240,6 +433,11 @@ def query_acs_issue_result(journal_code: str, volume: str, issue: str,
     Returns:
         AdapterResult containing DOI -> JournalEntry mappings.
     """
+    if provider_runtime is not None:
+        return _query_acs_with_runtime(
+            journal_code, volume, issue, journal_name, provider_runtime
+        )
+
     cache_key = f"{journal_code}:{volume}:{issue}"
     if cache_key in _cache:
         return _cache[cache_key]
@@ -252,20 +450,7 @@ def query_acs_issue_result(journal_code: str, volume: str, issue: str,
     html, failure_outcome, status_code = _fetch_html(url)
     if not html or failure_outcome:
         outcome = failure_outcome or FETCH_FAILED
-        browser_result = _fetch_acs_browser(url) if outcome == BLOCKED else {}
-        if browser_result:
-            record_fetch_attempt({"source_role":"authoritative", "source":"journal", "provider":"acs",
-                "journal":journal_code, "volume":volume, "issue":issue, "url":url,
-                "stage":"issue_page_browser_fallback", "outcome":browser_result.get("outcome", FETCH_FAILED),
-                "http_status":browser_result.get("status_code"), "message":browser_result.get("message", "")},
-                html=browser_result.get("html") or None)
-            if browser_result.get("html") and browser_result.get("outcome") in ("", SUCCESS):
-                html, failure_outcome, status_code = browser_result["html"], "", browser_result.get("status_code")
-            else:
-                outcome = browser_result.get("outcome") or outcome
-        if html and not failure_outcome:
-            pass
-        else:
+        if not html or failure_outcome:
             fetch_result = _last_fetch_result
             record_fetch_attempt(
             {
@@ -390,5 +575,8 @@ def query_acs_issue_result(journal_code: str, volume: str, issue: str,
 
 
 def query_acs_issue(journal_code: str, volume: str, issue: str,
-                    journal_name: str = "") -> dict[str, JournalEntry]:
-    return query_acs_issue_result(journal_code, volume, issue, journal_name).entries
+                    journal_name: str = "", provider_runtime=None,
+                    ) -> dict[str, JournalEntry]:
+    return query_acs_issue_result(
+        journal_code, volume, issue, journal_name, provider_runtime
+    ).entries
