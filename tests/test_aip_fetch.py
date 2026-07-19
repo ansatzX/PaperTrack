@@ -1,459 +1,374 @@
+import json
+
 import pytest
 
+from papertrack import aip_fetch
 from papertrack.adapter_result import BLOCKED, FETCH_FAILED, SUCCESS
-from papertrack.http_fetch import HttpFetchResult
+from papertrack.official_snapshot import (
+    OfficialSnapshotStore,
+    SnapshotKey,
+    SnapshotValidation,
+)
+from papertrack.provider_runtime import (
+    CapturedResponse,
+    OfficialBrowserResult,
+    ProviderRunStats,
+)
 
 
-def _issue_html(cards: str) -> str:
-    return f'<html><div class="issue-list">{cards}</div></html>'
-
-
-def _card(doi: str, article_id: str = "") -> str:
-    control = (
-        f'<a class="js-show-abstract" data-articleid="{article_id}">Abstract</a>'
-        if article_id
-        else ""
-    )
-    suffix = doi.rsplit("/", 1)[-1]
-    return f"""
-    <div class="al-article-items">
-      <h3 class="item-title">
-        <a href="/aip/jcp/article/164/16/{suffix}/123/Title">Title {doi}</a>
-      </h3>
-      <div class="ww-citation-primary">
-        164, {suffix} (2026)
-        <span class="citation-label"><a href="https://doi.org/{doi}">{doi}</a></span>
-      </div>
-      {control}
+AIP_ISSUE_FIXTURE = """
+<html><body>
+  <div class="al-article-items">
+    <h3 class="item-title">
+      <a href="/aip/jcp/article/160/4/041101/12345/Title">Official article</a>
+    </h3>
+    <div class="ww-citation-primary">
+      160, 041101 (2024)
+      <span class="citation-label">
+        <a href="https://doi.org/10.1063/example">10.1063/example</a>
+      </span>
     </div>
-    """
+    <a class="js-show-abstract" data-articleid="12345">Abstract</a>
+  </div>
+</body></html>
+"""
 
 
-class Response:
-    def __init__(self, status_code=200, text="", payload=None):
-        self.status_code = status_code
-        self.text = text
-        self._payload = payload
-        self.headers = {}
+class Runtime:
+    def __init__(self, snapshot_store):
+        self.snapshot_store = snapshot_store
+        self.issue_results = []
+        self.abstract_results = []
+        self.fetch_calls = []
+        self.request_calls = []
+        self.stats = ProviderRunStats()
+        self.context_count = 1
 
-    def json(self):
-        if isinstance(self._payload, Exception):
-            raise self._payload
-        return self._payload
+    def queue_issue_html(self, html, *, outcome=SUCCESS, captured=()):
+        self.issue_results.append(
+            OfficialBrowserResult(
+                outcome=outcome,
+                canonical_url="https://pubs.aip.org/aip/jcp/issue/160/4",
+                final_url="https://pubs.aip.org/aip/jcp/issue/160/4",
+                status_code=200 if outcome == SUCCESS else 403,
+                html=html,
+                captured=tuple(captured),
+            )
+        )
+
+    def queue_response(self, *, status=200, body=b"{}", media_type="application/json"):
+        self.abstract_results.append(
+            CapturedResponse(
+                url=aip_fetch.aip_abstract_url("jcp"),
+                status_code=status,
+                media_type=media_type,
+                body=body,
+            )
+        )
+
+    def queue_json(self, payload, *, status=200):
+        self.queue_response(status=status, body=json.dumps(payload).encode())
+
+    def fetch_issue(self, request):
+        self.fetch_calls.append(request)
+        return self.issue_results.pop(0)
+
+    def request_same_origin(self, url, method, form, min_interval):
+        self.request_calls.append(
+            {
+                "url": url,
+                "method": method,
+                "form": form,
+                "min_interval": min_interval,
+                "same_origin": url.startswith("https://pubs.aip.org/"),
+            }
+        )
+        return self.abstract_results.pop(0)
 
 
-def test_aip_abstract_success_uses_journal_scoped_endpoint(monkeypatch):
-    from papertrack import aip_fetch
+@pytest.fixture
+def snapshot_store(tmp_path):
+    return OfficialSnapshotStore(tmp_path / "snapshots")
 
-    seen = []
+
+@pytest.fixture
+def runtime(snapshot_store):
+    return Runtime(snapshot_store)
+
+
+@pytest.fixture(autouse=True)
+def forbid_legacy_fetch(monkeypatch):
     monkeypatch.setattr(
         aip_fetch,
-        "_aip_get",
-        lambda url, **kwargs: seen.append((url, kwargs)) or Response(
-            payload={"Success": True, "Html": "<h2>Abstract</h2><p>Official text.</p>"}
+        "_fetch_issue_http",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("runtime flow must not use legacy AIP HTTP fetching")
         ),
     )
-    aip_fetch.clear_aip_caches()
 
-    result = aip_fetch._fetch_aip_abstract(
-        "3387571",
-        "https://pubs.aip.org/aip/jcp/issue/164/16",
-        "jcp",
-    )
 
-    assert result.abstract == "Official text."
+def test_aip_fetches_issue_and_abstracts_in_same_runtime(runtime):
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    runtime.queue_json({"Success": True, "Html": "<p>Official abstract.</p>"})
+
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
     assert result.outcome == SUCCESS
-    assert result.status_code == 200
-    assert result.url == "https://pubs.aip.org/aip/jcp/PlatformArticle/ArticleAbstractAjax"
-    assert seen[0][0] == result.url
-    assert seen[0][1]["params"] == {"articleId": "3387571", "layAbstract": "False"}
-
-
-def test_aip_abstract_distinguishes_empty_blocked_and_transport(monkeypatch):
-    from papertrack import aip_fetch
-
-    aip_fetch.clear_aip_caches()
-    monkeypatch.setattr(aip_fetch.time, "sleep", lambda delay: None)
-    monkeypatch.setattr(
-        aip_fetch,
-        "_aip_get",
-        lambda *args, **kwargs: Response(payload={"Success": True, "Html": ""}),
+    assert next(iter(result.entries.values())).abstract == "Official abstract."
+    assert runtime.context_count == 1
+    assert all(call["same_origin"] for call in runtime.request_calls)
+    assert runtime.request_calls == [
+        {
+            "url": "https://pubs.aip.org/Handlers/ArticleAbstractHandler.ashx",
+            "method": "POST",
+            "form": {"articleId": "12345", "layAbstract": "False"},
+            "min_interval": 10,
+            "same_origin": True,
+        }
+    ]
+    request = runtime.fetch_calls[0]
+    assert request.required_selector == ".al-article-items"
+    assert any(
+        pattern.search("https://pubs.aip.org/Handlers/ArticleAbstractHandler.ashx")
+        for pattern in request.capture_url_patterns
     )
-    empty = aip_fetch._fetch_aip_abstract("empty", "https://pubs.aip.org/aip/jcp/issue/1/1", "jcp")
-    assert empty.outcome == "official_response_empty"
-    assert empty.status_code == 200
 
-    monkeypatch.setattr(
-        aip_fetch,
-        "_aip_get",
-        lambda *args, **kwargs: Response(403, "Just a moment"),
+
+@pytest.mark.parametrize(
+    ("status", "body", "outcome"),
+    [
+        (403, b"forbidden", BLOCKED),
+        (200, b"not-json", FETCH_FAILED),
+        (200, b'{"Success": false, "Html": ""}', "official_response_empty"),
+    ],
+)
+def test_aip_abstract_failures_remain_distinguishable(
+    runtime, status, body, outcome
+):
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    runtime.queue_response(status=status, body=body)
+
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert result.outcome == SUCCESS
+    assert result.entries["10.1063/example"].abstract == ""
+    assert result.metadata["missing_fields"] == [
+        {"doi": "10.1063/example", "field": "abstract", "outcome": outcome}
+    ]
+
+
+def test_aip_snapshot_reload_preserves_blocked_abstract_outcome(
+    runtime, snapshot_store
+):
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    runtime.queue_response(status=403, body=b"forbidden", media_type="text/plain")
+    live = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+    assert live.metadata["missing_fields"][0]["outcome"] == BLOCKED
+
+    cached_runtime = Runtime(snapshot_store)
+    cached = aip_fetch.query_aip_issue_result(
+        "jcp", "160", "4", "JCP", cached_runtime
     )
-    blocked = aip_fetch._fetch_aip_abstract("blocked", "https://pubs.aip.org/aip/jcp/issue/1/1", "jcp")
-    assert blocked.outcome == BLOCKED
-    assert blocked.status_code == 403
 
-    monkeypatch.setattr(
-        aip_fetch,
-        "_aip_get",
-        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("offline")),
-    )
-    failed = aip_fetch._fetch_aip_abstract("failed", "https://pubs.aip.org/aip/jcp/issue/1/1", "jcp")
-    assert failed.outcome == FETCH_FAILED
-    assert "offline" in failed.message
+    assert cached.metadata["missing_fields"][0]["outcome"] == BLOCKED
+    assert cached_runtime.fetch_calls == []
 
 
-def test_aip_duplicate_article_id_uses_one_ajax_request(monkeypatch):
-    from papertrack import aip_fetch
-
-    aip_fetch.clear_aip_caches()
-    html = _issue_html(
-        _card("10.1063/one", "same-id") + _card("10.1063/two", "same-id")
-    )
-    monkeypatch.setattr(
-        aip_fetch,
-        "_fetch_issue_http",
-        lambda *args, **kwargs: HttpFetchResult(html=html, status_code=200),
-    )
-    calls = []
-
-    def fake_abstract(article_id, referer_url, journal_slug):
-        calls.append((article_id, referer_url, journal_slug))
-        return aip_fetch.AipAbstractResult(
-            abstract="Shared official abstract.",
-            outcome=SUCCESS,
-            status_code=200,
-            url=aip_fetch.aip_abstract_url(journal_slug),
-            article_id=article_id,
+def test_aip_absent_official_abstract_control_is_distinguishable(runtime):
+    runtime.queue_issue_html(
+        AIP_ISSUE_FIXTURE.replace(
+            '<a class="js-show-abstract" data-articleid="12345">Abstract</a>', ""
         )
+    )
 
-    monkeypatch.setattr(aip_fetch, "_fetch_aip_abstract", fake_abstract)
-    result = aip_fetch.query_aip_issue_result("jcp", "164", "16", "JCP")
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
 
-    assert len(result.entries) == 2
-    assert calls == [
+    assert result.outcome == SUCCESS
+    assert result.metadata["missing_fields"] == [
+        {
+            "doi": "10.1063/example",
+            "field": "abstract",
+            "outcome": "official_control_absent",
+        }
+    ]
+    assert runtime.request_calls == []
+
+
+def test_aip_live_success_snapshots_membership_and_abstract(runtime, snapshot_store):
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    runtime.queue_json({"Success": True, "Html": "<p>Official abstract.</p>"})
+
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    stored = snapshot_store.load(SnapshotKey("aip", "jcp", "160", "4"))
+    assert result.outcome == SUCCESS
+    assert stored is not None
+    assert stored.validation.membership_dois == ("10.1063/example",)
+    assert set(stored.attachment_paths) == {"abstract-12345.json"}
+    assert result.metadata["official_transport"] == "live"
+    assert runtime.stats.live_success == 1
+
+
+def test_aip_reuses_captured_official_abstract_response(runtime, snapshot_store):
+    captured = CapturedResponse(
+        url=(
+            "https://pubs.aip.org/Handlers/ArticleAbstractHandler.ashx"
+            "?articleId=12345"
+        ),
+        status_code=200,
+        media_type="application/json",
+        body=b'{"Success": true, "Html": "<p>Captured abstract.</p>"}',
+    )
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE, captured=(captured,))
+
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert result.entries["10.1063/example"].abstract == "Captured abstract."
+    assert runtime.request_calls == []
+    stored = snapshot_store.load(SnapshotKey("aip", "jcp", "160", "4"))
+    assert set(stored.attachment_paths) == {"abstract-12345.json"}
+
+
+def test_aip_abstract_pacing_never_drops_below_ten_seconds(monkeypatch, runtime):
+    monkeypatch.setattr(aip_fetch, "AIP_ABSTRACT_INTERVAL", 2)
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    runtime.queue_json({"Success": True, "Html": "<p>Official abstract.</p>"})
+
+    aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert runtime.request_calls[0]["min_interval"] == 10
+
+
+def test_aip_reloads_snapshot_without_network(runtime, snapshot_store):
+    snapshot_store.commit(
+        SnapshotKey("aip", "jcp", "160", "4"),
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "text/html",
+        AIP_ISSUE_FIXTURE.encode(),
+        SnapshotValidation(
+            selector_counts={".al-article-items": 1},
+            membership_dois=("10.1063/example",),
+            parser_version="aip-issue-v1",
+        ),
         (
-            "same-id",
-            "https://pubs.aip.org/aip/jcp/issue/164/16",
-            "jcp",
-        )
-    ]
-    assert all(entry.abstract == "Shared official abstract." for entry in result.entries.values())
-
-
-def test_aip_challenge_uses_one_browser_bundle_and_no_article_page(monkeypatch):
-    from papertrack import aip_fetch
-
-    aip_fetch.clear_aip_caches()
-    html = _issue_html(_card("10.1063/browser", "browser-id"))
-    issue_calls = []
-    browser_calls = []
-    monkeypatch.setattr(
-        aip_fetch,
-        "_fetch_issue_http",
-        lambda url: issue_calls.append(url) or HttpFetchResult(
-            html="Just a moment",
-            outcome=BLOCKED,
-            status_code=403,
-        ),
-    )
-    monkeypatch.setattr(
-        aip_fetch,
-        "_fetch_aip_browser_bundle",
-        lambda url, slug: browser_calls.append((url, slug)) or aip_fetch.AipBrowserBundle(
-            html=html,
-            abstracts={
-                "browser-id": aip_fetch.AipAbstractResult(
-                    abstract="Browser official abstract.",
-                    outcome=SUCCESS,
-                    status_code=200,
-                    url=aip_fetch.aip_abstract_url("jcp"),
-                    article_id="browser-id",
-                )
-            },
+            aip_fetch.SnapshotAttachment(
+                "abstract-12345.json",
+                "application/json",
+                b'{"Success": true, "Html": "<p>Cached abstract.</p>"}',
+            ),
         ),
     )
 
-    result = aip_fetch.query_aip_issue_result("jcp", "164", "16", "JCP")
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
 
-    assert result.entries["10.1063/browser"].abstract == "Browser official abstract."
-    assert issue_calls == ["https://pubs.aip.org/aip/jcp/issue/164/16"]
-    assert browser_calls == [
-        ("https://pubs.aip.org/aip/jcp/issue/164/16", "jcp")
-    ]
+    assert result.outcome == SUCCESS
+    assert result.entries["10.1063/example"].abstract == "Cached abstract."
+    assert result.metadata["official_transport"] == "snapshot"
+    assert runtime.fetch_calls == []
+    assert runtime.request_calls == []
+    assert runtime.stats.snapshot_hit == 1
 
 
-def test_aip_browser_bundle_runs_once_under_xvfb(monkeypatch):
-    from papertrack import aip_fetch
-
-    captured = {}
-    wait_roles = []
-
-    class Completed:
-        returncode = 0
-        stderr = ""
-        stdout = '{"html":"<div class=\\"al-article-items\\"></div>","abstracts":{}}'
-
-    def fake_run(command, **kwargs):
-        captured["command"] = command
-        captured["kwargs"] = kwargs
-        return Completed()
-
-    monkeypatch.setattr(aip_fetch.subprocess, "run", fake_run)
-    monkeypatch.setattr(
-        aip_fetch,
-        "_wait_for_aip_interval",
-        lambda role: wait_roles.append(role),
+def test_aip_snapshot_missing_expected_attachment_refetches(runtime, snapshot_store):
+    snapshot_store.commit(
+        SnapshotKey("aip", "jcp", "160", "4"),
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "text/html",
+        AIP_ISSUE_FIXTURE.encode(),
+        SnapshotValidation(
+            selector_counts={".al-article-items": 1},
+            membership_dois=("10.1063/example",),
+            parser_version="aip-issue-v1",
+        ),
     )
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    runtime.queue_json({"Success": True, "Html": "<p>Fresh abstract.</p>"})
 
-    bundle = aip_fetch._fetch_aip_browser_bundle(
-        "https://pubs.aip.org/aip/jcp/issue/164/16",
-        "jcp",
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert result.entries["10.1063/example"].abstract == "Fresh abstract."
+    assert len(runtime.fetch_calls) == 1
+
+
+def test_aip_corrupt_attachment_is_rejected_then_refetched(
+    monkeypatch, runtime, snapshot_store
+):
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    runtime.queue_json({"Success": True, "Html": "<p>Fresh abstract.</p>"})
+    stored = snapshot_store.commit(
+        SnapshotKey("aip", "jcp", "160", "4"),
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "text/html",
+        AIP_ISSUE_FIXTURE.encode(),
+        SnapshotValidation(
+            selector_counts={".al-article-items": 1},
+            membership_dois=("10.1063/example",),
+            parser_version="aip-issue-v1",
+        ),
+        (
+            aip_fetch.SnapshotAttachment(
+                "abstract-12345.json", "application/json", b"{}"
+            ),
+        ),
     )
-
-    assert bundle.html.startswith('<div class="al-article-items"')
-    assert captured["command"][:2] == ["xvfb-run", "-a"]
-    assert captured["command"][-4:] == [
-        "papertrack.aip_browser",
-        "https://pubs.aip.org/aip/jcp/issue/164/16",
-        "jcp",
-        "10.0",
-    ]
-    timeout = captured["kwargs"]["timeout"]
-    assert timeout == aip_fetch._aip_browser_timeout(
-        aip_fetch.AIP_BROWSER_MAX_ABSTRACTS,
-        aip_fetch.AIP_ABSTRACT_INTERVAL,
-    )
-    minimum_pacing_duration = (
-        aip_fetch.AIP_BROWSER_MAX_ABSTRACTS - 1
-    ) * aip_fetch.AIP_ABSTRACT_INTERVAL
-    assert timeout > minimum_pacing_duration
-    assert wait_roles == ["issue"]
-
-
-def test_aip_browser_completion_paces_next_direct_issue_request(monkeypatch):
-    from papertrack import aip_fetch
-
-    clock = [100.0]
-    sleeps = []
-
-    class Completed:
-        returncode = 0
-        stderr = ""
-        stdout = '{"html":"<div class=\\"al-article-items\\"></div>","abstracts":{}}'
-
-    class Session:
-        def get(self, url, **kwargs):
-            return Response()
-
-    def fake_run(command, **kwargs):
-        clock[0] += 5
-        return Completed()
-
-    def fake_sleep(delay):
-        sleeps.append(delay)
-        clock[0] += delay
-
-    monkeypatch.setattr(aip_fetch.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(aip_fetch.time, "sleep", fake_sleep)
-    monkeypatch.setattr(aip_fetch.subprocess, "run", fake_run)
-    monkeypatch.setattr(aip_fetch, "_get_session", lambda: Session())
-    aip_fetch.clear_aip_caches()
-
-    aip_fetch._fetch_aip_browser_bundle("https://example.test/issue", "jcp")
-    clock[0] += 1
-    aip_fetch._aip_get("https://example.test/direct-issue", role="issue")
-
-    assert sleeps == [29.0]
-
-
-def test_aip_browser_timeout_paces_next_direct_abstract_request(monkeypatch):
-    from papertrack import aip_fetch
-
-    clock = [200.0]
-    sleeps = []
-
-    class Session:
-        def get(self, url, **kwargs):
-            return Response()
-
-    def fake_run(command, **kwargs):
-        clock[0] += 5
-        raise aip_fetch.subprocess.TimeoutExpired(command, kwargs["timeout"])
-
-    def fake_sleep(delay):
-        sleeps.append(delay)
-        clock[0] += delay
-
-    monkeypatch.setattr(aip_fetch.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(aip_fetch.time, "sleep", fake_sleep)
-    monkeypatch.setattr(aip_fetch.subprocess, "run", fake_run)
-    monkeypatch.setattr(aip_fetch, "_get_session", lambda: Session())
-    aip_fetch.clear_aip_caches()
-
-    bundle = aip_fetch._fetch_aip_browser_bundle(
-        "https://example.test/issue",
-        "jcp",
-    )
-    clock[0] += 1
-    aip_fetch._aip_get("https://example.test/direct-abstract", role="abstract")
-
-    assert bundle.outcome == FETCH_FAILED
-    assert sleeps == [9.0]
-
-
-def test_aip_browser_timeout_rejects_non_finite_result_before_launch(monkeypatch):
-    from papertrack import aip_fetch
-
-    subprocess_calls = []
-    monkeypatch.setattr(aip_fetch, "AIP_ABSTRACT_INTERVAL", 1e308)
-    monkeypatch.setattr(
-        aip_fetch.subprocess,
-        "run",
-        lambda *args, **kwargs: subprocess_calls.append((args, kwargs)),
-    )
-
-    with pytest.raises(RuntimeError, match="browser timeout must be finite"):
-        aip_fetch._fetch_aip_browser_bundle(
-            "https://example.test/issue",
-            "jcp",
-        )
-    assert subprocess_calls == []
-
-
-def test_aip_request_clocks_are_role_aware(monkeypatch):
-    from papertrack import aip_fetch
-
-    clock = [100.0]
-    sleeps = []
-    starts = []
-
-    class Session:
-        def get(self, url, **kwargs):
-            starts.append((url, clock[0]))
-            return Response()
-
-    def fake_sleep(delay):
-        sleeps.append(delay)
-        clock[0] += delay
-
-    monkeypatch.setattr(aip_fetch.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(aip_fetch.time, "sleep", fake_sleep)
-    monkeypatch.setattr(aip_fetch, "_get_session", lambda: Session())
-    aip_fetch.clear_aip_caches()
-
-    aip_fetch._aip_get("issue-1", role="issue")
-    clock[0] += 1
-    aip_fetch._aip_get("issue-2", role="issue")
-
-    aip_fetch._aip_get("abstract-1", role="abstract")
-    clock[0] += 1
-    aip_fetch._aip_get("abstract-2", role="abstract")
-
-    assert sleeps == [29.0, 9.0]
-    assert starts[1][1] - starts[0][1] >= 30
-    assert starts[3][1] - starts[2][1] >= 10
-
-
-def test_aip_browser_abstract_wait_uses_request_start_clock(monkeypatch):
-    from papertrack import aip_browser
-
-    clock = [200.0]
-    sleeps = []
-
-    def fake_sleep(delay):
-        sleeps.append(delay)
-        clock[0] += delay
-
-    monkeypatch.setattr(aip_browser.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(aip_browser.time, "sleep", fake_sleep)
-
-    first_start = aip_browser._wait_for_abstract_interval(None, 5)
-    clock[0] += 2
-    second_start = aip_browser._wait_for_abstract_interval(first_start, 5)
-
-    assert sleeps == [8.0]
-    assert second_start - first_start >= 10
-
-
-def test_aip_browser_abstract_interval_enforces_floor():
-    from papertrack import aip_browser
-
-    assert aip_browser._browser_abstract_interval("5") == 10
-    assert aip_browser._browser_abstract_interval("15") == 15
-
-
-@pytest.mark.parametrize("raw", ["-1", "nan", "inf", "-inf", "fast"])
-def test_aip_browser_abstract_interval_rejects_invalid_values(raw):
-    from papertrack import aip_browser
-
-    with pytest.raises(RuntimeError, match="abstract interval"):
-        aip_browser._browser_abstract_interval(raw)
-
-
-def test_aip_browser_rejects_abstract_count_above_timeout_bound():
-    from papertrack import aip_browser
-    from papertrack.aip_fetch import AIP_BROWSER_MAX_ABSTRACTS
-
-    assert aip_browser._validate_abstract_count(AIP_BROWSER_MAX_ABSTRACTS) is None
-    with pytest.raises(RuntimeError, match="exceeds browser abstract request limit"):
-        aip_browser._validate_abstract_count(AIP_BROWSER_MAX_ABSTRACTS + 1)
-
-
-def test_aip_browser_allows_challenge_query_but_blocks_article_navigation():
-    from papertrack.aip_browser import _browser_request_allowed
-
-    issue_url = "https://pubs.aip.org/aip/jcp/issue/164/16"
-    endpoint = "https://pubs.aip.org/aip/jcp/PlatformArticle/ArticleAbstractAjax"
-
-    assert _browser_request_allowed(
-        issue_url + "?__cf_chl_tk=token",
-        "document",
-        issue_url,
-        endpoint,
-    )
-    assert not _browser_request_allowed(
-        "https://pubs.aip.org/aip/jcp/article/164/16/164101/123/Title",
-        "document",
-        issue_url,
-        endpoint,
-    )
-    assert _browser_request_allowed(endpoint + "?articleId=123", "xhr", issue_url, endpoint)
-    assert _browser_request_allowed(
-        "https://pubs.aip.org/cdn-cgi/challenge-platform/script",
-        "fetch",
-        issue_url,
-        endpoint,
-    )
-    assert not _browser_request_allowed(
-        "https://pubs.aip.org/aip/jcp/other-api",
-        "fetch",
-        issue_url,
-        endpoint,
-    )
-
-
-def test_aip_records_no_official_abstract_control(monkeypatch):
-    from papertrack import aip_fetch
-
-    aip_fetch.clear_aip_caches()
-    html = _issue_html(_card("10.1063/no-control"))
+    corrupted = stored.attachment_paths["abstract-12345.json"]
+    corrupted.write_bytes(b"corrupt")
     events = []
-    monkeypatch.setattr(
-        aip_fetch,
-        "_fetch_issue_http",
-        lambda *args, **kwargs: HttpFetchResult(html=html, status_code=200),
-    )
     monkeypatch.setattr(
         aip_fetch,
         "record_fetch_attempt",
         lambda event, html=None: events.append(event),
     )
 
-    result = aip_fetch.query_aip_issue_result("jcp", "164", "16", "JCP")
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
 
-    assert result.entries["10.1063/no-control"].abstract == ""
-    event = next(event for event in events if event.get("field") == "abstract")
-    assert event["doi"] == "10.1063/no-control"
-    assert event["article_id"] == ""
-    assert event["url"] == "https://pubs.aip.org/aip/jcp/issue/164/16"
-    assert event["outcome"] == "official_control_absent"
+    assert result.entries["10.1063/example"].abstract == "Fresh abstract."
+    assert len(runtime.fetch_calls) == 1
+    rejection = [event for event in events if event["stage"] == "snapshot_validation"]
+    assert rejection[0]["rejection_reason"] == "attachment_hash_failure"
+    assert rejection[0]["cache_snapshot_path"] == str(corrupted)
+
+
+def test_aip_failed_live_refetch_does_not_replace_validated_snapshot(runtime, snapshot_store):
+    original = snapshot_store.commit(
+        SnapshotKey("aip", "jcp", "160", "4"),
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "text/html",
+        AIP_ISSUE_FIXTURE.encode(),
+        SnapshotValidation(
+            selector_counts={".al-article-items": 1},
+            membership_dois=("10.1063/example",),
+            parser_version="aip-issue-v1",
+        ),
+    )
+    original.body_path.write_bytes(b"corrupt")
+    manifest = snapshot_store.root / "aip/jcp/160/4/manifest.json"
+    before = manifest.read_bytes()
+    runtime.queue_issue_html("", outcome=BLOCKED)
+
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert result.outcome == BLOCKED
+    assert manifest.read_bytes() == before
+
+
+def test_aip_rejects_unsafe_article_id_without_abstract_request(runtime):
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE.replace("12345", "../bad"))
+
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert result.outcome != SUCCESS
+    assert runtime.request_calls == []
+
+
+def test_aip_rejects_invalid_official_membership_before_abstract_requests(runtime):
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE.replace("10.1063/example", "10.9999/wrong"))
+
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert result.outcome != SUCCESS
+    assert runtime.request_calls == []
