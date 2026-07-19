@@ -129,9 +129,7 @@ def test_aps_snapshot_rebuild_preserves_official_doi_case(
 ):
     seed_aps_snapshot(
         snapshot_store,
-        final_url=(
-            "https://journals.aps.org/prl/issues/127/27?view=expanded"
-        ),
+        final_url="https://journals.aps.org/prl/issues/127/27",
     )
 
     result = aps_fetch.query_aps_issue_result(
@@ -163,6 +161,48 @@ def test_aps_force_live_bypasses_but_preserves_valid_snapshot(
     assert stored.body_path.read_bytes() == before
 
 
+def test_aps_force_live_rejects_membership_regression_without_replacing_manifest(
+    runtime, snapshot_store
+):
+    second = APS_FIXTURE.replace(
+        b"10.1103/PhysRevLett.127.270401",
+        b"10.1103/PhysRevLett.127.270402",
+    ).replace(b"Quantum Vacuum Sagnac Effect", b"Second article")
+    key = SnapshotKey("aps", "prl", "127", "27")
+    second_card = second.split(b"<body>", 1)[1].split(b"</body>", 1)[0]
+    snapshot_store.commit(
+        key,
+        "https://journals.aps.org/prl/issues/127/27",
+        "https://journals.aps.org/prl/issues/127/27",
+        "text/html",
+        APS_FIXTURE.replace(b"</body>", second_card + b"</body>"),
+        SnapshotValidation(
+            selector_counts={".browse-result-card.issue": 2},
+            membership_dois=(
+                "10.1103/PhysRevLett.127.270401",
+                "10.1103/PhysRevLett.127.270402",
+            ),
+            parser_version="aps-issue-v1",
+        ),
+    )
+    manifest = snapshot_store.root / "aps/prl/127/27/manifest.json"
+    before = manifest.read_bytes()
+    runtime.queue_html(APS_FIXTURE)
+
+    result = aps_fetch.query_aps_issue_result(
+        "prl", "127", "27", "PRL", runtime, force_live=True
+    )
+
+    assert result.outcome == FETCH_FAILED
+    assert "membership regressed" in result.message
+    assert manifest.read_bytes() == before
+    assert snapshot_store.load(key).validation.membership_dois == (
+        "10.1103/PhysRevLett.127.270401",
+        "10.1103/PhysRevLett.127.270402",
+    )
+    assert runtime.stats.live_success == 0
+
+
 def test_aps_reparses_snapshot_and_rejects_changed_membership(
     monkeypatch, runtime, snapshot_store
 ):
@@ -190,6 +230,7 @@ def test_aps_reparses_snapshot_and_rejects_changed_membership(
     assert result.metadata["official_transport"] == "live"
     assert len(runtime.fetch_calls) == 1
     assert runtime.stats.snapshot_hit == 0
+    assert runtime.stats.cache_rejected == 1
     rejection = [
         event for event in events
         if event["stage"] == "snapshot_validation"
@@ -306,6 +347,7 @@ def test_aps_store_corruption_emits_cache_rejection_then_live_retry(
     assert result.metadata["official_transport"] == "live"
     assert len(runtime.fetch_calls) == 1
     assert runtime.stats.snapshot_hit == 0
+    assert runtime.stats.cache_rejected == 1
     rejection = [
         event for event in events
         if event["stage"] == "snapshot_validation"
@@ -402,6 +444,7 @@ def test_aps_records_snapshot_parse_rejection(monkeypatch, snapshot_store):
 
     assert result.outcome == SUCCESS
     assert runtime.stats.snapshot_hit == 0
+    assert runtime.stats.cache_rejected == 1
     rejection = [
         event for event in events
         if event["stage"] == "snapshot_validation"

@@ -206,6 +206,7 @@ def test_worker_summary_reports_rates_and_structured_runtime_counts(
             blocked=0,
             fetch_failed=1,
             circuit_skipped=0,
+            cache_rejected=3,
         ),
     )
     monkeypatch.setattr(worker, "run_provider_rebuild", lambda *args, **kwargs: summary)
@@ -227,6 +228,7 @@ def test_worker_summary_reports_rates_and_structured_runtime_counts(
     assert "blocked=0" in output
     assert "fetch_failed=1" in output
     assert "circuit_skipped=0" in output
+    assert "cache_rejected=3" in output
     assert "terminal_accounted=2" in output
     assert "navigation_failure=1" in output
     assert "parse_validation_failure=0" in output

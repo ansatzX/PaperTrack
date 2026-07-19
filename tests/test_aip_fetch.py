@@ -355,6 +355,7 @@ def test_aip_snapshot_missing_expected_attachment_refetches(runtime, snapshot_st
 
     assert result.entries["10.1063/example"].abstract == "Fresh abstract."
     assert len(runtime.fetch_calls) == 1
+    assert runtime.stats.cache_rejected == 1
 
 
 def _attachment_envelope(
@@ -514,6 +515,52 @@ def test_aip_failed_live_refetch_does_not_replace_validated_snapshot(runtime, sn
 
     assert result.outcome == BLOCKED
     assert manifest.read_bytes() == before
+
+
+def test_aip_force_live_rejects_disappearing_satisfied_abstract_control(
+    runtime, snapshot_store
+):
+    key = SnapshotKey("aip", "jcp", "160", "4")
+    snapshot_store.commit(
+        key,
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "text/html",
+        AIP_ISSUE_FIXTURE.encode(),
+        SnapshotValidation(
+            selector_counts={".al-article-items": 1},
+            membership_dois=("10.1063/example",),
+            parser_version="aip-issue-v1",
+        ),
+        (
+            aip_fetch.SnapshotAttachment(
+                "abstract-12345.json", "application/json", _attachment_envelope()
+            ),
+        ),
+    )
+    manifest = snapshot_store.root / "aip/jcp/160/4/manifest.json"
+    before = manifest.read_bytes()
+    live_without_control = AIP_ISSUE_FIXTURE.replace(
+        '<a class="js-show-abstract" data-articleid="12345">Abstract</a>', ""
+    )
+    runtime.queue_issue_html(live_without_control)
+
+    result = aip_fetch.query_aip_issue_result(
+        "jcp", "160", "4", "JCP", runtime, force_live=True
+    )
+
+    assert result.outcome == FETCH_FAILED
+    assert "abstract controls regressed" in result.message
+    assert runtime.request_calls == []
+    assert manifest.read_bytes() == before
+    reloaded = snapshot_store.load(key)
+    assert set(reloaded.attachment_paths) == {"abstract-12345.json"}
+    assert runtime.stats.live_success == 0
+    cached = aip_fetch.query_aip_issue_result(
+        "jcp", "160", "4", "JCP", Runtime(snapshot_store)
+    )
+    assert cached.outcome == SUCCESS
+    assert cached.entries["10.1063/example"].abstract == "Cached."
 
 
 def test_aip_rejects_unsafe_article_id_without_abstract_request(monkeypatch, runtime):

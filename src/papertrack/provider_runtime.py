@@ -73,6 +73,8 @@ class ProviderRunStats:
     blocked: int = 0
     fetch_failed: int = 0
     circuit_skipped: int = 0
+    # Observational only: rejected cache material may still be repaired live.
+    cache_rejected: int = 0
     candidate_attempted: int = 0
     terminal_resolved: int = 0
     unresolved_metadata: int = 0
@@ -267,7 +269,7 @@ class ProviderRuntime:
                     "issue navigation changed the canonical issue location",
                     attempt_count,
                 )
-                self._record_result(result)
+                self._record_result(result, diagnostic_html=html)
                 return result
 
             if self._is_challenge(request, html):
@@ -291,7 +293,7 @@ class ProviderRuntime:
                         "issue navigation changed the canonical issue location",
                         attempt_count,
                     )
-                    self._record_result(result)
+                    self._record_result(result, diagnostic_html=html)
                     return result
 
             if self._is_challenge(request, html):
@@ -343,7 +345,7 @@ class ProviderRuntime:
                 attempt_count,
             )
 
-        self._record_result(result)
+        self._record_result(result, diagnostic_html=html)
         return result
 
     def request_same_origin(
@@ -442,8 +444,8 @@ class ProviderRuntime:
             canonical_url=request.canonical_url,
             final_url=final_url,
             status_code=status_code,
-            html=html,
-            captured=tuple(self._captured_responses),
+            html="",
+            captured=(),
             message="publisher challenge remained after one recovery reload",
             attempt_count=attempt_count,
         )
@@ -458,8 +460,8 @@ class ProviderRuntime:
             canonical_url=request.canonical_url,
             final_url=final_url,
             status_code=status_code,
-            html=html,
-            captured=tuple(self._captured_responses),
+            html="",
+            captured=(),
             message=message or "official issue browser fetch failed",
             attempt_count=attempt_count,
         )
@@ -496,15 +498,17 @@ class ProviderRuntime:
 
     def _validate_issue_url(self, url: str) -> None:
         parsed = urlsplit(url)
+        exact_url = f"https://{parsed.hostname}{parsed.path}"
         valid = (
             parsed.scheme == "https"
             and parsed.hostname in OFFICIAL_HOSTS[self.provider]
-            and parsed.port in {None, 443}
+            and parsed.port is None
             and parsed.username is None
             and parsed.password is None
             and not parsed.fragment
             and not parsed.query
             and bool(_ISSUE_PATHS[self.provider].fullmatch(parsed.path))
+            and url == exact_url
         )
         if not valid:
             raise ValueError(f"{self.provider} requires an official issue URL")
@@ -513,27 +517,7 @@ class ProviderRuntime:
         self, final_url: str, canonical_url: str
     ) -> bool:
         """Accept only the canonical issue location, without URL decorations."""
-        try:
-            final = urlsplit(final_url)
-            canonical = urlsplit(canonical_url)
-            return (
-                final.scheme == canonical.scheme == "https"
-                and final.username is None
-                and final.password is None
-                and canonical.username is None
-                and canonical.password is None
-                and final.hostname == canonical.hostname
-                and final.hostname in OFFICIAL_HOSTS[self.provider]
-                and final.port in {None, 443}
-                and canonical.port in {None, 443}
-                and final.path == canonical.path
-                and not final.query
-                and not final.fragment
-                and not canonical.query
-                and not canonical.fragment
-            )
-        except ValueError:
-            return False
+        return final_url == canonical_url
 
     def _acquire_profile(self) -> None:
         self.profile_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -552,7 +536,9 @@ class ProviderRuntime:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
-    def _record_result(self, result: OfficialBrowserResult) -> None:
+    def _record_result(
+        self, result: OfficialBrowserResult, *, diagnostic_html: str = ""
+    ) -> None:
         journal, volume, issue = _issue_identity(
             self.provider, result.canonical_url
         )
@@ -580,7 +566,7 @@ class ProviderRuntime:
                 "message": result.message,
                 "captured_response_evidence": self._response_evidence,
             },
-            html=result.html or None,
+            html=diagnostic_html or result.html or None,
         )
 
     @staticmethod

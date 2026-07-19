@@ -76,21 +76,31 @@ def html_snapshot_provenance_rejection(
     snapshot: OfficialSnapshot, requested_url: str
 ) -> tuple[str, str] | None:
     """Return why an HTML issue snapshot cannot represent the requested URL."""
+    try:
+        requested = urlsplit(requested_url)
+        exact_requested = f"https://{requested.hostname}{requested.path}"
+        requested_is_canonical = (
+            requested.scheme == "https"
+            and requested.hostname is not None
+            and requested.port is None
+            and requested.username is None
+            and requested.password is None
+            and not requested.query
+            and not requested.fragment
+            and requested_url == exact_requested
+        )
+    except ValueError:
+        requested_is_canonical = False
+    if not requested_is_canonical:
+        return "requested_url", "requested URL is not an exact canonical HTTPS URL"
+
     if snapshot.canonical_url != requested_url:
         return "canonical_url", "snapshot canonical URL does not match request"
 
-    requested = urlsplit(requested_url)
-    final = urlsplit(snapshot.final_url)
-    if (
-        requested.scheme != "https"
-        or final.scheme != requested.scheme
-        or final.netloc != requested.netloc
-        or final.path != requested.path
-        or bool(final.fragment)
-    ):
+    if snapshot.final_url != requested_url:
         return (
             "final_url",
-            "snapshot final URL must remain on the requested HTTPS host and path",
+            "snapshot final URL must exactly equal the canonical issue URL",
         )
 
     media_type = snapshot.media_type.partition(";")[0].strip().lower()

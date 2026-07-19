@@ -24,6 +24,7 @@ from .http_fetch import (
     fetch_html_resilient,
     is_blocked_response,
 )
+from .identity import normalize_doi
 from .journal_entry import JournalEntry
 from .official_snapshot import (
     SnapshotKey,
@@ -308,6 +309,11 @@ def _record_store_load_rejection(
     )
 
 
+def _observe_cache_rejection(provider_runtime) -> None:
+    if hasattr(provider_runtime, "stats"):
+        provider_runtime.stats.cache_rejected += 1
+
+
 def _result_from_html(html: str, journal_name: str, *, url: str,
                       journal_code: str, volume: str, issue: str,
                       transport: str, snapshot=None):
@@ -386,15 +392,14 @@ def _query_acs_with_runtime(journal_code: str, volume: str, issue: str,
         journal_code=journal_code, volume=volume, issue=issue
     )
     key = SnapshotKey("acs", journal_code, volume, issue)
-    load_result = None
-    snapshot = None
-    if not force_live:
-        load_result = provider_runtime.snapshot_store.load_result(key)
-        snapshot = load_result.snapshot
-    if load_result is not None and load_result.status == "rejected":
+    baseline_membership = None
+    load_result = provider_runtime.snapshot_store.load_result(key)
+    snapshot = load_result.snapshot
+    if load_result.status == "rejected":
         _record_store_load_rejection(
             journal_code, volume, issue, url, load_result
         )
+        _observe_cache_rejection(provider_runtime)
     if snapshot is not None:
         provenance_rejection = html_snapshot_provenance_rejection(
             snapshot, url
@@ -404,6 +409,7 @@ def _query_acs_with_runtime(journal_code: str, volume: str, issue: str,
             _record_snapshot_rejection(
                 journal_code, volume, issue, url, snapshot, reason, message
             )
+            _observe_cache_rejection(provider_runtime)
         else:
             try:
                 html = snapshot.body_path.read_text(encoding="utf-8")
@@ -417,6 +423,7 @@ def _query_acs_with_runtime(journal_code: str, volume: str, issue: str,
                     "body_read",
                     str(exc),
                 )
+                _observe_cache_rejection(provider_runtime)
             else:
                 cached, _, membership_dois = _result_from_html(
                     html, journal_name, url=url, journal_code=journal_code,
@@ -434,6 +441,7 @@ def _query_acs_with_runtime(journal_code: str, volume: str, issue: str,
                         cached.message or "snapshot failed current parser",
                         html,
                     )
+                    _observe_cache_rejection(provider_runtime)
                 elif (
                     _membership_hash(membership_dois)
                     != snapshot.membership_hash
@@ -448,10 +456,15 @@ def _query_acs_with_runtime(journal_code: str, volume: str, issue: str,
                         "reparsed membership hash does not match snapshot",
                         html,
                     )
+                    _observe_cache_rejection(provider_runtime)
                 else:
-                    if hasattr(provider_runtime, "stats"):
-                        provider_runtime.stats.snapshot_hit += 1
-                    return cached
+                    baseline_membership = {
+                        normalize_doi(doi) for doi in membership_dois
+                    }
+                    if not force_live:
+                        if hasattr(provider_runtime, "stats"):
+                            provider_runtime.stats.snapshot_hit += 1
+                        return cached
 
     request = IssueRequest(
         canonical_url=ACS_ISSUE_URL.format(
@@ -484,6 +497,27 @@ def _query_acs_with_runtime(journal_code: str, volume: str, issue: str,
     )
     if result.outcome != SUCCESS:
         return result
+
+    live_membership = {normalize_doi(doi) for doi in membership_dois}
+    if (
+        baseline_membership is not None
+        and not baseline_membership.issubset(live_membership)
+    ):
+        missing = sorted(baseline_membership - live_membership)
+        record_fetch_attempt(
+            _diagnostic_context(
+                journal_code, volume, issue, url,
+                "snapshot_non_regression", FETCH_FAILED,
+                missing_membership_dois=missing,
+                message="official issue membership regressed from trusted snapshot",
+            ),
+            html=fetched.html,
+        )
+        return AdapterResult(
+            entries={}, outcome=FETCH_FAILED, provider="acs", source="journal",
+            message="ACS official issue membership regressed; retry later",
+            metadata=result.metadata,
+        )
 
     validation = SnapshotValidation(
         selector_counts=result.metadata["selector_counts"],

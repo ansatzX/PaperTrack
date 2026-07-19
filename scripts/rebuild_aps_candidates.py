@@ -105,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
         f"blocked={summary.runtime_stats.blocked} "
         f"fetch_failed={summary.runtime_stats.fetch_failed} "
         f"circuit_skipped={summary.runtime_stats.circuit_skipped}"
+        f" cache_rejected={summary.runtime_stats.cache_rejected}"
         f" terminal_accounted={summary.runtime_stats.terminal_accounted} "
         f"navigation_failure={summary.runtime_stats.navigation_failure} "
         f"parse_validation_failure={summary.runtime_stats.parse_validation_failure} "

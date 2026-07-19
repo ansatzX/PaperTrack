@@ -10,7 +10,59 @@ from papertrack.official_snapshot import (
     SnapshotAttachment,
     SnapshotKey,
     SnapshotValidation,
+    html_snapshot_provenance_rejection,
 )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("canonical_url", "https://pubs.acs.org:443/toc/jcisd8/66/12"),
+        ("final_url", "https://pubs.acs.org:443/toc/jcisd8/66/12"),
+        ("final_url", "https://pubs.acs.org/toc/jcisd8/66/12?"),
+    ],
+)
+def test_html_snapshot_provenance_requires_exact_canonical_strings(
+    tmp_path, field, value
+):
+    store = OfficialSnapshotStore(tmp_path)
+    key = SnapshotKey("acs", "jcisd8", "66", "12")
+    canonical = "https://pubs.acs.org/toc/jcisd8/66/12"
+    kwargs = {"canonical_url": canonical, "final_url": canonical}
+    kwargs[field] = value
+    snapshot = store.commit(
+        key,
+        kwargs["canonical_url"],
+        kwargs["final_url"],
+        "text/html",
+        b"<html>issue</html>",
+        SnapshotValidation(
+            selector_counts={"article": 1},
+            membership_dois=("10.1021/example",),
+            parser_version="test-v1",
+        ),
+    )
+
+    assert html_snapshot_provenance_rejection(snapshot, canonical) is not None
+
+
+def test_html_snapshot_provenance_rejects_noncanonical_requested_url(tmp_path):
+    store = OfficialSnapshotStore(tmp_path)
+    requested = "https://pubs.acs.org:443/toc/jcisd8/66/12"
+    snapshot = store.commit(
+        SnapshotKey("acs", "jcisd8", "66", "12"),
+        requested,
+        requested,
+        "text/html",
+        b"<html>issue</html>",
+        SnapshotValidation(
+            selector_counts={"article": 1},
+            membership_dois=("10.1021/example",),
+            parser_version="test-v1",
+        ),
+    )
+
+    assert html_snapshot_provenance_rejection(snapshot, requested) is not None
 
 
 def _validation(*dois: str) -> SnapshotValidation:

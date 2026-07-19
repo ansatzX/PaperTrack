@@ -308,6 +308,29 @@ def test_issue_navigation_rejects_same_origin_non_issue_redirect(tmp_path):
     assert result.message == "issue navigation changed the canonical issue location"
 
 
+@pytest.mark.parametrize(
+    "canonical_url",
+    [
+        "https://journals.aps.org:443/pra/issues/1/1",
+        "https://journals.aps.org/pra/issues/1/1?",
+    ],
+)
+def test_issue_request_requires_exact_canonical_representation(
+    tmp_path, canonical_url
+):
+    clock = FakeClock()
+    fake = FakePlaywright(clock)
+    runtime = make_runtime(tmp_path, fake, clock)
+
+    with runtime:
+        with pytest.raises(ValueError, match="official issue URL"):
+            runtime.fetch_issue(
+                IssueRequest(canonical_url, "main.issue", ("cloudflare",))
+            )
+
+    assert fake.navigation_times == []
+
+
 @pytest.mark.parametrize("status", [403, 500])
 def test_issue_navigation_rejects_http_error_with_valid_selector(tmp_path, status):
     clock = FakeClock()
@@ -334,6 +357,8 @@ def test_issue_navigation_rejects_http_error_with_valid_selector(tmp_path, statu
         "https://journals.aps.org/pra/issues/1/2",
         "https://journals.aps.org/pra/issues/1/1?view=expanded",
         "https://journals.aps.org/pra/issues/1/1#papers",
+        "https://journals.aps.org:443/pra/issues/1/1",
+        "https://journals.aps.org/pra/issues/1/1?",
     ],
 )
 def test_issue_navigation_rejects_noncanonical_final_url_before_content_exposure(
@@ -350,6 +375,60 @@ def test_issue_navigation_rejects_noncanonical_final_url_before_content_exposure
     assert result.outcome == FETCH_FAILED
     assert result.html == ""
     assert result.captured == ()
+
+
+def test_selector_failure_is_sanitized_but_diagnostic_keeps_raw_material(
+    tmp_path, monkeypatch
+):
+    clock = FakeClock()
+    fake = FakePlaywright(clock, selector_failure=True)
+    fake.navigation_responses = [
+        FakeApiResponse(
+            "https://journals.aps.org/api/issue",
+            body=b'{"papers": ["evidence"]}',
+        )
+    ]
+    runtime = make_runtime(tmp_path, fake, clock)
+    events = []
+    monkeypatch.setattr(
+        "papertrack.provider_runtime.record_fetch_attempt",
+        lambda event, html=None: events.append((event, html)),
+    )
+
+    with runtime:
+        result = runtime.fetch_issue(aps_request(0))
+
+    assert result.outcome == FETCH_FAILED
+    assert result.html == ""
+    assert result.captured == ()
+    event, diagnostic_html = events[-1]
+    assert diagnostic_html == "<main class='issue'>papers</main>"
+    assert event["captured_response_evidence"][0]["url"] == (
+        "https://journals.aps.org/api/issue"
+    )
+
+
+def test_blocked_result_is_sanitized_but_diagnostic_keeps_challenge(
+    tmp_path, monkeypatch
+):
+    clock = FakeClock()
+    fake = FakePlaywright(clock, challenge_pages=2)
+    runtime = make_runtime(tmp_path, fake, clock)
+    events = []
+    monkeypatch.setattr(
+        "papertrack.provider_runtime.record_fetch_attempt",
+        lambda event, html=None: events.append((event, html)),
+    )
+
+    with runtime:
+        result = runtime.fetch_issue(aps_request(0))
+
+    assert result.outcome == BLOCKED
+    assert result.html == ""
+    assert result.captured == ()
+    event, diagnostic_html = events[-1]
+    assert "Cloudflare challenge" in diagnostic_html
+    assert event["challenge_indicators"]
 
 
 def test_transport_success_does_not_claim_adapter_live_success(tmp_path):
@@ -449,7 +528,8 @@ def test_non_challenge_selector_failure_is_fetch_failed(tmp_path):
 
     assert result.outcome == FETCH_FAILED
     assert runtime.stats.fetch_failed == 1
-    assert result.html == "<main class='issue'>papers</main>"
+    assert result.html == ""
+    assert result.captured == ()
 
 
 def test_fetch_failure_resets_consecutive_blocks(tmp_path):

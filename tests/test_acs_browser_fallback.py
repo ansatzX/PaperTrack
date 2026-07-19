@@ -101,7 +101,7 @@ def seed_acs_snapshot(
 def test_acs_uses_valid_snapshot_without_network(runtime, snapshot_store):
     seed_acs_snapshot(
         snapshot_store,
-        final_url="https://pubs.acs.org/toc/jcisd8/66/12?view=expanded",
+        final_url="https://pubs.acs.org/toc/jcisd8/66/12",
     )
 
     result = acs_fetch.query_acs_issue_result(
@@ -131,6 +131,47 @@ def test_acs_force_live_bypasses_but_preserves_valid_snapshot(
     assert stored.body_path.read_bytes() == before
 
 
+def test_acs_force_live_rejects_membership_regression_without_replacing_manifest(
+    runtime, snapshot_store
+):
+    second = ACS_FIXTURE.replace(
+        b"10.1021/acs.jcim.6c00001", b"10.1021/acs.jcim.6c00002"
+    ).replace(b"Research article", b"Second article")
+    key = SnapshotKey("acs", "jcisd8", "66", "12")
+    second_card = second.split(b"<body>", 1)[1].split(b"</body>", 1)[0]
+    snapshot_store.commit(
+        key,
+        "https://pubs.acs.org/toc/jcisd8/66/12",
+        "https://pubs.acs.org/toc/jcisd8/66/12",
+        "text/html",
+        ACS_FIXTURE.replace(b"</body>", second_card + b"</body>"),
+        SnapshotValidation(
+            selector_counts={"div.issue-item.clearfix": 2},
+            membership_dois=(
+                "10.1021/acs.jcim.6c00001",
+                "10.1021/acs.jcim.6c00002",
+            ),
+            parser_version="acs-toc-v1",
+        ),
+    )
+    manifest = snapshot_store.root / "acs/jcisd8/66/12/manifest.json"
+    before = manifest.read_bytes()
+    runtime.queue_html(ACS_FIXTURE)
+
+    result = acs_fetch.query_acs_issue_result(
+        "jcisd8", "66", "12", "JCIM", runtime, force_live=True
+    )
+
+    assert result.outcome == FETCH_FAILED
+    assert "membership regressed" in result.message
+    assert manifest.read_bytes() == before
+    assert snapshot_store.load(key).validation.membership_dois == (
+        "10.1021/acs.jcim.6c00001",
+        "10.1021/acs.jcim.6c00002",
+    )
+    assert runtime.stats.live_success == 0
+
+
 def test_acs_reparses_snapshot_and_rejects_changed_membership(
     monkeypatch, runtime, snapshot_store
 ):
@@ -158,6 +199,7 @@ def test_acs_reparses_snapshot_and_rejects_changed_membership(
     assert result.metadata["official_transport"] == "live"
     assert len(runtime.fetch_calls) == 1
     assert runtime.stats.snapshot_hit == 0
+    assert runtime.stats.cache_rejected == 1
     rejection = [
         event for event in events
         if event["stage"] == "snapshot_validation"
@@ -260,13 +302,14 @@ def test_acs_store_corruption_emits_cache_rejection_then_live_retry(
     )
 
     result = acs_fetch.query_acs_issue_result(
-        "jcisd8", "66", "12", "JCIM", runtime
+        "jcisd8", "66", "12", "JCIM", runtime, force_live=True
     )
 
     assert result.outcome == SUCCESS
     assert result.metadata["official_transport"] == "live"
     assert len(runtime.fetch_calls) == 1
     assert runtime.stats.snapshot_hit == 0
+    assert runtime.stats.cache_rejected == 1
     rejection = [
         event for event in events
         if event["stage"] == "snapshot_validation"
@@ -351,6 +394,7 @@ def test_acs_records_snapshot_parse_rejection(snapshot_store):
 
     assert result.outcome == SUCCESS
     assert runtime.stats.snapshot_hit == 0
+    assert runtime.stats.cache_rejected == 1
     attempts_path = (
         snapshot_store.root.parent / "diagnostics" / "attempts.jsonl"
     )

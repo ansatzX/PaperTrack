@@ -26,6 +26,7 @@ from .adapter_result import (
 )
 from .diagnostics import record_fetch_attempt
 from .http_fetch import HttpFetchResult, configured_interval, is_blocked_response
+from .identity import normalize_doi
 from .journal_entry import JournalEntry
 from .official_snapshot import (
     SnapshotAttachment,
@@ -545,6 +546,11 @@ def _record_snapshot_rejection(
     )
 
 
+def _observe_cache_rejection(provider_runtime) -> None:
+    if hasattr(provider_runtime, "stats"):
+        provider_runtime.stats.cache_rejected += 1
+
+
 def _abstract_result_from_response(
     response: CapturedResponse, article_id: str
 ) -> AipAbstractResult:
@@ -922,15 +928,15 @@ def _query_aip_with_runtime(
         journal_slug=journal_slug, volume=volume, issue=issue
     )
     key = SnapshotKey("aip", journal_slug, volume, issue)
-    load_result = None
-    snapshot = None
-    if not force_live:
-        load_result = provider_runtime.snapshot_store.load_result(key)
-        snapshot = load_result.snapshot
-    if load_result is not None and load_result.status == "rejected":
+    baseline_membership = None
+    baseline_abstract_ids = None
+    load_result = provider_runtime.snapshot_store.load_result(key)
+    snapshot = load_result.snapshot
+    if load_result.status == "rejected":
         _record_store_load_rejection(
             journal_slug, volume, issue, url, load_result
         )
+        _observe_cache_rejection(provider_runtime)
     if snapshot is not None:
         rejection = html_snapshot_provenance_rejection(snapshot, url)
         if rejection is not None:
@@ -938,6 +944,7 @@ def _query_aip_with_runtime(
             _record_snapshot_rejection(
                 journal_slug, volume, issue, url, snapshot, reason, message
             )
+            _observe_cache_rejection(provider_runtime)
         else:
             try:
                 html = snapshot.body_path.read_text(encoding="utf-8")
@@ -973,6 +980,7 @@ def _query_aip_with_runtime(
                     "attachment_parse",
                     str(exc),
                 )
+                _observe_cache_rejection(provider_runtime)
             else:
                 if cached.outcome != SUCCESS:
                     _record_snapshot_rejection(
@@ -985,6 +993,7 @@ def _query_aip_with_runtime(
                         cached.message or "snapshot failed current parser",
                         html,
                     )
+                    _observe_cache_rejection(provider_runtime)
                 elif _membership_hash(membership_dois) != snapshot.membership_hash:
                     _record_snapshot_rejection(
                         journal_slug,
@@ -996,10 +1005,16 @@ def _query_aip_with_runtime(
                         "reparsed membership hash does not match snapshot",
                         html,
                     )
+                    _observe_cache_rejection(provider_runtime)
                 else:
-                    if hasattr(provider_runtime, "stats"):
-                        provider_runtime.stats.snapshot_hit += 1
-                    return cached
+                    baseline_membership = {
+                        normalize_doi(doi) for doi in membership_dois
+                    }
+                    baseline_abstract_ids = set(abstracts)
+                    if not force_live:
+                        if hasattr(provider_runtime, "stats"):
+                            provider_runtime.stats.snapshot_hit += 1
+                        return cached
 
     request = IssueRequest(
         canonical_url=url,
@@ -1039,7 +1054,7 @@ def _query_aip_with_runtime(
             metadata={"url": url, "official_transport": "live"},
         )
 
-    preflight, _, abstract_ids = _result_from_official_material(
+    preflight, preflight_membership, abstract_ids = _result_from_official_material(
         fetched.html,
         journal_name,
         journal_slug=journal_slug,
@@ -1052,6 +1067,51 @@ def _query_aip_with_runtime(
     )
     if preflight.outcome != SUCCESS:
         return preflight
+
+    live_membership = {
+        normalize_doi(doi) for doi in preflight_membership
+    }
+    live_abstract_ids = {
+        article_id for article_id in abstract_ids.values() if article_id
+    }
+    if (
+        baseline_membership is not None
+        and not baseline_membership.issubset(live_membership)
+    ):
+        missing = sorted(baseline_membership - live_membership)
+        record_fetch_attempt(
+            _diagnostic_context(
+                journal_slug, volume, issue, url,
+                "snapshot_non_regression", FETCH_FAILED,
+                missing_membership_dois=missing,
+                message="official issue membership regressed from trusted snapshot",
+            ),
+            html=fetched.html,
+        )
+        return AdapterResult(
+            entries={}, outcome=FETCH_FAILED, provider="aip", source="journal",
+            message="AIP official issue membership regressed; retry later",
+            metadata=preflight.metadata,
+        )
+    if (
+        baseline_abstract_ids is not None
+        and not baseline_abstract_ids.issubset(live_abstract_ids)
+    ):
+        missing = sorted(baseline_abstract_ids - live_abstract_ids)
+        record_fetch_attempt(
+            _diagnostic_context(
+                journal_slug, volume, issue, url,
+                "snapshot_non_regression", FETCH_FAILED,
+                missing_abstract_controls=missing,
+                message="official abstract controls regressed from trusted snapshot",
+            ),
+            html=fetched.html,
+        )
+        return AdapterResult(
+            entries={}, outcome=FETCH_FAILED, provider="aip", source="journal",
+            message="AIP official abstract controls regressed; retry later",
+            metadata=preflight.metadata,
+        )
 
     responses_by_id = {}
     attachments_by_id = {}
