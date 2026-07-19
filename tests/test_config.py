@@ -2,29 +2,36 @@ import stat
 import subprocess
 from pathlib import Path
 
+from papertrack import codex
 from papertrack.codex import get_query_args
 from papertrack.arxiv_index_fetch import _advanced_search_url
 
 
-def test_arxiv_config_includes_computer_science_categories():
+def test_category_term_queries_include_primary_and_cross_list_membership():
     query_args = get_query_args()
 
+    for category in ("chem-ph", "cs.AI", "cs.LG"):
+        args = query_args[category]
+        expected_term = "physics.chem-ph" if category == "chem-ph" else category
+        assert args["terms-0-term"] == ""
+        assert args["terms-0-field"] == "title"
+        assert args["terms-1-term"] == expected_term
+        assert args["terms-1-field"] == "all"
+        assert "cross_list_category" not in args.values()
+        assert args["date-date_type"] == "submitted_date_first"
+
+    assert query_args["chem-ph"]["classification-physics"] == "y"
+    assert query_args["chem-ph"]["classification-physics_archives"] == "physics"
     assert query_args["cs.AI"]["classification-computer_science"] == "y"
-    assert query_args["cs.AI"]["terms-0-term"] == "cs.AI"
-    assert query_args["cs.AI"]["terms-0-field"] == "cross_list_category"
-    assert "terms-1-term" not in query_args["cs.AI"]
     assert query_args["cs.LG"]["classification-computer_science"] == "y"
-    assert query_args["cs.LG"]["terms-0-term"] == "cs.LG"
-    assert query_args["cs.LG"]["terms-0-field"] == "cross_list_category"
-    assert "terms-1-term" not in query_args["cs.LG"]
-    assert query_args["cs.AI"]["date-date_type"] == "submitted_date_first"
-    assert query_args["cs.LG"]["date-date_type"] == "submitted_date_first"
+    assert "classification-computer_science_archives" not in query_args["cs.AI"]
+    assert "classification-computer_science_archives" not in query_args["cs.LG"]
 
 
-def test_computer_science_arxiv_urls_use_archive_filters():
+def test_category_term_arxiv_urls_use_all_fields_candidate_query():
     query_args = get_query_args()
 
-    for category in ("cs.AI", "cs.LG"):
+    for category in ("chem-ph", "cs.AI", "cs.LG"):
         args = dict(query_args[category])
         args["date-from_date"] = "2026-06-01"
         args["date-to_date"] = "2026-06-02"
@@ -32,12 +39,24 @@ def test_computer_science_arxiv_urls_use_archive_filters():
         first_page = _advanced_search_url(args, 0)
         second_page = _advanced_search_url(args, 200)
 
-        assert f"terms-0-term={category}" in first_page
-        assert "terms-0-field=cross_list_category" in first_page
-        assert f"terms-1-term={category}" not in first_page
+        expected_term = "physics.chem-ph" if category == "chem-ph" else category
+        assert "terms-0-term=&" in first_page
+        assert "terms-0-field=title" in first_page
+        assert f"terms-1-term={expected_term}" in first_page
+        assert "terms-1-field=all" in first_page
+        assert "cross_list_category" not in first_page
         assert "classification-computer_science_archives" not in first_page
-        assert f"terms-0-term={category}" in second_page
+        assert f"terms-1-term={expected_term}" in second_page
         assert "start=200" in second_page
+
+
+def test_hardcoded_fallback_matches_toml_category_queries(monkeypatch):
+    configured = get_query_args()
+    monkeypatch.setattr(codex, "_load_toml_categories", lambda: {})
+
+    fallback = codex.build_query_args()
+
+    assert fallback == configured
 
 
 ROOT = Path(__file__).resolve().parents[1]
