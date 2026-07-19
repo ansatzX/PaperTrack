@@ -354,6 +354,7 @@ def test_parse_aps_issue_supports_legacy_h4_titles():
 
     entries = _parse_aps_issue(html, "prl", "Physical Review Letters", "127", "27")
 
+    assert list(entries) == ["10.1103/PhysRevLett.127.270401"]
     entry = entries["10.1103/PhysRevLett.127.270401"]
     assert entry.title == "Quantum Vacuum Sagnac Effect"
     assert entry.authors == [

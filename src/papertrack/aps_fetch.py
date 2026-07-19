@@ -2,30 +2,39 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
-import json
+import hashlib
 import logging
 import re
-import subprocess
-import sys
 
 from bs4 import BeautifulSoup
 
-from .adapter_result import AdapterResult, BLOCKED, FETCH_FAILED, OFFICIAL_EMPTY_SUSPICIOUS, SUCCESS
+from .adapter_result import (
+    AdapterResult,
+    FETCH_FAILED,
+    OFFICIAL_EMPTY_SUSPICIOUS,
+    PARSE_FAILED,
+    SUCCESS,
+)
 from .diagnostics import record_fetch_attempt
 from .http_fetch import (
     HttpRequestPolicy,
     configured_interval,
     fetch_html_resilient,
     is_blocked_response,
-    provider_throttle,
 )
+from .identity import normalize_doi
 from .journal_entry import JournalEntry
+from .official_snapshot import SnapshotKey, SnapshotValidation
+from .provider_runtime import IssueRequest
 
 logger = logging.getLogger(__name__)
 
 APS_BASE = "https://journals.aps.org"
 APS_ISSUE_URL = APS_BASE + "/{journal_slug}/issues/{volume}/{issue}"
+APS_ISSUE_SELECTOR = ".browse-result-card.issue"
+APS_PARSER_VERSION = "aps-issue-v1"
 APS_FETCH_STRATEGIES = (
     ("curl_cffi", "chrome136"),
     ("requests", "default"),
@@ -39,19 +48,12 @@ APS_REQUEST_POLICY = HttpRequestPolicy(
 
 _cache: dict[str, dict[str, JournalEntry]] = {}
 
-APS_BROWSER_TIMEOUT = 60
 
-
-def _fetch_aps_browser(url: str) -> dict:
-    provider_throttle("aps", APS_REQUEST_POLICY.min_interval)
-    cmd = ["xvfb-run", "-a", sys.executable, "-m", "papertrack.aps_browser", url]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=APS_BROWSER_TIMEOUT)
-        if proc.returncode != 0:
-            return {"outcome": FETCH_FAILED, "message": proc.stderr or "browser helper failed", "html": ""}
-        return json.loads(proc.stdout or "{}")
-    except Exception as exc:
-        return {"outcome": FETCH_FAILED, "message": str(exc), "html": ""}
+@dataclass
+class ApsParseResult:
+    entries: dict[str, JournalEntry]
+    issue_card_count: int
+    critical_field_failures: list[dict]
 
 
 def _is_blocked(html: str) -> bool:
@@ -79,19 +81,45 @@ def _parse_aps_issue(
     fallback_issue: str = "",
 ) -> dict[str, JournalEntry]:
     """Parse an APS issue page into entries keyed by DOI."""
+    return _parse_aps_issue_result(
+        html, journal_slug, journal_name, fallback_volume, fallback_issue
+    ).entries
+
+
+def _parse_aps_issue_result(
+    html: str,
+    journal_slug: str,
+    journal_name: str,
+    fallback_volume: str = "",
+    fallback_issue: str = "",
+) -> ApsParseResult:
+    """Parse APS issue cards while retaining commit-validation evidence."""
     soup = BeautifulSoup(html, "lxml")
     entries: dict[str, JournalEntry] = {}
+    critical_field_failures: list[dict] = []
+    cards = soup.select(APS_ISSUE_SELECTOR)
 
-    for card in soup.select(".browse-result-card.issue"):
-        title_el = card.select_one('.title a[href*="10.1103/"]')
+    for card_number, card in enumerate(cards, 1):
+        title_el = card.select_one(".title a")
         if not title_el:
+            critical_field_failures.append(
+                {"card": card_number, "field": "title"}
+            )
             continue
         href = title_el.get("href", "")
-        doi_match = re.search(r"10\.1103/[^/?#]+", href)
+        doi_match = re.search(r"10\.1103/[^/?#\s]+", href, re.IGNORECASE)
         if not doi_match:
+            critical_field_failures.append(
+                {"card": card_number, "field": "doi"}
+            )
             continue
         doi = doi_match.group(0)
         title = title_el.get_text(" ", strip=True)
+        if not title:
+            critical_field_failures.append(
+                {"card": card_number, "field": "title"}
+            )
+            continue
         if JournalEntry.is_non_article(doi, title):
             continue
 
@@ -119,7 +147,11 @@ def _parse_aps_issue(
         )
 
     logger.info("APS %s parsed %d issue entries", journal_slug, len(entries))
-    return entries
+    return ApsParseResult(
+        entries=entries,
+        issue_card_count=len(cards),
+        critical_field_failures=critical_field_failures,
+    )
 
 
 def _split_authors(text: str) -> list[str]:
@@ -163,10 +195,318 @@ def _parse_summary(card) -> str:
     return paragraphs[-1] if paragraphs else ""
 
 
+def _membership_dois(entries: dict[str, JournalEntry]) -> tuple[str, ...]:
+    return tuple(sorted(entries))
+
+
+def _membership_hash(dois: tuple[str, ...]) -> str:
+    normalized = sorted(normalize_doi(doi) for doi in dois)
+    return hashlib.sha256("\n".join(normalized).encode("utf-8")).hexdigest()
+
+
+def _valid_aps_membership(dois: tuple[str, ...]) -> bool:
+    return bool(dois) and all(
+        re.fullmatch(r"10\.1103/[^\s]+", doi, re.IGNORECASE) for doi in dois
+    )
+
+
+def _diagnostic_context(
+    journal_slug: str,
+    volume: str,
+    issue: str,
+    url: str,
+    stage: str,
+    outcome: str,
+    **extra,
+) -> dict:
+    event = {
+        "source_role": "authoritative",
+        "source": "journal",
+        "provider": "aps",
+        "journal": journal_slug,
+        "volume": volume,
+        "issue": issue,
+        "url": url,
+        "stage": stage,
+        "outcome": outcome,
+    }
+    event.update(extra)
+    return event
+
+
+def _result_from_html(
+    html: str,
+    journal_name: str,
+    *,
+    url: str,
+    journal_slug: str,
+    volume: str,
+    issue: str,
+    transport: str,
+    snapshot=None,
+):
+    try:
+        parsed = _parse_aps_issue_result(
+            html, journal_slug, journal_name, volume, issue
+        )
+    except Exception as exc:
+        record_fetch_attempt(
+            _diagnostic_context(
+                journal_slug,
+                volume,
+                issue,
+                url,
+                "issue_page_parse",
+                PARSE_FAILED,
+                message=str(exc),
+            ),
+            html=html,
+        )
+        return (
+            AdapterResult(
+                entries={},
+                outcome=PARSE_FAILED,
+                provider="aps",
+                source="journal",
+                message=f"APS issue page parser failed: {exc}",
+                metadata={"url": url, "official_transport": transport},
+            ),
+            None,
+            None,
+        )
+
+    selector_counts = {APS_ISSUE_SELECTOR: parsed.issue_card_count}
+    membership_dois = _membership_dois(parsed.entries)
+    metadata = {
+        "url": url,
+        "article_count": len(parsed.entries),
+        "issue_card_count": parsed.issue_card_count,
+        "critical_field_failures": parsed.critical_field_failures,
+        "official_transport": transport,
+        "selector_counts": selector_counts,
+    }
+    if snapshot is not None:
+        metadata.update(
+            snapshot_path=str(snapshot.body_path),
+            membership_hash=snapshot.membership_hash,
+        )
+
+    if parsed.issue_card_count < 1:
+        record_fetch_attempt(
+            _diagnostic_context(
+                journal_slug,
+                volume,
+                issue,
+                url,
+                "issue_page_parse",
+                OFFICIAL_EMPTY_SUSPICIOUS,
+                article_count=0,
+                selector_counts=selector_counts,
+            ),
+            html=html,
+        )
+        return (
+            AdapterResult(
+                entries={},
+                outcome=OFFICIAL_EMPTY_SUSPICIOUS,
+                provider="aps",
+                source="journal",
+                message="APS issue page contains no official issue cards",
+                metadata=metadata,
+            ),
+            parsed,
+            membership_dois,
+        )
+
+    if parsed.critical_field_failures or not _valid_aps_membership(
+        membership_dois
+    ):
+        record_fetch_attempt(
+            _diagnostic_context(
+                journal_slug,
+                volume,
+                issue,
+                url,
+                "issue_page_parse",
+                PARSE_FAILED,
+                article_count=len(parsed.entries),
+                selector_counts=selector_counts,
+                critical_field_failures=parsed.critical_field_failures,
+            ),
+            html=html,
+        )
+        return (
+            AdapterResult(
+                entries={},
+                outcome=PARSE_FAILED,
+                provider="aps",
+                source="journal",
+                message="APS issue card is missing a valid DOI or title",
+                metadata=metadata,
+            ),
+            parsed,
+            membership_dois,
+        )
+
+    return (
+        AdapterResult(
+            entries=parsed.entries,
+            outcome=SUCCESS,
+            provider="aps",
+            source="journal",
+            metadata=metadata,
+        ),
+        parsed,
+        membership_dois,
+    )
+
+
+def _query_aps_with_runtime(
+    journal_slug: str,
+    volume: str,
+    issue: str,
+    journal_name: str,
+    provider_runtime,
+):
+    url = APS_ISSUE_URL.format(
+        journal_slug=journal_slug, volume=volume, issue=issue
+    )
+    key = SnapshotKey("aps", journal_slug, volume, issue)
+    snapshot = provider_runtime.snapshot_store.load(key)
+    if snapshot is not None:
+        try:
+            html = snapshot.body_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            snapshot = None
+        else:
+            cached, _, membership_dois = _result_from_html(
+                html,
+                journal_name,
+                url=url,
+                journal_slug=journal_slug,
+                volume=volume,
+                issue=issue,
+                transport="snapshot",
+                snapshot=snapshot,
+            )
+            if (
+                cached.outcome == SUCCESS
+                and membership_dois is not None
+                and _membership_hash(membership_dois)
+                == snapshot.membership_hash
+            ):
+                if hasattr(provider_runtime, "stats"):
+                    provider_runtime.stats.snapshot_hit += 1
+                return cached
+
+    request = IssueRequest(
+        canonical_url=APS_ISSUE_URL.format(
+            journal_slug=journal_slug,
+            volume=volume,
+            issue=issue,
+        ),
+        required_selector=APS_ISSUE_SELECTOR,
+        challenge_markers=(
+            "Just a moment",
+            "cf-chl",
+            "Access denied",
+            "Cloudflare",
+        ),
+    )
+    fetched = provider_runtime.fetch_issue(request)
+    if fetched.outcome != SUCCESS:
+        record_fetch_attempt(
+            _diagnostic_context(
+                journal_slug,
+                volume,
+                issue,
+                url,
+                "issue_page_fetch",
+                fetched.outcome,
+                http_status=fetched.status_code,
+                attempt_count=fetched.attempt_count,
+                message=fetched.message,
+            ),
+            html=fetched.html or None,
+        )
+        return AdapterResult(
+            entries={},
+            outcome=fetched.outcome,
+            provider="aps",
+            source="journal",
+            message=fetched.message or "APS issue page could not be fetched",
+            metadata={
+                "url": url,
+                "official_transport": "live",
+                "canonical_url": fetched.canonical_url,
+                "final_url": fetched.final_url,
+                "http_status": fetched.status_code,
+                "attempt_count": fetched.attempt_count,
+            },
+        )
+
+    result, _, membership_dois = _result_from_html(
+        fetched.html,
+        journal_name,
+        url=url,
+        journal_slug=journal_slug,
+        volume=volume,
+        issue=issue,
+        transport="live",
+    )
+    if result.outcome != SUCCESS:
+        return result
+
+    validation = SnapshotValidation(
+        selector_counts=result.metadata["selector_counts"],
+        membership_dois=membership_dois,
+        parser_version=APS_PARSER_VERSION,
+    )
+    try:
+        stored = provider_runtime.snapshot_store.commit(
+            key=key,
+            canonical_url=request.canonical_url,
+            final_url=fetched.final_url,
+            media_type="text/html",
+            body=fetched.html.encode("utf-8"),
+            validation=validation,
+        )
+    except Exception as exc:
+        record_fetch_attempt(
+            _diagnostic_context(
+                journal_slug,
+                volume,
+                issue,
+                url,
+                "snapshot_commit",
+                FETCH_FAILED,
+                message=str(exc),
+            )
+        )
+        return AdapterResult(
+            entries={},
+            outcome=FETCH_FAILED,
+            provider="aps",
+            source="journal",
+            message=f"APS snapshot commit failed: {exc}",
+            metadata=result.metadata,
+        )
+    result.metadata.update(
+        snapshot_path=str(stored.body_path),
+        membership_hash=stored.membership_hash,
+    )
+    return result
+
+
 def query_aps_issue_result(journal_slug: str, volume: str, issue: str,
                            journal_name: str = "", provider_runtime=None,
                            ) -> AdapterResult[dict[str, JournalEntry]]:
     """Scrape a specific APS issue page without visiting article pages."""
+    if provider_runtime is not None:
+        return _query_aps_with_runtime(
+            journal_slug, volume, issue, journal_name, provider_runtime
+        )
+
     cache_key = f"{journal_slug}:{volume}:{issue}"
     if cache_key in _cache:
         return AdapterResult(
@@ -177,24 +517,10 @@ def query_aps_issue_result(journal_slug: str, volume: str, issue: str,
         )
 
     url = APS_ISSUE_URL.format(journal_slug=journal_slug, volume=volume, issue=issue)
-    html, failure_outcome = _fetch_html(url, ".browse-result-card.issue")
+    html, failure_outcome = _fetch_html(url, APS_ISSUE_SELECTOR)
     if not html or failure_outcome:
         outcome = failure_outcome or FETCH_FAILED
-        if outcome == BLOCKED:
-            browser = _fetch_aps_browser(url)
-            record_fetch_attempt({
-                "source_role": "authoritative", "source": "journal", "provider": "aps",
-                "journal": journal_slug, "volume": volume, "issue": issue, "url": url,
-                "stage": "issue_page_browser_fallback", "outcome": browser.get("outcome", FETCH_FAILED),
-                "fallback_used": True, "fallback_of": "issue_page_fetch",
-                "message": browser.get("message", ""),
-            }, html=browser.get("html") or None)
-            if browser.get("outcome") == SUCCESS and browser.get("html"):
-                html, failure_outcome = browser["html"], ""
-            else:
-                outcome = browser.get("outcome") or outcome
-        if not html or failure_outcome:
-            record_fetch_attempt(
+        record_fetch_attempt(
             {
                 "source_role": "authoritative",
                 "source": "journal",
@@ -209,56 +535,31 @@ def query_aps_issue_result(journal_slug: str, volume: str, issue: str,
             },
             html=html or None,
         )
-            return AdapterResult(
-                entries={},
-                outcome=outcome,
-                provider="aps",
-                source="journal",
-                message="APS issue page could not be fetched with required selector",
-                metadata={"url": url},
-            )
-
-    entries = _parse_aps_issue(html, journal_slug, journal_name, volume, issue)
-    if not entries:
-        soup = BeautifulSoup(html, "lxml")
-        record_fetch_attempt(
-            {
-                "source_role": "authoritative",
-                "source": "journal",
-                "provider": "aps",
-                "journal": journal_slug,
-                "volume": volume,
-                "issue": issue,
-                "url": url,
-                "stage": "issue_page_parse",
-                "outcome": "official_empty_suspicious",
-                "article_count": 0,
-                "selector_counts": {
-                    ".browse-result-card.issue": len(soup.select(".browse-result-card.issue")),
-                    ".title a": len(soup.select('.title a[href*="10.1103/"]')),
-                },
-            },
-            html=html,
-        )
         return AdapterResult(
             entries={},
-            outcome=OFFICIAL_EMPTY_SUSPICIOUS,
+            outcome=outcome,
             provider="aps",
             source="journal",
-            message="APS issue page parsed to zero official articles",
+            message="APS issue page could not be fetched with required selector",
             metadata={"url": url},
         )
 
-    _cache[cache_key] = entries
-    logger.info("APS %s v%s i%s: %d articles scraped",
-                journal_slug, volume, issue, len(entries))
-    return AdapterResult(
-        entries=entries,
-        outcome=SUCCESS,
-        provider="aps",
-        source="journal",
-        metadata={"url": url},
+    result, _, _ = _result_from_html(
+        html,
+        journal_name,
+        url=url,
+        journal_slug=journal_slug,
+        volume=volume,
+        issue=issue,
+        transport="http",
     )
+    if result.outcome != SUCCESS:
+        return result
+
+    _cache[cache_key] = result.entries
+    logger.info("APS %s v%s i%s: %d articles scraped",
+                journal_slug, volume, issue, len(result.entries))
+    return result
 
 
 def query_aps_issue(journal_slug: str, volume: str, issue: str,
