@@ -20,3 +20,5 @@ docs/
 .papertrack_diagnostics/
 .papertrack_state.json
 .worktrees/
+.papertrack_browser_profiles/
+.papertrack_official_cache/
