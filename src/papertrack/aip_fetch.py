@@ -682,8 +682,10 @@ def _snapshot_response(body: bytes) -> CapturedResponse:
         or parsed_url.fragment
     ):
         raise ValueError("AIP abstract attachment URL is not official")
-    if status_code != 200 and not 400 <= status_code <= 599:
-        raise ValueError("AIP abstract attachment status is not approved")
+    if status_code not in {200, 403}:
+        raise ValueError(
+            "AIP abstract attachment status is retryable and not durable"
+        )
     approved_media_types = (
         {"application/json", "text/html"}
         if status_code == 200
@@ -1113,7 +1115,16 @@ def _query_aip_with_runtime(
         article_id for article_id in abstract_ids.values() if article_id
     }
     if response_missing or set(attachments_by_id) != expected_attachment_ids:
-        result.outcome = FETCH_FAILED
+        unavailable_outcomes = {
+            responses_by_id[article_id].outcome
+            for article_id in expected_attachment_ids - set(attachments_by_id)
+            if article_id in responses_by_id
+        }
+        result.outcome = (
+            RATE_LIMITED
+            if unavailable_outcomes == {RATE_LIMITED}
+            else FETCH_FAILED
+        )
         result.message = (
             "AIP issue membership succeeded but an official abstract response "
             "was not captured"

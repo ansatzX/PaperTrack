@@ -20,7 +20,11 @@ from papertrack.official_snapshot import (
     SnapshotKey,
     SnapshotValidation,
 )
-from papertrack.provider_runtime import OfficialBrowserResult, ProviderRunStats
+from papertrack.provider_runtime import (
+    CapturedResponse,
+    OfficialBrowserResult,
+    ProviderRunStats,
+)
 
 
 class FakeRuntime:
@@ -719,8 +723,9 @@ def test_fetch_exception_closes_runtime_restores_report_and_records_failure(
     assert summary.fetch_failed_keys == (_candidate().key,)
 
 
+@pytest.mark.parametrize("abstract_status", [None, 429, 500])
 def test_aip_incomplete_abstract_response_restores_report_and_records_failure(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, abstract_status
 ):
     from papertrack import journal_rebuild
 
@@ -776,7 +781,14 @@ def test_aip_incomplete_abstract_response_restores_report_and_records_failure(
             )
 
         def request_same_origin(self, url, method, form, min_interval):
-            raise OSError("abstract retry offline")
+            if abstract_status is None:
+                raise OSError("abstract retry offline")
+            return CapturedResponse(
+                url=url,
+                status_code=abstract_status,
+                media_type="text/plain",
+                body=b"retry later",
+            )
 
     runtime = Runtime()
     candidate = RebuildCandidate(

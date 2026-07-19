@@ -3,7 +3,13 @@ import json
 import pytest
 
 from papertrack import aip_fetch
-from papertrack.adapter_result import BLOCKED, FETCH_FAILED, PARSE_FAILED, SUCCESS
+from papertrack.adapter_result import (
+    BLOCKED,
+    FETCH_FAILED,
+    PARSE_FAILED,
+    RATE_LIMITED,
+    SUCCESS,
+)
 from papertrack.official_snapshot import (
     OfficialSnapshotStore,
     SnapshotKey,
@@ -697,6 +703,34 @@ def test_aip_non_200_error_envelope_reloads_with_blocked_outcome(
     assert live.metadata["missing_fields"][0]["outcome"] == BLOCKED
     assert cached.metadata["missing_fields"][0]["outcome"] == BLOCKED
     assert cached_runtime.fetch_calls == []
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_outcome"),
+    [(429, RATE_LIMITED), (500, FETCH_FAILED)],
+)
+def test_aip_retryable_error_response_is_not_durable_and_later_run_is_live(
+    status, expected_outcome, runtime, snapshot_store
+):
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    runtime.queue_response(status=status, body=b"retry later", media_type="text/plain")
+
+    failed = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert failed.outcome == expected_outcome
+    assert snapshot_store.load(SnapshotKey("aip", "jcp", "160", "4")) is None
+    assert runtime.stats.live_success == 0
+
+    retry_runtime = Runtime(snapshot_store)
+    retry_runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    retry_runtime.queue_json({"Success": True, "Html": "<p>Recovered.</p>"})
+    recovered = aip_fetch.query_aip_issue_result(
+        "jcp", "160", "4", "JCP", retry_runtime
+    )
+
+    assert recovered.outcome == SUCCESS
+    assert recovered.entries["10.1063/example"].abstract == "Recovered."
+    assert retry_runtime.stats.snapshot_hit == 0
 
 
 def test_aip_records_rejected_capture_then_explicit_request_failure(
