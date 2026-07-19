@@ -67,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", required=True, type=Path)
     parser.add_argument("--diagnostics-dir", required=True, type=Path)
+    parser.add_argument("--profile-root", required=True, type=Path)
+    parser.add_argument("--snapshot-root", required=True, type=Path)
     parser.add_argument("--retry-unresolved", action="store_true")
     parser.add_argument("--reset-progress", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -77,6 +79,8 @@ def main(argv: list[str] | None = None) -> int:
         default_candidates(),
         data_dir=args.data_dir,
         diagnostics_dir=args.diagnostics_dir,
+        profile_root=args.profile_root,
+        snapshot_root=args.snapshot_root,
         retry_unresolved=args.retry_unresolved,
         reset_progress=args.reset_progress,
         dry_run=args.dry_run,
@@ -87,7 +91,14 @@ def main(argv: list[str] | None = None) -> int:
         f"skipped={len(summary.skipped_keys)} "
         f"resolved={len(summary.resolved_keys)} "
         f"unresolved={len(summary.unresolved_keys)} "
-        f"fetch_failed={len(summary.fetch_failed_keys)}"
+        f"fetch_failed_issues={len(summary.fetch_failed_keys)} "
+        f"official_fetch_rate={summary.official_fetch_rate:.4f} "
+        f"complete_report_rate={summary.complete_report_rate:.4f} "
+        f"snapshot_hit={summary.runtime_stats.snapshot_hit} "
+        f"live_success={summary.runtime_stats.live_success} "
+        f"blocked={summary.runtime_stats.blocked} "
+        f"fetch_failed={summary.runtime_stats.fetch_failed} "
+        f"circuit_skipped={summary.runtime_stats.circuit_skipped}"
     )
     return 0 if summary.ok else 1
 

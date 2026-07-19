@@ -8,6 +8,7 @@ from papertrack.journal_rebuild import (
     OFFICIAL_SUCCESS_UNRESOLVED,
     RESOLVED,
     RebuildCandidate,
+    RebuildSummary,
     _load_progress,
     load_provider_candidates,
     materialize_manifest,
@@ -126,6 +127,40 @@ def _configure(monkeypatch):
         },
     )
     return journal_rebuild
+
+
+def test_rebuild_summary_reports_separate_attempted_issue_rates():
+    summary = RebuildSummary(
+        provider="acs",
+        ordered_candidate_keys=("a", "b", "c", "d", "skipped"),
+        attempted_keys=("a", "b", "c", "d"),
+        skipped_keys=("skipped",),
+        outcomes={
+            "a": RESOLVED,
+            "b": OFFICIAL_SUCCESS_UNRESOLVED,
+            "c": FETCH_FAILED,
+            "d": FETCH_FAILED,
+            "skipped": RESOLVED,
+        },
+        runtime_stats=ProviderRunStats(live_success=1, snapshot_hit=1, blocked=2),
+    )
+
+    assert summary.official_fetch_rate == 0.5
+    assert summary.complete_report_rate == 0.25
+
+
+def test_rebuild_summary_rates_are_zero_without_attempted_issues():
+    summary = RebuildSummary(
+        provider="acs",
+        ordered_candidate_keys=("skipped",),
+        attempted_keys=(),
+        skipped_keys=("skipped",),
+        outcomes={"skipped": RESOLVED},
+        runtime_stats=ProviderRunStats(snapshot_hit=1),
+    )
+
+    assert summary.official_fetch_rate == 0.0
+    assert summary.complete_report_rate == 0.0
 
 
 def test_provider_rebuild_owns_one_runtime_for_all_candidates(

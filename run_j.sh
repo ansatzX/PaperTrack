@@ -22,15 +22,27 @@ CONDA_BIN=/home/ansatz/soft/miniconda3/bin/conda
 CONDA_ENV=arxiv
 DATA_DIR=/home/ansatz/data/obsidian/1/papertrack_datas
 DIAGNOSTICS_DIR="${PROJECT_DIR}/.papertrack_diagnostics"
+PROFILE_ROOT="${PROJECT_DIR}/.papertrack_browser_profiles"
+SNAPSHOT_ROOT="${PROJECT_DIR}/.papertrack_official_cache"
+CHROME_BIN=/usr/bin/google-chrome-stable
 SUPERVISOR="${PROJECT_DIR}/scripts/run_j_worker_supervisor.py"
 
-export PAPERTRACK_CROSSREF_MODE=metadata
+export PAPERTRACK_CROSSREF_MODE=disabled
 export PAPERTRACK_ACS_ISSUE_INTERVAL=30
 export PAPERTRACK_AIP_ISSUE_INTERVAL=30
 export PAPERTRACK_AIP_ABSTRACT_INTERVAL=10
 export PAPERTRACK_APS_ISSUE_INTERVAL=30
 
 cd "$PROJECT_DIR"
+
+if [[ ! -x "$CHROME_BIN" ]]; then
+    echo "journal worker Chrome preflight failed: $CHROME_BIN is not executable" >&2
+    exit 1
+fi
+if ! XVFB_RUN_BIN="$(command -v xvfb-run)"; then
+    echo "journal worker Xvfb preflight failed: xvfb-run is unavailable" >&2
+    exit 1
+fi
 
 if ! /usr/bin/python3 "$SUPERVISOR" check-pidfd; then
     echo "journal worker pidfd capability preflight failed" >&2
@@ -199,9 +211,10 @@ start_worker() {
     /usr/bin/setsid /usr/bin/python3 "$SUPERVISOR" \
         supervise --ownership-token "$token" --ready-file "$ready_file" \
         --ack-file "$ack_file" --parent-pid "$$" -- \
-        "$CONDA_BIN" run --no-capture-output -n "$CONDA_ENV" \
+        "$XVFB_RUN_BIN" -a "$CONDA_BIN" run --no-capture-output -n "$CONDA_ENV" \
             python "$script" \
             --data-dir "$DATA_DIR" --diagnostics-dir "$DIAGNOSTICS_DIR" \
+            --profile-root "$PROFILE_ROOT" --snapshot-root "$SNAPSHOT_ROOT" \
             "${worker_flags[@]}" &
     pid="$!"
     owned_tokens["$pid"]="$token"

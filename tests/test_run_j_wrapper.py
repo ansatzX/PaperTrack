@@ -2,6 +2,7 @@ import os
 import shlex
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -32,9 +33,62 @@ def _isolated_wrapper(
     scripts_dir.mkdir(parents=True)
     marker_dir.mkdir()
 
+    fake_process = tmp_path / "fake-browser-process.py"
+    fake_process.write_text(
+        """\
+import os
+import signal
+import sys
+from pathlib import Path
+
+kind = sys.argv[1]
+marker_dir = Path(os.environ["PAPERTRACK_FAKE_MARKER_DIR"])
+(marker_dir / f"{kind}.owned").write_text(str(os.getpid()))
+
+def stop(signum, _frame):
+    raise SystemExit(128 + signum)
+
+signal.signal(signal.SIGINT, stop)
+signal.signal(signal.SIGTERM, stop)
+while True:
+    signal.pause()
+""",
+        encoding="utf-8",
+    )
+
+    fake_chrome = tmp_path / "fake-google-chrome-stable"
+    _write_executable(fake_chrome, "#!/usr/bin/env bash\nexit 0\n")
+
+    fake_xvfb_run = tmp_path / "fake-xvfb-run"
+    _write_executable(
+        fake_xvfb_run,
+        f"""#!/usr/bin/env bash
+set -uo pipefail
+if [[ "${{1:-}}" == -a ]]; then
+    shift
+fi
+provider=unknown
+for argument in "$@"; do
+    case "$argument" in
+        *rebuild_acs_candidates.py) provider=acs ;;
+        *rebuild_aip_candidates.py) provider=aip ;;
+        *rebuild_aps_candidates.py) provider=aps ;;
+    esac
+done
+"{sys.executable}" {shlex.quote(str(fake_process))} "${{provider}}.xvfb" &
+xvfb_pid="$!"
+"$@"
+status="$?"
+kill -s TERM "$xvfb_pid" 2>/dev/null || true
+wait "$xvfb_pid" 2>/dev/null || true
+exit "$status"
+""",
+    )
+
     worker = """\
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -42,10 +96,18 @@ from pathlib import Path
 marker_dir = Path(os.environ["PAPERTRACK_FAKE_MARKER_DIR"])
 provider = Path(__file__).stem.split("_")[1]
 (marker_dir / f"{provider}.started").write_text(str(os.getpid()))
+chrome = subprocess.Popen(
+    [sys.executable, os.environ["PAPERTRACK_FAKE_PROCESS"], f"{provider}.chrome"]
+)
+
+def close_chrome():
+    chrome.terminate()
+    chrome.wait(timeout=5)
 
 exit_code = os.environ.get(f"PAPERTRACK_FAKE_{provider.upper()}_EXIT")
 if exit_code is not None:
     (marker_dir / f"{provider}.finished").write_text(exit_code)
+    close_chrome()
     raise SystemExit(int(exit_code))
 
 if os.environ.get("PAPERTRACK_FAKE_FINISH_PROVIDER") == provider:
@@ -53,6 +115,7 @@ if os.environ.get("PAPERTRACK_FAKE_FINISH_PROVIDER") == provider:
     while not gate.exists():
         time.sleep(0.01)
     (marker_dir / f"{provider}.finished").write_text("finished")
+    close_chrome()
     raise SystemExit(0)
 
 def stop(signum, _frame):
@@ -179,10 +242,27 @@ exec "$@"
         'DIAGNOSTICS_DIR="${PROJECT_DIR}/.papertrack_diagnostics"': (
             f"DIAGNOSTICS_DIR={shlex.quote(str(tmp_path / 'diagnostics'))}"
         ),
+        'PROFILE_ROOT="${PROJECT_DIR}/.papertrack_browser_profiles"': (
+            f"PROFILE_ROOT={shlex.quote(str(tmp_path / 'profiles'))}"
+        ),
+        'SNAPSHOT_ROOT="${PROJECT_DIR}/.papertrack_official_cache"': (
+            f"SNAPSHOT_ROOT={shlex.quote(str(tmp_path / 'snapshots'))}"
+        ),
+        "CHROME_BIN=/usr/bin/google-chrome-stable": (
+            f"CHROME_BIN={shlex.quote(str(fake_chrome))}"
+        ),
     }
     for production, isolated in replacements.items():
         assert production in wrapper_content
         wrapper_content = wrapper_content.replace(production, isolated)
+    wrapper_content = wrapper_content.replace(
+        'XVFB_RUN_BIN="$(command -v xvfb-run)"',
+        f"XVFB_RUN_BIN={shlex.quote(str(fake_xvfb_run))}",
+    )
+    wrapper_content = (
+        f"export PAPERTRACK_FAKE_PROCESS={shlex.quote(str(fake_process))}\n"
+        + wrapper_content
+    )
     if signal_between_launch_and_record:
         capture = '        "${worker_flags[@]}" &\n    pid="$!"'
         assert capture in wrapper_content
@@ -229,7 +309,11 @@ def _cleanup_process_groups(process: subprocess.Popen[str], marker_dir: Path) ->
 
 
 def _assert_recorded_process_groups_are_gone(marker_dir: Path) -> None:
-    for marker in (*marker_dir.glob("*.started"), *marker_dir.glob("*.conda")):
+    for marker in (
+        *marker_dir.glob("*.started"),
+        *marker_dir.glob("*.conda"),
+        *marker_dir.glob("*.owned"),
+    ):
         pid = int(marker.read_text(encoding="utf-8"))
         assert not Path(f"/proc/{pid}").exists()
 
@@ -256,7 +340,10 @@ def test_run_j_signal_reaches_all_provider_descendants_and_reaps_groups(
     tmp_path, shutdown_signal, expected_status, expected_marker
 ):
     wrapper, marker_dir = _isolated_wrapper(tmp_path)
-    environment = os.environ | {"PAPERTRACK_FAKE_MARKER_DIR": str(marker_dir)}
+    environment = os.environ | {
+        "PAPERTRACK_FAKE_MARKER_DIR": str(marker_dir),
+        "PAPERTRACK_FAKE_PROCESS": str(tmp_path / "fake-browser-process.py"),
+    }
     process = subprocess.Popen(
         ["bash", str(wrapper)],
         cwd=tmp_path,
@@ -268,9 +355,18 @@ def test_run_j_signal_reaches_all_provider_descendants_and_reaps_groups(
     )
     started = [marker_dir / f"{provider}.started" for provider in ("acs", "aip", "aps")]
     signaled = [marker_dir / f"{provider}.signal" for provider in ("acs", "aip", "aps")]
+    unrelated = None
 
     try:
-        _wait_for_paths(started)
+        owned_browser_processes = [
+            *(marker_dir / f"{provider}.xvfb.owned" for provider in ("acs", "aip", "aps")),
+            *(marker_dir / f"{provider}.chrome.owned" for provider in ("acs", "aip", "aps")),
+        ]
+        _wait_for_paths([*started, *owned_browser_processes])
+        unrelated = subprocess.Popen(
+            [sys.executable, "-c", "import signal; signal.pause()"],
+            start_new_session=True,
+        )
         process.send_signal(shutdown_signal)
         _, stderr = _communicate_bounded(process, marker_dir)
         _wait_for_paths(signaled)
@@ -282,7 +378,11 @@ def test_run_j_signal_reaches_all_provider_descendants_and_reaps_groups(
             expected_marker,
         ]
         _assert_recorded_process_groups_are_gone(marker_dir)
+        os.kill(unrelated.pid, 0)
     finally:
+        if unrelated is not None and unrelated.poll() is None:
+            unrelated.terminate()
+            unrelated.wait(timeout=5)
         _cleanup_process_groups(process, marker_dir)
 
 

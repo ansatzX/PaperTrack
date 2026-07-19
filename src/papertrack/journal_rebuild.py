@@ -164,6 +164,24 @@ class RebuildSummary:
         )
 
     @property
+    def official_fetch_rate(self) -> float:
+        denominator = len(self.attempted_keys)
+        if denominator == 0:
+            return 0.0
+        fetched = self.runtime_stats.live_success + self.runtime_stats.snapshot_hit
+        return fetched / denominator
+
+    @property
+    def complete_report_rate(self) -> float:
+        denominator = len(self.attempted_keys)
+        if denominator == 0:
+            return 0.0
+        resolved = sum(
+            self.outcomes.get(key) == RESOLVED for key in self.attempted_keys
+        )
+        return resolved / denominator
+
+    @property
     def ok(self) -> bool:
         return not self.unresolved_keys and not self.fetch_failed_keys
 

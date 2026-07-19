@@ -80,7 +80,8 @@ def test_run_j_sh_configures_exact_production_request_intervals():
     content = run_j_sh.read_text(encoding="utf-8")
 
     assert "set -uo pipefail" in content
-    assert "export PAPERTRACK_CROSSREF_MODE=metadata" in content
+    assert "export PAPERTRACK_CROSSREF_MODE=disabled" in content
+    assert "PAPERTRACK_CROSSREF_MODE=metadata" not in content
     assert "export PAPERTRACK_ACS_ISSUE_INTERVAL=30" in content
     assert "export PAPERTRACK_AIP_ISSUE_INTERVAL=30" in content
     assert "export PAPERTRACK_AIP_ABSTRACT_INTERVAL=10" in content
@@ -89,6 +90,10 @@ def test_run_j_sh_configures_exact_production_request_intervals():
     assert "CONDA_ENV=arxiv" in content
     assert "DATA_DIR=/home/ansatz/data/obsidian/1/papertrack_datas" in content
     assert 'DIAGNOSTICS_DIR="${PROJECT_DIR}/.papertrack_diagnostics"' in content
+    assert 'PROFILE_ROOT="${PROJECT_DIR}/.papertrack_browser_profiles"' in content
+    assert 'SNAPSHOT_ROOT="${PROJECT_DIR}/.papertrack_official_cache"' in content
+    assert "CHROME_BIN=/usr/bin/google-chrome-stable" in content
+    assert 'command -v xvfb-run' in content
 
 
 def test_run_j_sh_defines_and_reaps_exactly_three_provider_workers():
@@ -127,6 +132,9 @@ def test_run_j_sh_defines_and_reaps_exactly_three_provider_workers():
     assert 'verify-owner "$pid" "$token" "$starttime"' in active_lines
     assert '"$SUPERVISOR" signal-unready' in active_lines
     assert '"$SUPERVISOR" check-pidfd' in active_lines
+    assert '"$XVFB_RUN_BIN" -a "$CONDA_BIN" run' in active_lines
+    assert '--profile-root "$PROFILE_ROOT"' in active_lines
+    assert '--snapshot-root "$SNAPSHOT_ROOT"' in active_lines
     assert '"$pid" "${owned_tokens[$pid]}" "$$" "$signal_to_send"' in active_lines
     assert 'bounded_reap_unready_supervisor "$pid"' in active_lines
     assert 'kill -s "$signal_to_send" -- "$pid"' not in active_lines

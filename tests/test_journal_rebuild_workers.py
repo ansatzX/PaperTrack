@@ -11,6 +11,7 @@ from papertrack.journal_rebuild import (
     RESOLVED,
     RebuildSummary,
 )
+from papertrack.provider_runtime import ProviderRunStats
 
 
 ACS_PATHS = (
@@ -144,6 +145,8 @@ def test_worker_main_forwards_only_its_candidates_and_cli_options(
     monkeypatch.setattr(worker, "run_provider_rebuild", fake_run_provider_rebuild)
     data_dir = tmp_path / "data"
     diagnostics_dir = tmp_path / "diagnostics"
+    profile_root = tmp_path / "profiles"
+    snapshot_root = tmp_path / "snapshots"
 
     exit_code = worker.main(
         [
@@ -151,6 +154,10 @@ def test_worker_main_forwards_only_its_candidates_and_cli_options(
             str(data_dir),
             "--diagnostics-dir",
             str(diagnostics_dir),
+            "--profile-root",
+            str(profile_root),
+            "--snapshot-root",
+            str(snapshot_root),
             "--retry-unresolved",
             "--reset-progress",
             "--dry-run",
@@ -167,11 +174,54 @@ def test_worker_main_forwards_only_its_candidates_and_cli_options(
     assert kwargs == {
         "data_dir": Path(data_dir),
         "diagnostics_dir": Path(diagnostics_dir),
+        "profile_root": Path(profile_root),
+        "snapshot_root": Path(snapshot_root),
         "retry_unresolved": True,
         "reset_progress": True,
         "dry_run": True,
     }
     assert capsys.readouterr().out.startswith(f"{provider}: candidates=")
+
+
+@pytest.mark.parametrize("provider", ["acs", "aip", "aps"])
+def test_worker_summary_reports_rates_and_structured_runtime_counts(
+    provider, tmp_path, monkeypatch, capsys
+):
+    worker = _worker(provider)
+    keys = tuple(candidate.key for candidate in worker.default_candidates()[:2])
+    summary = RebuildSummary(
+        provider=provider,
+        ordered_candidate_keys=keys,
+        attempted_keys=keys,
+        skipped_keys=(),
+        outcomes={keys[0]: RESOLVED, keys[1]: FETCH_FAILED},
+        runtime_stats=ProviderRunStats(
+            snapshot_hit=1,
+            live_success=0,
+            blocked=2,
+            fetch_failed=3,
+            circuit_skipped=4,
+        ),
+    )
+    monkeypatch.setattr(worker, "run_provider_rebuild", lambda *args, **kwargs: summary)
+
+    assert worker.main(
+        [
+            "--data-dir", str(tmp_path / "data"),
+            "--diagnostics-dir", str(tmp_path / "diagnostics"),
+            "--profile-root", str(tmp_path / "profiles"),
+            "--snapshot-root", str(tmp_path / "snapshots"),
+        ]
+    ) == 1
+
+    output = capsys.readouterr().out
+    assert "official_fetch_rate=0.5000" in output
+    assert "complete_report_rate=0.5000" in output
+    assert "snapshot_hit=1" in output
+    assert "live_success=0" in output
+    assert "blocked=2" in output
+    assert "fetch_failed=3" in output
+    assert "circuit_skipped=4" in output
 
 
 @pytest.mark.parametrize(
@@ -202,6 +252,10 @@ def test_worker_exit_status_follows_rebuild_summary_semantics(
             str(tmp_path / "data"),
             "--diagnostics-dir",
             str(tmp_path / "diagnostics"),
+            "--profile-root",
+            str(tmp_path / "profiles"),
+            "--snapshot-root",
+            str(tmp_path / "snapshots"),
         ]
     ) == expected_exit
 
