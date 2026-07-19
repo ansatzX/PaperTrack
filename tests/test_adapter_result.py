@@ -278,6 +278,30 @@ def test_arxiv_request_delay_applies_between_paginated_http_requests(monkeypatch
     assert sleeps == [5.0]
 
 
+def test_arxiv_request_delay_applies_before_retry_attempt(monkeypatch):
+    from papertrack import arxiv_index_fetch
+
+    attempts = iter([OSError("temporary failure"), {"feed": {"summary": "unused"}}])
+    monotonic_values = iter([100.0, 100.0, 102.0, 107.0])
+    sleeps = []
+    arxiv_index_fetch._last_request_at = 0.0
+
+    def fake_parse(url):
+        result = next(attempts)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(arxiv_index_fetch.feedparser, "parse", fake_parse)
+    monkeypatch.setattr(arxiv_index_fetch.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(arxiv_index_fetch.time, "sleep", sleeps.append)
+
+    result = arxiv_index_fetch._fetch_arxiv_page("https://arxiv.org/search", request_delay=7)
+
+    assert result.results is not None
+    assert sleeps == [1, 5.0]
+
+
 def test_arxiv_diagnostic_counts_deduplicate_repeated_page_candidates(monkeypatch):
     from papertrack import arxiv_index_fetch
 
