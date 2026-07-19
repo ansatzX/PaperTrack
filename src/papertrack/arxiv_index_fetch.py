@@ -42,7 +42,10 @@ def _parse_arxiv_result(res) -> ArxivEntry | None:
     list_title = aso.find(class_="list-title")
     if not list_title:
         return None
-    arxiv_id = list_title.find("a").text.strip()
+    arxiv_link = list_title.find("a")
+    if arxiv_link is None:
+        return None
+    arxiv_id = arxiv_link.text.strip()
 
     title_el = aso.find(class_="title")
     title = title_el.text.strip() if title_el else ""
@@ -51,14 +54,16 @@ def _parse_arxiv_result(res) -> ArxivEntry | None:
     authors_el = aso.find(class_="authors")
     if authors_el:
         for a in authors_el.find_all("a"):
-            authors.append(a.text.strip())
+            author = a.text.strip()
+            if author:
+                authors.append(author)
 
     abstract = ""
     abstract_full = aso.find(class_="abstract-full")
     if abstract_full:
         abstract = abstract_full.text.strip()
 
-    if not title or not authors or not abstract:
+    if not arxiv_id or not title or not authors or not abstract:
         return None
 
     external_doi = ""
@@ -338,13 +343,19 @@ def _parse_arxiv_page(results, url: str) -> dict[str, ArxivEntry] | None:
 
 def _missing_arxiv_result_field(res) -> str:
     list_title = res.find(class_="list-title")
-    if list_title is None or list_title.find("a") is None:
+    if (
+        list_title is None
+        or list_title.find("a") is None
+        or not list_title.find("a").get_text(strip=True)
+    ):
         return "arxiv_id"
     title = res.find(class_="title")
     if title is None or not title.get_text(strip=True):
         return "title"
     authors = res.find(class_="authors")
-    if authors is None or not authors.find_all("a"):
+    if authors is None or not any(
+        author.get_text(strip=True) for author in authors.find_all("a")
+    ):
         return "authors"
     abstract = res.find(class_="abstract-full")
     if abstract is None or not abstract.get_text(strip=True):

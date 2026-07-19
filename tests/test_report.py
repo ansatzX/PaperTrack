@@ -623,6 +623,29 @@ class TestParseArxivResult:
 
         assert entry is None
 
+    def test_rejects_empty_identifier_link_and_empty_author_text(self):
+        no_identifier = BeautifulSoup(
+            """<li class="arxiv-result">
+<p class="list-title"></p>
+<p class="title">Title</p>
+<p class="authors"><a>A</a></p>
+<span class="abstract-full">Abstract</span>
+</li>""",
+            "lxml",
+        ).find("li")
+        empty_author = BeautifulSoup(
+            """<li class="arxiv-result">
+<p class="list-title"><a>arXiv:2606.00001</a></p>
+<p class="title">Title</p>
+<p class="authors"><a> </a></p>
+<span class="abstract-full">Abstract</span>
+</li>""",
+            "lxml",
+        ).find("li")
+
+        assert _parse_arxiv_result(no_identifier) is None
+        assert _parse_arxiv_result(empty_author) is None
+
 
 class TestZoteroQuery:
     """Test ZoteroQuery index building and matching logic"""
