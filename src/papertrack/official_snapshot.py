@@ -28,7 +28,9 @@ class SnapshotKey:
 
     def __post_init__(self) -> None:
         for value in (self.provider, self.journal, self.volume, self.issue):
-            if not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
+            if value in {".", ".."} or not re.fullmatch(
+                r"[A-Za-z0-9_.-]+", value
+            ):
                 raise ValueError("snapshot key requires a safe path component")
 
 
@@ -201,16 +203,43 @@ class OfficialSnapshotStore:
     def _write_blob(self, digest: str, body: bytes) -> None:
         path = self._blob_path(digest)
         path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-        except FileExistsError:
-            if not self._blob_matches(path, digest):
-                raise ValueError(f"existing snapshot blob is corrupt: {digest}")
+        if self._blob_matches(path, digest):
+            self._fsync_directory(path.parent)
             return
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(body)
-            stream.flush()
-            os.fsync(stream.fileno())
+
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", dir=path.parent, prefix=f".{digest}-", delete=False
+            ) as stream:
+                temporary_path = Path(stream.name)
+                stream.write(body)
+                stream.flush()
+                os.fsync(stream.fileno())
+
+            try:
+                os.link(temporary_path, path)
+            except FileExistsError:
+                if self._blob_matches(path, digest):
+                    self._fsync_directory(path.parent)
+                    return
+                os.replace(temporary_path, path)
+                temporary_path = None
+            else:
+                temporary_path.unlink()
+                temporary_path = None
+            self._fsync_directory(path.parent)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        directory_descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
 
     @staticmethod
     def _blob_matches(path: Path, expected_hash: str) -> bool:

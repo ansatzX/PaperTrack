@@ -1,3 +1,4 @@
+import hashlib
 import json
 from dataclasses import replace
 
@@ -52,6 +53,16 @@ def test_snapshot_round_trip_and_corruption_rejection(tmp_path):
 def test_snapshot_key_rejects_path_components():
     with pytest.raises(ValueError, match="safe path component"):
         SnapshotKey("acs", "../jcim", "66", "12")
+
+
+@pytest.mark.parametrize("unsafe", (".", ".."))
+@pytest.mark.parametrize("field_index", range(4))
+def test_snapshot_key_rejects_dot_components_in_every_field(unsafe, field_index):
+    components = ["acs", "jcim", "66", "12"]
+    components[field_index] = unsafe
+
+    with pytest.raises(ValueError, match="safe path component"):
+        SnapshotKey(*components)
 
 
 @pytest.mark.parametrize("name", ("../abstract.json", "nested/abstract.json", ""))
@@ -176,3 +187,92 @@ def test_failed_manifest_replace_preserves_previous_snapshot(tmp_path, monkeypat
         )
 
     assert store.load(key) == original
+
+
+def test_interrupted_blob_fsync_leaves_no_final_blob_and_retry_recovers(
+    tmp_path, monkeypatch
+):
+    store = OfficialSnapshotStore(tmp_path)
+    key = SnapshotKey("acs", "jcim", "66", "12")
+    body = b"new official response"
+    digest = hashlib.sha256(body).hexdigest()
+    blob_path = tmp_path / "blobs" / "sha256" / digest
+    real_fsync = official_snapshot.os.fsync
+
+    def fail_fsync(file_descriptor):
+        raise OSError("simulated interrupted blob fsync")
+
+    monkeypatch.setattr(official_snapshot.os, "fsync", fail_fsync)
+    with pytest.raises(OSError, match="simulated interrupted blob fsync"):
+        store.commit(
+            key,
+            "https://example.test/canonical",
+            "https://example.test/final",
+            "text/html",
+            body,
+            _validation(),
+        )
+
+    assert not blob_path.exists()
+
+    monkeypatch.setattr(official_snapshot.os, "fsync", real_fsync)
+    stored = store.commit(
+        key,
+        "https://example.test/canonical",
+        "https://example.test/final",
+        "text/html",
+        body,
+        _validation(),
+    )
+
+    assert stored.body_path == blob_path
+    assert store.load(key) == stored
+
+
+def test_commit_atomically_recovers_an_incomplete_digest_blob(tmp_path):
+    store = OfficialSnapshotStore(tmp_path)
+    key = SnapshotKey("acs", "jcim", "66", "12")
+    body = b"complete official response"
+    digest = hashlib.sha256(body).hexdigest()
+    blob_path = tmp_path / "blobs" / "sha256" / digest
+    blob_path.parent.mkdir(parents=True)
+    blob_path.write_bytes(b"incomplete")
+
+    stored = store.commit(
+        key,
+        "https://example.test/canonical",
+        "https://example.test/final",
+        "text/html",
+        body,
+        _validation(),
+    )
+
+    assert blob_path.read_bytes() == body
+    assert store.load(key) == stored
+
+
+def test_commit_does_not_replace_an_existing_valid_blob(tmp_path):
+    store = OfficialSnapshotStore(tmp_path)
+    first_key = SnapshotKey("acs", "jcim", "66", "12")
+    second_key = SnapshotKey("acs", "jcim", "66", "13")
+    body = b"shared official response"
+    first = store.commit(
+        first_key,
+        "https://example.test/canonical",
+        "https://example.test/final",
+        "text/html",
+        body,
+        _validation(),
+    )
+    initial_inode = first.body_path.stat().st_ino
+
+    second = store.commit(
+        second_key,
+        "https://example.test/canonical",
+        "https://example.test/final",
+        "text/html",
+        body,
+        _validation(),
+    )
+
+    assert second.body_path.stat().st_ino == initial_inode
