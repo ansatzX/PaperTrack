@@ -3,7 +3,7 @@ import subprocess
 from pathlib import Path
 
 from papertrack import codex
-from papertrack.codex import get_query_args
+from papertrack.codex import get_query_args, official_arxiv_category
 from papertrack.arxiv_index_fetch import _advanced_search_url
 
 
@@ -57,6 +57,12 @@ def test_hardcoded_fallback_matches_toml_category_queries(monkeypatch):
     fallback = codex.build_query_args()
 
     assert fallback == configured
+
+
+def test_ledger_category_maps_to_official_arxiv_subject():
+    assert official_arxiv_category("chem-ph") == "physics.chem-ph"
+    assert official_arxiv_category("cs.AI") == "cs.AI"
+    assert official_arxiv_category("quant-ph") == "quant-ph"
 
 
 ROOT = Path(__file__).resolve().parents[1]

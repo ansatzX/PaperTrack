@@ -824,18 +824,18 @@ def test_filter_arxiv_days_to_md_processes_exact_days(tmp_path, monkeypatch):
 
     report.filter_arxiv_days_to_md(
         days=[date(2026, 6, 8), date(2026, 6, 9)],
-        md_folder=str(tmp_path / "arxiv" / "quant-ph"),
+        md_folder=str(tmp_path / "arxiv" / "chem-ph"),
         query_args={"size": "200"},
-        category="quant-ph",
+        category="chem-ph",
         zotero=None,
     )
 
     assert calls == [
-        ("2026-06-08", "2026-06-09", "quant-ph"),
-        ("2026-06-09", "2026-06-10", "quant-ph"),
+        ("2026-06-08", "2026-06-09", "physics.chem-ph"),
+        ("2026-06-09", "2026-06-10", "physics.chem-ph"),
     ]
-    assert (tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "08.md").exists()
-    assert (tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "09.md").exists()
+    assert (tmp_path / "arxiv" / "chem-ph" / "2026" / "06" / "08.md").exists()
+    assert (tmp_path / "arxiv" / "chem-ph" / "2026" / "06" / "09.md").exists()
 
 
 def test_filter_arxiv_days_to_md_skips_existing_written_day(tmp_path, monkeypatch):

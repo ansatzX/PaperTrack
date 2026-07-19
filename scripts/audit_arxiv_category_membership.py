@@ -14,7 +14,7 @@ from typing import Callable
 
 from papertrack.adapter_result import AdapterResult
 from papertrack.arxiv_index_fetch import query_arxiv_result
-from papertrack.codex import get_query_args
+from papertrack.codex import get_query_args, official_arxiv_category
 
 
 _ARXIV_HEADING = re.compile(r"^###\s*(arXiv:\S+)", re.MULTILINE)
@@ -83,7 +83,7 @@ def audit_category_membership(
             day_string,
             next_day_string,
             query_args[category],
-            required_category=category,
+            required_category=official_arxiv_category(category),
         )
         if not result.ok:
             manifest["fetch_failed"].append({

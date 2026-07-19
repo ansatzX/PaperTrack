@@ -9,6 +9,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from .adapter_result import RATE_LIMITED
 from .arxiv_entry import ArxivEntry
 from .arxiv_index_fetch import query_arxiv_result
+from .codex import official_arxiv_category
 from .journal_entry import JournalEntry
 from .journal_fetch import query_journal_issue_full_result
 from .migration import has_journal_quality_failure, preserve_task_state, write_report_file
@@ -219,7 +220,7 @@ def _filter_one_arxiv_day_to_md(day_date: date, md_folder: str,
         date_string,
         date_to_date,
         query_args,
-        required_category=category,
+        required_category=official_arxiv_category(category),
     )
     if not arxiv_fetch.ok:
         if arxiv_fetch.outcome == RATE_LIMITED:

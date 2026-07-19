@@ -10,6 +10,12 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 _TOML_PATH = os.path.join(os.path.dirname(__file__), "categories.toml")
+_ARXIV_OFFICIAL_CATEGORY = {"chem-ph": "physics.chem-ph"}
+
+
+def official_arxiv_category(category: str) -> str:
+    """Return the official subject identifier for a ledger category name."""
+    return _ARXIV_OFFICIAL_CATEGORY.get(category, category)
 
 # Template for arXiv advanced search parameters. Each category config is a
 # dict that gets URL-encoded into the advanced search query string. The
