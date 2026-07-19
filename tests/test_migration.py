@@ -462,8 +462,89 @@ WHERE completion
     assert "TASK\nfrom" not in repaired
 
 
+def test_arxiv_identity_migration_does_not_touch_user_tag_or_query(tmp_path):
+    report_file = tmp_path / "arxiv" / "chem-ph" / "2025" / "03" / "01.md"
+    report_file.parent.mkdir(parents=True)
+    original = """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+papertrack_category: quant-ph
+papertrack_date: "2025-03-01"
+tags:
+  - #personal-2025-03-01
+  - #quant-ph-2025-03-01
+---
+
+```dataview
+from #personal-2025-03-01
+from #quant-ph-2025-03-01
+```
+
+## collected
+
+## not collected
+
+### arXiv:2503.00001
+"""
+    report_file.write_text(original, encoding="utf-8")
+
+    result = migrate_report_file(str(report_file), data_dir=str(tmp_path))
+
+    repaired = report_file.read_text(encoding="utf-8")
+    assert result.status == "repaired"
+    assert "  - #personal-2025-03-01" in repaired
+    assert "from #personal-2025-03-01" in repaired
+    assert "  - #chem-ph-2025-03-01" in repaired
+    assert "from #chem-ph-2025-03-01" in repaired
+
+
+def test_arxiv_identity_migration_repairs_tag_when_frontmatter_matches_path(
+    tmp_path,
+):
+    report_file = tmp_path / "arxiv" / "chem-ph" / "2025" / "03" / "01.md"
+    report_file.parent.mkdir(parents=True)
+    original = """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+papertrack_category: chem-ph
+papertrack_date: "2025-03-01"
+tags:
+  - #quant-ph-2025-03-01
+---
+
+```dataview
+TASK
+from #chem-ph-2025-03-01
+```
+
+## collected
+
+## not collected
+
+### arXiv:2503.00001
+"""
+    report_file.write_text(original, encoding="utf-8")
+
+    result = migrate_report_file(str(report_file), data_dir=str(tmp_path))
+
+    assert result.status == "repaired"
+    assert "  - #chem-ph-2025-03-01" in report_file.read_text(encoding="utf-8")
+
+
 def test_preserve_task_state_keeps_checkbox_and_plugin_suffix():
     old = "- [x] [10.1063/example](https://doi.org/10.1063/example) [completion:: 2026-06-09]\n"
     new = "- [ ] [10.1063/example](https://doi.org/10.1063/example)\n"
 
     assert preserve_task_state(new, old) == old
+
+
+def test_preserve_task_state_transfers_completed_update_task_to_paper_link():
+    old = """- [ ] [arXiv:2606.00001](https://arxiv.org/abs/2606.00001)
+- [x] [[#arXiv:2606.00001]] ✅ 2026-06-09
+"""
+    new = "- [ ] [arXiv:2606.00001](https://arxiv.org/abs/2606.00001)\n"
+
+    assert preserve_task_state(new, old) == (
+        "- [x] [arXiv:2606.00001](https://arxiv.org/abs/2606.00001)"
+        " ✅ 2026-06-09\n"
+    )

@@ -315,8 +315,19 @@ def _parse_arxiv_page(results, url: str) -> dict[str, ArxivEntry] | None:
 
     for res in find_results:
         entry = _parse_arxiv_result(res)
-        if entry is not None:
-            result[entry.arxiv_id] = entry
+        if entry is None:
+            record_fetch_attempt({
+                "source_role": "authoritative",
+                "source": "arxiv",
+                "provider": "arxiv",
+                "url": url,
+                "stage": "advanced_search_parse",
+                "outcome": "parse_failed",
+                "field": "arxiv_id",
+                "message": "one arXiv result was missing its identifier",
+            })
+            return None
+        result[entry.arxiv_id] = entry
 
     return result
 

@@ -127,11 +127,21 @@ def migrate_report_file(path: str, data_dir: str = "") -> MigrationResult:
     source = _detect_source(old_content, report_path, data_dir)
 
     if current_format == CURRENT_ARXIV_FORMAT:
-        new_content = _repair_current_arxiv_identity(
-            old_content,
-            report_path,
-            data_dir,
-        )
+        try:
+            new_content = _repair_current_arxiv_identity(
+                old_content,
+                report_path,
+                data_dir,
+            )
+        except ValueError as exc:
+            return MigrationResult(
+                path=path,
+                status="failed",
+                source="arxiv",
+                from_format=current_format,
+                to_format=current_format,
+                message=str(exc),
+            )
         if new_content != old_content:
             return _write_migrated_content(
                 report_path=report_path,
@@ -340,50 +350,122 @@ def _repair_current_arxiv_identity(content: str, path: Path, data_dir: str) -> s
 
     category = parts[1]
     report_date = f"{parts[2]}-{parts[3]}-{path.stem}"
+    frontmatter_end = content.find("\n---", 4) if content.startswith("---\n") else -1
+    if frontmatter_end < 0:
+        return content
+    frontmatter_end += 4
+    frontmatter = content[:frontmatter_end]
+    body = content[frontmatter_end:]
+
     category_match = re.search(
         r"^papertrack_category:[ \t]*(\S+)[ \t]*$",
-        content,
+        frontmatter,
         re.MULTILINE,
     )
     date_match = re.search(
         r'^papertrack_date:[ \t]*["\']?(\d{4}-\d{2}-\d{2})["\']?[ \t]*$',
-        content,
+        frontmatter,
         re.MULTILINE,
     )
     if category_match is None or date_match is None:
         return content
-    if category_match.group(1) == category and date_match.group(1) == report_date:
-        return content
+    old_category = category_match.group(1)
+    old_date = date_match.group(1)
+    old_tag = f"#{old_category}-{old_date}"
+    expected_tag = f"#{category}-{report_date}"
 
-    expected_lines = (
+    frontmatter = re.sub(
+        r"^papertrack_category:[ \t]*\S+[ \t]*$",
         f"papertrack_category: {category}",
-        f'papertrack_date: "{report_date}"',
-        f"  - #{category}-{report_date}",
-        f"from #{category}-{report_date}",
-    )
-    replacements = (
-        (r"^papertrack_category:[ \t]*\S+[ \t]*$", expected_lines[0]),
-        (r'^papertrack_date:[ \t]*["\']?\d{4}-\d{2}-\d{2}["\']?[ \t]*$', expected_lines[1]),
-        (r"^  - #\S+-\d{4}-\d{2}-\d{2}[ \t]*$", expected_lines[2]),
-    )
-    repaired = content
-    for pattern, replacement in replacements:
-        repaired, count = re.subn(pattern, replacement, repaired, count=1, flags=re.MULTILINE)
-        if count != 1:
-            raise ValueError(f"current arXiv report is missing identity field: {pattern}")
-    dataview_pattern = r"^(from|TASK FROM) #\S+-\d{4}-\d{2}-\d{2}[ \t]*$"
-    repaired, count = re.subn(
-        dataview_pattern,
-        lambda match: f"{match.group(1)} #{category}-{report_date}",
-        repaired,
+        frontmatter,
         count=1,
         flags=re.MULTILINE,
     )
-    if count != 1:
-        raise ValueError(
-            f"current arXiv report is missing identity field: {dataview_pattern}"
-        )
-    return repaired
+    frontmatter = re.sub(
+        r'^papertrack_date:[ \t]*["\']?\d{4}-\d{2}-\d{2}["\']?[ \t]*$',
+        f'papertrack_date: "{report_date}"',
+        frontmatter,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    frontmatter = _repair_arxiv_tag_list(
+        frontmatter,
+        old_tag,
+        expected_tag,
+        report_date,
+    )
+    body = _repair_arxiv_dataview_query(
+        body,
+        old_tag,
+        expected_tag,
+        report_date,
+    )
+    return frontmatter + body
+
+
+def _repair_arxiv_tag_list(
+    frontmatter: str,
+    old_tag: str,
+    expected_tag: str,
+    report_date: str,
+) -> str:
+    expected_line = f"  - {expected_tag}"
+    if re.search(rf"^{re.escape(expected_line)}[ \t]*$", frontmatter, re.MULTILINE):
+        return frontmatter
+
+    old_line = f"  - {old_tag}"
+    repaired, count = re.subn(
+        rf"^{re.escape(old_line)}[ \t]*$",
+        expected_line,
+        frontmatter,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if count == 1:
+        return repaired
+
+    candidates = list(re.finditer(
+        rf"^  - #\S+-{re.escape(report_date)}[ \t]*$",
+        frontmatter,
+        re.MULTILINE,
+    ))
+    if len(candidates) != 1:
+        raise ValueError("current arXiv report has ambiguous generated tag identity")
+    match = candidates[0]
+    return frontmatter[:match.start()] + expected_line + frontmatter[match.end():]
+
+
+def _repair_arxiv_dataview_query(
+    body: str,
+    old_tag: str,
+    expected_tag: str,
+    report_date: str,
+) -> str:
+    block_match = re.search(r"```dataview\n.*?\n```", body, re.DOTALL)
+    if block_match is None:
+        return body
+    block = block_match.group(0)
+    query_pattern = r"^(from|TASK FROM) (#\S+-\d{4}-\d{2}-\d{2})[ \t]*$"
+    queries = list(re.finditer(query_pattern, block, re.MULTILINE))
+    if any(match.group(2) == expected_tag for match in queries):
+        return body
+
+    old_matches = [match for match in queries if match.group(2) == old_tag]
+    if len(old_matches) == 1:
+        match = old_matches[0]
+    else:
+        dated = [match for match in queries if match.group(2).endswith(f"-{report_date}")]
+        if not dated:
+            return body
+        if len(dated) != 1:
+            raise ValueError("current arXiv report has ambiguous generated Dataview identity")
+        match = dated[0]
+    repaired_block = (
+        block[:match.start()]
+        + f"{match.group(1)} {expected_tag}"
+        + block[match.end():]
+    )
+    return body[:block_match.start()] + repaired_block + body[block_match.end():]
 
 
 def _journal_metadata(content: str, path: Path, data_dir: str) -> dict[str, str]:
@@ -581,6 +663,16 @@ def _apply_task_state_to_line(
         return line
     identifier, style, _ = parsed
     state = states.get((identifier, style))
+    completed_state = next(
+        (
+            candidate
+            for (candidate_id, _), candidate in states.items()
+            if candidate_id == identifier and candidate.box == "x"
+        ),
+        None,
+    )
+    if completed_state is not None and (state is None or state.box != "x"):
+        state = completed_state
     if state is None:
         return line
 

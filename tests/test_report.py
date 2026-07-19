@@ -3,7 +3,7 @@ from bs4 import BeautifulSoup
 import pytest
 
 from papertrack.arxiv_entry import ArxivEntry
-from papertrack.arxiv_index_fetch import _parse_arxiv_result
+from papertrack.arxiv_index_fetch import _parse_arxiv_page, _parse_arxiv_result
 from papertrack.journal_entry import JournalEntry
 from papertrack.report import (
     parse_old_report,
@@ -943,6 +943,146 @@ from #quant-ph-2026-06-08
     )
 
     assert existing.read_bytes() == original.encode()
+
+
+def test_refresh_does_not_replace_report_when_official_result_loses_old_paper(
+    tmp_path, monkeypatch
+):
+    from papertrack import report
+    from papertrack.adapter_result import AdapterResult, SUCCESS
+    from papertrack.arxiv_entry import ArxivEntry
+
+    existing = tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "08.md"
+    existing.parent.mkdir(parents=True)
+    original = """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+---
+
+```dataview
+TASK
+```
+
+## collected
+
+## not collected
+
+### arXiv:2606.00001
+
+- [x] [arXiv:2606.00001](https://arxiv.org/abs/2606.00001) ✅ 2026-06-09
+
+### arXiv:2606.00002
+
+- [ ] [arXiv:2606.00002](https://arxiv.org/abs/2606.00002)
+"""
+    existing.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(
+        report,
+        "query_arxiv_result",
+        lambda *args, **kwargs: AdapterResult(
+            entries={
+                "arXiv:2606.00002": ArxivEntry(
+                    arxiv_id="arXiv:2606.00002",
+                    title="Still present",
+                    authors=["A Author"],
+                    abstract="Abstract",
+                )
+            },
+            outcome=SUCCESS,
+            provider="arxiv",
+            source="arxiv",
+        ),
+    )
+
+    report.filter_arxiv_days_to_md(
+        days=[date(2026, 6, 8)],
+        md_folder=str(tmp_path / "arxiv" / "quant-ph"),
+        category="quant-ph",
+        refresh_existing=True,
+    )
+
+    assert existing.read_text(encoding="utf-8") == original
+
+
+def test_refresh_preserves_collected_section_when_zotero_is_unavailable(
+    tmp_path, monkeypatch
+):
+    from papertrack import report
+    from papertrack.adapter_result import AdapterResult, SUCCESS
+    from papertrack.arxiv_entry import ArxivEntry
+
+    existing = tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "08.md"
+    existing.parent.mkdir(parents=True)
+    existing.write_text(
+        """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+---
+
+```dataview
+TASK
+```
+
+## collected
+
+### arXiv:2606.00001
+
+- [ ] [arXiv:2606.00001](https://arxiv.org/abs/2606.00001)
+
+Title:  Old title
+
+## not collected
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        report,
+        "query_arxiv_result",
+        lambda *args, **kwargs: AdapterResult(
+            entries={
+                "arXiv:2606.00001": ArxivEntry(
+                    arxiv_id="arXiv:2606.00001",
+                    title="Fresh title",
+                    authors=["A Author"],
+                    abstract="Fresh abstract",
+                )
+            },
+            outcome=SUCCESS,
+            provider="arxiv",
+            source="arxiv",
+        ),
+    )
+
+    report.filter_arxiv_days_to_md(
+        days=[date(2026, 6, 8)],
+        md_folder=str(tmp_path / "arxiv" / "quant-ph"),
+        category="quant-ph",
+        zotero=None,
+        refresh_existing=True,
+    )
+
+    refreshed = existing.read_text(encoding="utf-8")
+    collected = refreshed.split("## collected", 1)[1].split("## not collected", 1)[0]
+    assert "### arXiv:2606.00001" in collected
+    assert "Title:  Fresh title" in collected
+
+
+def test_parse_arxiv_page_rejects_partial_entry_parse():
+    results = {
+        "feed": {
+            "summary": """
+<li class="arxiv-result">
+  <p class="list-title"><a>arXiv:2606.00001</a></p>
+  <p class="title">Good paper</p>
+</li>
+<li class="arxiv-result">
+  <p class="title">Missing identifier</p>
+</li>
+"""
+        }
+    }
+
+    assert _parse_arxiv_page(results, "https://arxiv.test/search") is None
 
 
 def test_filter_arxiv_days_to_md_skips_empty_days(tmp_path, monkeypatch):

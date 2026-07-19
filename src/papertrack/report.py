@@ -51,7 +51,9 @@ def _render_report(date_string: str, category: str,
 
 
 def _classify_papers(arxiv_dict: dict[str, ArxivEntry],
-                     zotero: ZoteroQuery | None) -> tuple[list[str], list[str]]:
+                     zotero: ZoteroQuery | None,
+                     previously_collected: set[str] | None = None,
+                     ) -> tuple[list[str], list[str]]:
     """Split papers into 'collected' (found in Zotero) and 'not collected'.
 
     When Zotero is unavailable (zotero=None), all papers go to not_collected
@@ -60,6 +62,7 @@ def _classify_papers(arxiv_dict: dict[str, ArxivEntry],
     """
     collected: list[str] = []
     not_collected: list[str] = []
+    previously_collected = previously_collected or set()
 
     for arxiv_id, entry in arxiv_dict.items():
         if zotero is not None:
@@ -67,13 +70,16 @@ def _classify_papers(arxiv_dict: dict[str, ArxivEntry],
                 found = zotero.match_entry(entry).is_collected
             except Exception:
                 logger.exception("Zotero lookup failed for %s", arxiv_id)
-                found = False
+                found = arxiv_id in previously_collected
             if found:
                 collected.append(_render_paper(entry))
             else:
                 not_collected.append(_render_paper(entry))
         else:
-            not_collected.append(_render_paper(entry))
+            if arxiv_id in previously_collected:
+                collected.append(_render_paper(entry))
+            else:
+                not_collected.append(_render_paper(entry))
 
     return collected, not_collected
 
@@ -81,7 +87,8 @@ def _classify_papers(arxiv_dict: dict[str, ArxivEntry],
 def _gen_oneday_markdown(date_string: str, category: str,
                          oneday_arxiv_dict: dict[str, ArxivEntry],
                          zotero: ZoteroQuery | None,
-                         old_data: list[str] | None = None) -> str:
+                         old_data: list[str] | None = None,
+                         previously_collected: set[str] | None = None) -> str:
     """Generate a single-day Markdown report.
 
     If old_data (arxiv IDs from a previous report run) is provided, any
@@ -93,7 +100,11 @@ def _gen_oneday_markdown(date_string: str, category: str,
     - Papers whose metadata (external DOI, journal_ref) was updated by
       arXiv after formal publication.
     """
-    collected, not_collected = _classify_papers(oneday_arxiv_dict, zotero)
+    collected, not_collected = _classify_papers(
+        oneday_arxiv_dict,
+        zotero,
+        previously_collected,
+    )
 
     new_data: list[str] = []
     if old_data is not None:
@@ -148,6 +159,19 @@ def _read_existing_report(file_path: str) -> str | None:
         return None
     with open(file_path, "r", encoding="utf-8") as f:
         return f.read()
+
+
+def _report_entry_ids(content: str | None) -> set[str]:
+    if not content:
+        return set()
+    return set(re.findall(r"^###\s*(arXiv:\S+)", content, re.MULTILINE))
+
+
+def _collected_entry_ids(content: str | None) -> set[str]:
+    if not content or "## collected" not in content:
+        return set()
+    collected = content.split("## collected", 1)[1].split("## not collected", 1)[0]
+    return _report_entry_ids(collected)
 
 
 def _arxiv_report_file(md_folder: str,
@@ -205,18 +229,30 @@ def _filter_one_arxiv_day_to_md(day_date: date, md_folder: str,
     if not arxiv_dict:
         return
 
+    old_content = _read_existing_report(oneday_report_file)
+    missing_old_ids = _report_entry_ids(old_content) - set(arxiv_dict)
+    if missing_old_ids:
+        logger.warning(
+            "Preserving existing arXiv report because refreshed result lost %d "
+            "paper(s): %s %s",
+            len(missing_old_ids),
+            category,
+            date_string,
+        )
+        return
+
     logger.info("processing %s, papers: %d", date_string, len(arxiv_dict))
 
     os.makedirs(os.path.dirname(oneday_report_file), exist_ok=True)
 
     parse_old = parse_old_report(oneday_report_file)
-    old_content = _read_existing_report(oneday_report_file)
     markdown_str = _gen_oneday_markdown(
         date_string,
         category,
         arxiv_dict,
         zotero,
         parse_old,
+        _collected_entry_ids(old_content),
     )
     markdown_str = preserve_task_state(markdown_str, old_content)
 
