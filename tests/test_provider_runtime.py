@@ -237,6 +237,24 @@ def test_runtime_reuses_context_and_opens_circuit_after_three_blocks(tmp_path):
     assert fake.stopped is True
 
 
+def test_runtime_launches_persistent_chrome_with_only_automation_controlled_disabled(
+    tmp_path,
+):
+    clock = FakeClock()
+    fake = FakePlaywright(clock)
+    runtime = make_runtime(tmp_path, fake, clock)
+
+    with runtime:
+        pass
+
+    assert fake.launch_kwargs == {
+        "user_data_dir": str(tmp_path / "profiles" / "aps"),
+        "channel": "chrome",
+        "headless": False,
+        "args": ["--disable-blink-features=AutomationControlled"],
+    }
+
+
 def test_second_issue_navigation_obeys_provider_interval(tmp_path):
     clock = FakeClock()
     fake = FakePlaywright(clock)

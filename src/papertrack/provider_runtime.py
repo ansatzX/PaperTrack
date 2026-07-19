@@ -189,6 +189,7 @@ class ProviderRuntime:
                 user_data_dir=str(self.profile_dir),
                 channel="chrome",
                 headless=False,
+                args=["--disable-blink-features=AutomationControlled"],
             )
             self._page = self._context.new_page()
             self._page.on("response", self._capture_response)
