@@ -71,9 +71,11 @@ has:
 - selector or endpoint validator results;
 - parser version and extracted DOI membership hash.
 
-The cache is not committed. Writes are atomic: raw content and manifest are
-written to temporary files, validated, then renamed into place. A failed fetch
-or failed validation cannot replace the last valid snapshot.
+The cache is not committed. Raw bodies are immutable, content-addressed blobs.
+A commit fsyncs all new blobs first and then atomically replaces the small issue
+manifest that points to them. The previous manifest and its blobs remain valid
+until that final replacement. A failed fetch or failed validation therefore
+cannot damage the last valid snapshot.
 
 Re-rendering Markdown from a valid snapshot is offline and may be repeated as
 often as needed. A parser upgrade does not require another publisher request.
