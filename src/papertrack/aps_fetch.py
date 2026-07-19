@@ -259,13 +259,37 @@ def _record_snapshot_rejection(
             cache_validation="rejected",
             rejection_reason=reason,
             message=message,
-            snapshot_path=str(snapshot.body_path),
+            cache_snapshot_path=str(snapshot.body_path),
             snapshot_canonical_url=snapshot.canonical_url,
             snapshot_final_url=snapshot.final_url,
             snapshot_media_type=snapshot.media_type,
             membership_hash=snapshot.membership_hash,
         ),
         html=html,
+    )
+
+
+def _record_store_load_rejection(
+    journal_slug: str,
+    volume: str,
+    issue: str,
+    url: str,
+    load_result,
+) -> None:
+    record_fetch_attempt(
+        _diagnostic_context(
+            journal_slug,
+            volume,
+            issue,
+            url,
+            "snapshot_validation",
+            PARSE_FAILED,
+            cache_validation="rejected",
+            cache_load_status=load_result.status,
+            rejection_reason=load_result.reason,
+            message=load_result.message,
+            cache_snapshot_path=str(load_result.cache_snapshot_path),
+        )
     )
 
 
@@ -407,7 +431,12 @@ def _query_aps_with_runtime(
         journal_slug=journal_slug, volume=volume, issue=issue
     )
     key = SnapshotKey("aps", journal_slug, volume, issue)
-    snapshot = provider_runtime.snapshot_store.load(key)
+    load_result = provider_runtime.snapshot_store.load_result(key)
+    snapshot = load_result.snapshot
+    if load_result.status == "rejected":
+        _record_store_load_rejection(
+            journal_slug, volume, issue, url, load_result
+        )
     if snapshot is not None:
         provenance_rejection = html_snapshot_provenance_rejection(
             snapshot, url

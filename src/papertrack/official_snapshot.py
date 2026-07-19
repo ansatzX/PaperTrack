@@ -63,6 +63,15 @@ class OfficialSnapshot:
     attachment_paths: dict[str, Path]
 
 
+@dataclass(frozen=True)
+class SnapshotLoadResult:
+    snapshot: OfficialSnapshot | None
+    status: str
+    reason: str
+    cache_snapshot_path: Path
+    message: str = ""
+
+
 def html_snapshot_provenance_rejection(
     snapshot: OfficialSnapshot, requested_url: str
 ) -> tuple[str, str] | None:
@@ -96,25 +105,61 @@ class OfficialSnapshotStore:
 
     def load(self, key: SnapshotKey) -> OfficialSnapshot | None:
         """Return only a manifest/body pair whose hashes and exact schema validate."""
+        return self.load_result(key).snapshot
+
+    def load_result(self, key: SnapshotKey) -> SnapshotLoadResult:
+        """Audit a snapshot load without collapsing absence and corruption."""
         manifest_path = self._manifest_path(key)
         try:
-            manifest = json.loads(manifest_path.read_bytes())
+            encoded_manifest = manifest_path.read_bytes()
+        except FileNotFoundError:
+            return SnapshotLoadResult(
+                snapshot=None,
+                status="absent",
+                reason="manifest_absent",
+                cache_snapshot_path=manifest_path,
+            )
+        except OSError as exc:
+            return self._rejected_load(
+                "read_decode_failure", manifest_path, str(exc)
+            )
+
+        try:
+            manifest = json.loads(encoded_manifest)
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            return self._rejected_load(
+                "read_decode_failure", manifest_path, str(exc)
+            )
+
+        try:
             self._validate_manifest(manifest)
             manifest_key = SnapshotKey(**manifest["key"])
             if manifest_key != key:
-                return None
+                return self._rejected_load(
+                    "invalid_schema",
+                    manifest_path,
+                    "snapshot manifest key does not match requested key",
+                )
 
             content_hash = manifest["content_hash"]
             body_path = self._blob_path(content_hash)
             if not self._blob_matches(body_path, content_hash):
-                return None
+                return self._rejected_load(
+                    "content_hash_failure",
+                    body_path,
+                    "snapshot body is missing, unreadable, or hash-mismatched",
+                )
 
             attachment_paths: dict[str, Path] = {}
             for attachment in manifest["attachments"]:
                 digest = attachment["content_hash"]
                 path = self._blob_path(digest)
                 if not self._blob_matches(path, digest):
-                    return None
+                    return self._rejected_load(
+                        "attachment_hash_failure",
+                        path,
+                        "snapshot attachment is missing, unreadable, or hash-mismatched",
+                    )
                 attachment_paths[attachment["name"]] = path
 
             validation_data = manifest["validation"]
@@ -126,9 +171,13 @@ class OfficialSnapshotStore:
             if self._membership_hash(validation.membership_dois) != manifest[
                 "membership_hash"
             ]:
-                return None
+                return self._rejected_load(
+                    "membership_hash_mismatch",
+                    manifest_path,
+                    "snapshot membership hash does not match validation DOIs",
+                )
 
-            return OfficialSnapshot(
+            snapshot = OfficialSnapshot(
                 key=key,
                 canonical_url=manifest["canonical_url"],
                 final_url=manifest["final_url"],
@@ -140,8 +189,28 @@ class OfficialSnapshotStore:
                 body_path=body_path,
                 attachment_paths=attachment_paths,
             )
-        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
-            return None
+            return SnapshotLoadResult(
+                snapshot=snapshot,
+                status="loaded",
+                reason="accepted",
+                cache_snapshot_path=body_path,
+            )
+        except (ValueError, TypeError, KeyError) as exc:
+            return self._rejected_load(
+                "invalid_schema", manifest_path, str(exc)
+            )
+
+    @staticmethod
+    def _rejected_load(
+        reason: str, cache_snapshot_path: Path, message: str
+    ) -> SnapshotLoadResult:
+        return SnapshotLoadResult(
+            snapshot=None,
+            status="rejected",
+            reason=reason,
+            cache_snapshot_path=cache_snapshot_path,
+            message=message,
+        )
 
     def commit(
         self,

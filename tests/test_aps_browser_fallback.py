@@ -1,4 +1,4 @@
-from dataclasses import replace
+import json
 
 import pytest
 
@@ -13,7 +13,9 @@ from papertrack.adapter_result import (
 )
 from papertrack.official_snapshot import (
     OfficialSnapshotStore,
+    SnapshotAttachment,
     SnapshotKey,
+    SnapshotLoadResult,
     SnapshotValidation,
 )
 from papertrack.provider_runtime import OfficialBrowserResult, ProviderRunStats
@@ -104,6 +106,7 @@ def seed_aps_snapshot(
     canonical_url="https://journals.aps.org/prl/issues/127/27",
     final_url="https://journals.aps.org/prl/issues/127/27",
     media_type="text/html",
+    attachments=(),
 ):
     key = SnapshotKey("aps", "prl", "127", "27")
     return snapshot_store.commit(
@@ -117,6 +120,7 @@ def seed_aps_snapshot(
             membership_dois=("10.1103/PhysRevLett.127.270401",),
             parser_version="aps-issue-v1",
         ),
+        attachments,
     )
 
 
@@ -137,16 +141,20 @@ def test_aps_snapshot_rebuild_preserves_official_doi_case(
     assert "10.1103/PhysRevLett.127.270401" in result.entries
     assert result.metadata["official_transport"] == "snapshot"
     assert runtime.fetch_calls == []
+    assert runtime.stats.snapshot_hit == 1
 
 
 def test_aps_reparses_snapshot_and_rejects_changed_membership(
     monkeypatch, runtime, snapshot_store
 ):
-    stored = seed_aps_snapshot(snapshot_store)
-    mismatched = replace(stored, membership_hash="0" * 64)
-    original_load = snapshot_store.load
-    loads = iter((mismatched,))
-    snapshot_store.load = lambda key: next(loads, original_load(key))
+    seed_aps_snapshot(snapshot_store)
+    manifest_path = (
+        snapshot_store.root
+        / "aps" / "prl" / "127" / "27" / "manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text())
+    manifest["membership_hash"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest))
     runtime.queue_html(APS_FIXTURE)
     events = []
     monkeypatch.setattr(
@@ -168,7 +176,8 @@ def test_aps_reparses_snapshot_and_rejects_changed_membership(
         if event["stage"] == "snapshot_validation"
     ]
     assert len(rejection) == 1
-    assert rejection[0]["rejection_reason"] == "membership_hash"
+    assert rejection[0]["rejection_reason"] == "membership_hash_mismatch"
+    assert rejection[0]["cache_snapshot_path"] == str(manifest_path)
 
 
 def test_aps_live_success_commits_validated_snapshot(runtime, snapshot_store):
@@ -204,6 +213,88 @@ def test_aps_live_success_commits_validated_snapshot(runtime, snapshot_store):
         and "/articles/" not in call.canonical_url
         for call in runtime.fetch_calls
     )
+
+
+def test_aps_absent_snapshot_emits_no_cache_rejection(monkeypatch, runtime):
+    runtime.queue_html(APS_FIXTURE)
+    events = []
+    monkeypatch.setattr(
+        aps_fetch,
+        "record_fetch_attempt",
+        lambda event, html=None: events.append(event),
+    )
+
+    result = aps_fetch.query_aps_issue_result(
+        "prl", "127", "27", "PRL", runtime
+    )
+
+    assert result.outcome == SUCCESS
+    assert not [
+        event for event in events
+        if event["stage"] == "snapshot_validation"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("corruption", "rejection_reason"),
+    [
+        ("manifest", "invalid_schema"),
+        ("body", "content_hash_failure"),
+        ("attachment", "attachment_hash_failure"),
+    ],
+)
+def test_aps_store_corruption_emits_cache_rejection_then_live_retry(
+    monkeypatch, snapshot_store, corruption, rejection_reason
+):
+    stored = seed_aps_snapshot(
+        snapshot_store,
+        attachments=(
+            SnapshotAttachment(
+                "abstract.json", "application/json", b'{}'
+            ),
+        ),
+    )
+    manifest_path = (
+        snapshot_store.root
+        / "aps" / "prl" / "127" / "27" / "manifest.json"
+    )
+    if corruption == "manifest":
+        manifest = json.loads(manifest_path.read_text())
+        manifest["unexpected"] = True
+        manifest_path.write_text(json.dumps(manifest))
+        corrupted_path = manifest_path
+    elif corruption == "body":
+        stored.body_path.write_bytes(b"corrupt")
+        corrupted_path = stored.body_path
+    else:
+        corrupted_path = stored.attachment_paths["abstract.json"]
+        corrupted_path.write_bytes(b"corrupt")
+
+    runtime = Runtime(snapshot_store)
+    runtime.queue_html(APS_FIXTURE)
+    events = []
+    monkeypatch.setattr(
+        aps_fetch,
+        "record_fetch_attempt",
+        lambda event, html=None: events.append(event),
+    )
+
+    result = aps_fetch.query_aps_issue_result(
+        "prl", "127", "27", "PRL", runtime
+    )
+
+    assert result.outcome == SUCCESS
+    assert result.metadata["official_transport"] == "live"
+    assert len(runtime.fetch_calls) == 1
+    assert runtime.stats.snapshot_hit == 0
+    rejection = [
+        event for event in events
+        if event["stage"] == "snapshot_validation"
+    ]
+    assert len(rejection) == 1
+    assert rejection[0]["rejection_reason"] == rejection_reason
+    assert rejection[0]["cache_snapshot_path"] == str(corrupted_path)
+    assert "snapshot_path" not in rejection[0]
 
 
 def test_aps_malformed_live_html_does_not_increment_live_success(
@@ -329,23 +420,25 @@ def test_aps_invalid_live_result_never_replaces_existing_snapshot(
     old = seed_aps_snapshot(snapshot_store)
     runtime = Runtime(snapshot_store)
     runtime.queue_html(html, outcome=runtime_outcome)
-    original_load = snapshot_store.load
+    original_load_result = snapshot_store.load_result
     first = True
 
     def miss_once(key):
         nonlocal first
         if first:
             first = False
-            return None
-        return original_load(key)
+            return SnapshotLoadResult(
+                None, "absent", "manifest_absent", old.body_path
+            )
+        return original_load_result(key)
 
-    snapshot_store.load = miss_once
+    snapshot_store.load_result = miss_once
 
     result = aps_fetch.query_aps_issue_result(
         "prl", "127", "27", "PRL", runtime
     )
 
-    snapshot_store.load = original_load
+    snapshot_store.load_result = original_load_result
     preserved = snapshot_store.load(SnapshotKey("aps", "prl", "127", "27"))
     assert result.outcome == expected_outcome
     assert preserved is not None
@@ -358,8 +451,10 @@ def test_aps_parser_exception_never_replaces_existing_snapshot(
     old = seed_aps_snapshot(snapshot_store)
     runtime = Runtime(snapshot_store)
     runtime.queue_html(APS_FIXTURE)
-    original_load = snapshot_store.load
-    snapshot_store.load = lambda key: None
+    original_load_result = snapshot_store.load_result
+    snapshot_store.load_result = lambda key: SnapshotLoadResult(
+        None, "absent", "manifest_absent", old.body_path
+    )
     monkeypatch.setattr(
         aps_fetch,
         "_parse_aps_issue_result",
@@ -370,7 +465,7 @@ def test_aps_parser_exception_never_replaces_existing_snapshot(
         "prl", "127", "27", "PRL", runtime
     )
 
-    snapshot_store.load = original_load
+    snapshot_store.load_result = original_load_result
     preserved = snapshot_store.load(SnapshotKey("aps", "prl", "127", "27"))
     assert result.outcome == PARSE_FAILED
     assert preserved is not None

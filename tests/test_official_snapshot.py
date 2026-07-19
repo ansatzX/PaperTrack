@@ -21,6 +21,118 @@ def _validation(*dois: str) -> SnapshotValidation:
     )
 
 
+def _stored_snapshot_with_attachment(store, key):
+    return store.commit(
+        key,
+        canonical_url="https://pubs.acs.org/toc/jcisd8/66/12",
+        final_url="https://pubs.acs.org/toc/jcisd8/66/12",
+        media_type="text/html",
+        body=b"<div class='issue-item clearfix'></div>",
+        validation=_validation("10.1021/acs.jcim.6c00001"),
+        attachments=(
+            SnapshotAttachment(
+                name="abstract-123.json",
+                media_type="application/json",
+                body=b'{"Success": true}',
+            ),
+        ),
+    )
+
+
+def test_load_result_distinguishes_absent_snapshot(tmp_path):
+    store = OfficialSnapshotStore(tmp_path)
+    key = SnapshotKey("acs", "jcim", "66", "12")
+
+    result = store.load_result(key)
+
+    assert result.snapshot is None
+    assert result.status == "absent"
+    assert result.reason == "manifest_absent"
+    assert result.cache_snapshot_path == (
+        tmp_path / "acs" / "jcim" / "66" / "12" / "manifest.json"
+    )
+    assert store.load(key) is None
+
+
+def test_load_result_reports_invalid_manifest_schema(tmp_path):
+    store = OfficialSnapshotStore(tmp_path)
+    key = SnapshotKey("acs", "jcim", "66", "12")
+    _stored_snapshot_with_attachment(store, key)
+    manifest_path = tmp_path / "acs" / "jcim" / "66" / "12" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["unexpected"] = True
+    manifest_path.write_text(json.dumps(manifest))
+
+    result = store.load_result(key)
+
+    assert result.snapshot is None
+    assert result.status == "rejected"
+    assert result.reason == "invalid_schema"
+    assert result.cache_snapshot_path == manifest_path
+    assert store.load(key) is None
+
+
+def test_load_result_reports_manifest_decode_failure(tmp_path):
+    store = OfficialSnapshotStore(tmp_path)
+    key = SnapshotKey("acs", "jcim", "66", "12")
+    _stored_snapshot_with_attachment(store, key)
+    manifest_path = tmp_path / "acs" / "jcim" / "66" / "12" / "manifest.json"
+    manifest_path.write_bytes(b"\xffnot-json")
+
+    result = store.load_result(key)
+
+    assert result.snapshot is None
+    assert result.status == "rejected"
+    assert result.reason == "read_decode_failure"
+    assert result.cache_snapshot_path == manifest_path
+
+
+def test_load_result_reports_content_hash_failure(tmp_path):
+    store = OfficialSnapshotStore(tmp_path)
+    key = SnapshotKey("acs", "jcim", "66", "12")
+    stored = _stored_snapshot_with_attachment(store, key)
+    stored.body_path.write_bytes(b"corrupt")
+
+    result = store.load_result(key)
+
+    assert result.snapshot is None
+    assert result.status == "rejected"
+    assert result.reason == "content_hash_failure"
+    assert result.cache_snapshot_path == stored.body_path
+
+
+def test_load_result_reports_attachment_hash_failure(tmp_path):
+    store = OfficialSnapshotStore(tmp_path)
+    key = SnapshotKey("acs", "jcim", "66", "12")
+    stored = _stored_snapshot_with_attachment(store, key)
+    attachment_path = stored.attachment_paths["abstract-123.json"]
+    attachment_path.write_bytes(b"corrupt")
+
+    result = store.load_result(key)
+
+    assert result.snapshot is None
+    assert result.status == "rejected"
+    assert result.reason == "attachment_hash_failure"
+    assert result.cache_snapshot_path == attachment_path
+
+
+def test_load_result_reports_membership_hash_mismatch(tmp_path):
+    store = OfficialSnapshotStore(tmp_path)
+    key = SnapshotKey("acs", "jcim", "66", "12")
+    _stored_snapshot_with_attachment(store, key)
+    manifest_path = tmp_path / "acs" / "jcim" / "66" / "12" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["membership_hash"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest))
+
+    result = store.load_result(key)
+
+    assert result.snapshot is None
+    assert result.status == "rejected"
+    assert result.reason == "membership_hash_mismatch"
+    assert result.cache_snapshot_path == manifest_path
+
+
 def test_snapshot_round_trip_and_corruption_rejection(tmp_path):
     store = OfficialSnapshotStore(tmp_path)
     key = SnapshotKey("acs", "jcim", "66", "12")
