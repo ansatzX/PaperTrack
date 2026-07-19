@@ -70,7 +70,8 @@ class FakePage:
         self.browser.event_registered = True
         self._response_handler = handler
 
-    def goto(self, url):
+    def goto(self, url, **kwargs):
+        self.browser.goto_calls.append((url, kwargs))
         self.url = self.browser.navigation_final_url or url
         self.browser.navigation_times.append(self.browser.clock.time())
         self._challenge = self.browser.challenge_pages > 0
@@ -82,7 +83,8 @@ class FakePage:
             raise RuntimeError("navigation failed after responses")
         return FakeNavigationResponse(self.browser.navigation_status)
 
-    def reload(self):
+    def reload(self, **kwargs):
+        self.browser.reload_calls.append(kwargs)
         self.browser.reload_count += 1
         self.browser.navigation_times.append(self.browser.clock.time())
         self._challenge = self.browser.challenge_pages > 0
@@ -150,6 +152,8 @@ class FakePlaywright:
         self.selector_failure = selector_failure
         self.persistent_context_launches = 0
         self.navigation_times = []
+        self.goto_calls = []
+        self.reload_calls = []
         self.reload_count = 0
         self.closed = False
         self.stopped = False
@@ -244,6 +248,33 @@ def test_second_issue_navigation_obeys_provider_interval(tmp_path):
 
     assert fake.navigation_times == [0.0, 30.0]
     assert clock.sleeps == [30.0]
+
+
+def test_issue_navigation_waits_only_for_dom_content_before_selector(tmp_path):
+    clock = FakeClock()
+    fake = FakePlaywright(clock)
+    runtime = make_runtime(tmp_path, fake, clock)
+
+    with runtime:
+        assert runtime.fetch_issue(aps_request(0)).outcome == SUCCESS
+
+    assert fake.goto_calls == [
+        (
+            "https://journals.aps.org/pra/issues/1/1",
+            {"wait_until": "domcontentloaded"},
+        )
+    ]
+
+
+def test_challenge_reload_waits_only_for_dom_content_before_selector(tmp_path):
+    clock = FakeClock()
+    fake = FakePlaywright(clock, challenge_pages=1)
+    runtime = make_runtime(tmp_path, fake, clock)
+
+    with runtime:
+        assert runtime.fetch_issue(aps_request(0)).outcome == SUCCESS
+
+    assert fake.reload_calls == [{"wait_until": "domcontentloaded"}]
 
 
 def test_successful_issue_resets_consecutive_blocks(tmp_path):

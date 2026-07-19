@@ -252,7 +252,9 @@ class ProviderRuntime:
         attempt_count = 1
         selector_error = ""
         try:
-            response = self._page.goto(request.canonical_url)
+            response = self._page.goto(
+                request.canonical_url, wait_until="domcontentloaded"
+            )
             status_code = getattr(response, "status", None)
             selector_error = self._wait_for_selector(request.required_selector)
             html, final_url = self._page.content(), self._page.url
@@ -276,7 +278,7 @@ class ProviderRuntime:
                 self._sleep(self.challenge_retry_delay)
                 attempt_count = 2
                 self._wait_for_issue_interval()
-                response = self._page.reload()
+                response = self._page.reload(wait_until="domcontentloaded")
                 status_code = getattr(response, "status", status_code)
                 selector_error = self._wait_for_selector(request.required_selector)
                 html, final_url = self._page.content(), self._page.url
