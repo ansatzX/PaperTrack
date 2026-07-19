@@ -32,7 +32,9 @@ _ISSUE_PATHS = {
 _CAPTURE_MEDIA_TYPES = frozenset(
     {"text/html", "application/json", "application/xml"}
 )
-_MAX_CAPTURE_BYTES = 10 * 1024 * 1024
+# Playwright's sync API materializes body() before its size is known. This bound
+# controls which already-read response bodies this runtime retains for parsing.
+_MAX_RETAINED_CAPTURE_BYTES = 10 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -127,6 +129,7 @@ class ProviderRuntime:
         self._capture_patterns: tuple[re.Pattern[str], ...] = ()
         self._captured_responses: list[CapturedResponse] = []
         self._response_evidence: list[dict] = []
+        self._challenge_indicators: list[str] = []
 
     @property
     def captured_responses(self) -> tuple[CapturedResponse, ...]:
@@ -189,6 +192,7 @@ class ProviderRuntime:
         self._capture_patterns = ()
         self._captured_responses = []
         self._response_evidence = []
+        self._challenge_indicators = []
         if self._circuit_open:
             self.consecutive_blocks = 0
             self.stats.circuit_skipped += 1
@@ -235,13 +239,15 @@ class ProviderRuntime:
                 result = self._blocked_result(
                     request, final_url, status_code, html, attempt_count
                 )
-            elif _origin(final_url) != expected_origin:
+            elif _issue_location(final_url) != _issue_location(
+                request.canonical_url
+            ):
                 result = self._failed_result(
                     request,
                     final_url,
                     status_code,
                     html,
-                    "issue navigation left the canonical origin",
+                    "issue navigation changed the canonical issue location",
                     attempt_count,
                 )
             elif selector_error:
@@ -360,7 +366,12 @@ class ProviderRuntime:
     def _is_challenge(self, request: IssueRequest, html: str) -> bool:
         title = self._page.title()
         material = f"{title}\n{html}".lower()
-        return any(marker.lower() in material for marker in request.challenge_markers)
+        self._challenge_indicators = [
+            marker
+            for marker in request.challenge_markers
+            if marker.lower() in material
+        ]
+        return bool(self._challenge_indicators)
 
     def _blocked_result(
         self, request, final_url, status_code, html, attempt_count
@@ -408,7 +419,7 @@ class ProviderRuntime:
             if media_type not in _CAPTURE_MEDIA_TYPES:
                 return
             body = response.body()
-            if len(body) > _MAX_CAPTURE_BYTES:
+            if len(body) > _MAX_RETAINED_CAPTURE_BYTES:
                 return
             self._response_evidence.append(
                 {
@@ -459,17 +470,30 @@ class ProviderRuntime:
             os.close(fd)
 
     def _record_result(self, result: OfficialBrowserResult) -> None:
+        journal, volume, issue = _issue_identity(
+            self.provider, result.canonical_url
+        )
         record_fetch_attempt(
             {
                 "source_role": "authoritative",
                 "source": "journal",
                 "provider": self.provider,
+                "journal": journal,
+                "volume": volume,
+                "issue": issue,
                 "url": result.canonical_url,
                 "final_url": result.final_url,
                 "stage": "issue_page_browser",
                 "outcome": result.outcome,
                 "http_status": result.status_code,
+                "client": "playwright",
+                "browser_mode": "headed_chrome",
+                "profile_mode": "persistent",
+                "challenge_indicators": list(self._challenge_indicators),
+                "attempt": result.attempt_count,
                 "attempt_count": result.attempt_count,
+                "circuit_state": "open" if self._circuit_open else "closed",
+                "circuit_open": self._circuit_open,
                 "message": result.message,
                 "captured_response_evidence": self._response_evidence,
             },
@@ -488,6 +512,24 @@ def _origin(url: str) -> tuple[str, str, int | None]:
     if parsed.scheme == "https" and port == 443:
         port = None
     return parsed.scheme.lower(), (parsed.hostname or "").lower(), port
+
+
+def _issue_location(url: str) -> tuple[str, str, int | None, str]:
+    parsed = urlsplit(url)
+    return (*_origin(url), parsed.path)
+
+
+def _issue_identity(provider: str, url: str) -> tuple[str, str, str]:
+    parts = urlsplit(url).path.strip("/").split("/")
+    if provider == "acs":
+        _, journal, volume, issue = parts
+    elif provider == "aip" and parts[0] == "aip":
+        _, journal, _, volume, issue = parts
+    elif provider == "aip":
+        journal, _, volume, issue = parts
+    else:
+        journal, _, volume, issue = parts
+    return journal, volume, issue
 
 
 def _media_type(headers) -> str:

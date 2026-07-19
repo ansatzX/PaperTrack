@@ -36,9 +36,11 @@ class FakeApiResponse:
         self.status = 200
         self.headers = {"content-type": media_type}
         self._body = body
+        self.body_calls = 0
         self.request = type("Request", (), {"resource_type": resource_type})()
 
     def body(self):
+        self.body_calls += 1
         return self._body
 
 
@@ -62,6 +64,9 @@ class FakePage:
 
     def on(self, event, handler):
         assert event == "response"
+        if self.browser.failure_stage == "event_registration":
+            raise RuntimeError("event registration failed")
+        self.browser.event_registered = True
         self._response_handler = handler
 
     def goto(self, url):
@@ -101,7 +106,10 @@ class FakeContext:
         self.request = FakeRequestContext(browser)
 
     def new_page(self):
+        if self.browser.failure_stage == "page_creation":
+            raise RuntimeError("page creation failed")
         self.browser.page = FakePage(self.browser)
+        self.browser.page_created = True
         return self.browser.page
 
     def close(self):
@@ -117,7 +125,10 @@ class FakeChromium:
     def launch_persistent_context(self, **kwargs):
         self.browser.persistent_context_launches += 1
         self.browser.launch_kwargs = kwargs
+        if self.browser.failure_stage == "context_launch":
+            raise RuntimeError("context launch failed")
         self.browser.context = FakeContext(self.browser)
+        self.browser.context_created = True
         return self.browser.context
 
 
@@ -129,6 +140,7 @@ class FakePlaywright:
         selector_failure=False,
         context_close_error=False,
         manager_close_error=False,
+        failure_stage="",
     ):
         self.clock = clock
         self.challenge_pages = challenge_pages
@@ -144,9 +156,17 @@ class FakePlaywright:
         self.navigation_responses = []
         self.context_close_error = context_close_error
         self.manager_close_error = manager_close_error
+        self.failure_stage = failure_stage
+        self.entered = False
+        self.context_created = False
+        self.page_created = False
+        self.event_registered = False
         self.chromium = FakeChromium(self)
 
     def __enter__(self):
+        self.entered = True
+        if self.failure_stage == "playwright_enter":
+            raise RuntimeError("playwright enter failed")
         return self
 
     def __exit__(self, *args):
@@ -164,17 +184,20 @@ def aps_request(index):
 
 
 def make_runtime(tmp_path, fake, clock, **kwargs):
+    options = {
+        "playwright_factory": lambda: fake,
+        "clock": clock.time,
+        "sleep": clock.sleep,
+        "issue_interval": 30.0,
+        "challenge_retry_delay": 60.0,
+        "max_consecutive_blocks": 3,
+    }
+    options.update(kwargs)
     return ProviderRuntime(
         provider="aps",
         profile_root=tmp_path / "profiles",
         snapshot_root=tmp_path / "snapshots",
-        playwright_factory=lambda: fake,
-        clock=clock.time,
-        sleep=clock.sleep,
-        issue_interval=30.0,
-        challenge_retry_delay=60.0,
-        max_consecutive_blocks=3,
-        **kwargs,
+        **options,
     )
 
 
@@ -268,6 +291,33 @@ def test_issue_url_policy_rejects_before_navigation(tmp_path, url):
             runtime.fetch_issue(request)
 
     assert fake.navigation_times == []
+
+
+def test_issue_navigation_rejects_same_origin_non_issue_redirect(tmp_path):
+    clock = FakeClock()
+    fake = FakePlaywright(clock)
+    fake.navigation_final_url = "https://journals.aps.org/pra/articles/1/1"
+    runtime = make_runtime(tmp_path, fake, clock)
+
+    with runtime:
+        result = runtime.fetch_issue(aps_request(0))
+
+    assert result.outcome == FETCH_FAILED
+    assert result.message == "issue navigation changed the canonical issue location"
+
+
+def test_issue_navigation_permits_query_change_on_canonical_path(tmp_path):
+    clock = FakeClock()
+    fake = FakePlaywright(clock)
+    fake.navigation_final_url = (
+        "https://journals.aps.org/pra/issues/1/1?view=expanded"
+    )
+    runtime = make_runtime(tmp_path, fake, clock)
+
+    with runtime:
+        result = runtime.fetch_issue(aps_request(0))
+
+    assert result.outcome == SUCCESS
 
 
 def test_same_origin_request_is_paced_and_returns_captured_response(tmp_path):
@@ -429,6 +479,50 @@ def test_close_attempts_all_cleanup_after_failures(tmp_path):
     assert replacement_fake.persistent_context_launches == 1
 
 
+@pytest.mark.parametrize(
+    ("failure_stage", "expected_context_close"),
+    [
+        ("playwright_enter", False),
+        ("context_launch", False),
+        ("page_creation", True),
+        ("event_registration", True),
+    ],
+)
+def test_partial_open_failure_releases_all_acquired_resources(
+    tmp_path, failure_stage, expected_context_close
+):
+    clock = FakeClock()
+    fake = FakePlaywright(clock, failure_stage=failure_stage)
+    runtime = make_runtime(tmp_path, fake, clock)
+
+    with pytest.raises(RuntimeError, match=failure_stage.replace("_", " ")):
+        runtime.open()
+
+    assert fake.closed is expected_context_close
+    assert fake.stopped is True
+    replacement_fake = FakePlaywright(clock)
+    with make_runtime(tmp_path, replacement_fake, clock):
+        pass
+    assert replacement_fake.persistent_context_launches == 1
+
+
+def test_playwright_factory_failure_releases_profile_lock(tmp_path):
+    clock = FakeClock()
+
+    def fail_factory():
+        raise RuntimeError("playwright factory failed")
+
+    runtime = make_runtime(tmp_path, FakePlaywright(clock), clock)
+    runtime._playwright_factory = fail_factory
+    with pytest.raises(RuntimeError, match="playwright factory failed"):
+        runtime.open()
+
+    replacement_fake = FakePlaywright(clock)
+    with make_runtime(tmp_path, replacement_fake, clock):
+        pass
+    assert replacement_fake.persistent_context_launches == 1
+
+
 def test_capture_patterns_admit_only_selected_safe_response_bodies(tmp_path):
     clock = FakeClock()
     fake = FakePlaywright(clock)
@@ -457,11 +551,17 @@ def test_capture_filters_size_type_origin_and_resource_role(tmp_path):
     clock = FakeClock()
     fake = FakePlaywright(clock)
     accepted = FakeApiResponse("https://journals.aps.org/api/accepted")
+    retained_at_limit = FakeApiResponse(
+        "https://journals.aps.org/api/at-limit", body=b"x" * (10 * 1024 * 1024)
+    )
+    over_retention_limit = FakeApiResponse(
+        "https://journals.aps.org/api/large",
+        body=b"x" * (10 * 1024 * 1024 + 1),
+    )
     fake.navigation_responses = [
         accepted,
-        FakeApiResponse(
-            "https://journals.aps.org/api/large", body=b"x" * (10 * 1024 * 1024 + 1)
-        ),
+        retained_at_limit,
+        over_retention_limit,
         FakeApiResponse(
             "https://journals.aps.org/api/plain", media_type="text/plain"
         ),
@@ -481,8 +581,15 @@ def test_capture_filters_size_type_origin_and_resource_role(tmp_path):
     with runtime:
         result = runtime.fetch_issue(request)
 
-    assert [item.url for item in result.captured] == [accepted.url]
-    assert [item["url"] for item in runtime._response_evidence] == [accepted.url]
+    assert [item.url for item in result.captured] == [
+        accepted.url,
+        retained_at_limit.url,
+    ]
+    assert [item["url"] for item in runtime._response_evidence] == [
+        accepted.url,
+        retained_at_limit.url,
+    ]
+    assert over_retention_limit.body_calls == 1
 
 
 def test_circuit_skip_diagnostics_do_not_reuse_previous_capture_evidence(
@@ -509,3 +616,68 @@ def test_circuit_skip_diagnostics_do_not_reuse_previous_capture_evidence(
         assert runtime.fetch_issue(aps_request(3)).outcome == CIRCUIT_OPEN
 
     assert events[-1]["captured_response_evidence"] == []
+
+
+def test_failure_diagnostics_include_issue_runtime_and_circuit_context(
+    tmp_path, monkeypatch
+):
+    from papertrack import provider_runtime
+
+    events = []
+    monkeypatch.setattr(
+        provider_runtime,
+        "record_fetch_attempt",
+        lambda event, html=None: events.append(event),
+    )
+    clock = FakeClock()
+    blocked_fake = FakePlaywright(clock, challenge_pages=2)
+    blocked_runtime = make_runtime(
+        tmp_path,
+        blocked_fake,
+        clock,
+        max_consecutive_blocks=1,
+    )
+    with blocked_runtime:
+        assert blocked_runtime.fetch_issue(aps_request(0)).outcome == BLOCKED
+        assert blocked_runtime.fetch_issue(aps_request(1)).outcome == CIRCUIT_OPEN
+
+    failed_fake = FakePlaywright(clock, selector_failure=True)
+    with make_runtime(tmp_path, failed_fake, clock) as failed_runtime:
+        assert failed_runtime.fetch_issue(aps_request(2)).outcome == FETCH_FAILED
+
+    blocked_event, circuit_event, failed_event = events
+    common = {
+        "source_role": "authoritative",
+        "source": "journal",
+        "provider": "aps",
+        "stage": "issue_page_browser",
+        "client": "playwright",
+        "browser_mode": "headed_chrome",
+        "profile_mode": "persistent",
+    }
+    for event in events:
+        assert {key: event[key] for key in common} == common
+        assert event["journal"] == "pra"
+        assert event["volume"] == "1"
+
+    assert blocked_event["issue"] == "1"
+    assert blocked_event["url"].endswith("/pra/issues/1/1")
+    assert blocked_event["http_status"] == 200
+    assert blocked_event["message"]
+    assert blocked_event["challenge_indicators"] == [
+        "just a moment",
+        "cloudflare",
+    ]
+    assert blocked_event["attempt"] == 2
+    assert blocked_event["attempt_count"] == 2
+    assert blocked_event["circuit_state"] == "open"
+
+    assert circuit_event["issue"] == "2"
+    assert circuit_event["challenge_indicators"] == []
+    assert circuit_event["attempt"] == 0
+    assert circuit_event["circuit_state"] == "open"
+
+    assert failed_event["issue"] == "3"
+    assert failed_event["challenge_indicators"] == []
+    assert failed_event["attempt"] == 1
+    assert failed_event["circuit_state"] == "closed"

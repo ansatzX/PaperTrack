@@ -58,6 +58,7 @@ def test_acs_issue_result_distinguishes_cloudflare_block(monkeypatch):
             403,
         ),
     )
+    monkeypatch.setattr(acs_fetch, "_fetch_acs_browser", lambda url: {})
 
     result = acs_fetch.query_acs_issue_result("jcisd8", "66", "11", "JCIM")
 
