@@ -26,7 +26,11 @@ from .http_fetch import (
 )
 from .identity import normalize_doi
 from .journal_entry import JournalEntry
-from .official_snapshot import SnapshotKey, SnapshotValidation
+from .official_snapshot import (
+    SnapshotKey,
+    SnapshotValidation,
+    html_snapshot_provenance_rejection,
+)
 from .provider_runtime import IssueRequest
 
 logger = logging.getLogger(__name__)
@@ -234,6 +238,37 @@ def _diagnostic_context(
     return event
 
 
+def _record_snapshot_rejection(
+    journal_slug: str,
+    volume: str,
+    issue: str,
+    url: str,
+    snapshot,
+    reason: str,
+    message: str,
+    html: str | None = None,
+) -> None:
+    record_fetch_attempt(
+        _diagnostic_context(
+            journal_slug,
+            volume,
+            issue,
+            url,
+            "snapshot_validation",
+            PARSE_FAILED,
+            cache_validation="rejected",
+            rejection_reason=reason,
+            message=message,
+            snapshot_path=str(snapshot.body_path),
+            snapshot_canonical_url=snapshot.canonical_url,
+            snapshot_final_url=snapshot.final_url,
+            snapshot_media_type=snapshot.media_type,
+            membership_hash=snapshot.membership_hash,
+        ),
+        html=html,
+    )
+
+
 def _result_from_html(
     html: str,
     journal_name: str,
@@ -374,30 +409,67 @@ def _query_aps_with_runtime(
     key = SnapshotKey("aps", journal_slug, volume, issue)
     snapshot = provider_runtime.snapshot_store.load(key)
     if snapshot is not None:
-        try:
-            html = snapshot.body_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            snapshot = None
-        else:
-            cached, _, membership_dois = _result_from_html(
-                html,
-                journal_name,
-                url=url,
-                journal_slug=journal_slug,
-                volume=volume,
-                issue=issue,
-                transport="snapshot",
-                snapshot=snapshot,
+        provenance_rejection = html_snapshot_provenance_rejection(
+            snapshot, url
+        )
+        if provenance_rejection is not None:
+            reason, message = provenance_rejection
+            _record_snapshot_rejection(
+                journal_slug, volume, issue, url, snapshot, reason, message
             )
-            if (
-                cached.outcome == SUCCESS
-                and membership_dois is not None
-                and _membership_hash(membership_dois)
-                == snapshot.membership_hash
-            ):
-                if hasattr(provider_runtime, "stats"):
-                    provider_runtime.stats.snapshot_hit += 1
-                return cached
+        else:
+            try:
+                html = snapshot.body_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                _record_snapshot_rejection(
+                    journal_slug,
+                    volume,
+                    issue,
+                    url,
+                    snapshot,
+                    "body_read",
+                    str(exc),
+                )
+            else:
+                cached, _, membership_dois = _result_from_html(
+                    html,
+                    journal_name,
+                    url=url,
+                    journal_slug=journal_slug,
+                    volume=volume,
+                    issue=issue,
+                    transport="snapshot",
+                    snapshot=snapshot,
+                )
+                if cached.outcome != SUCCESS or membership_dois is None:
+                    _record_snapshot_rejection(
+                        journal_slug,
+                        volume,
+                        issue,
+                        url,
+                        snapshot,
+                        "parse",
+                        cached.message or "snapshot failed current parser",
+                        html,
+                    )
+                elif (
+                    _membership_hash(membership_dois)
+                    != snapshot.membership_hash
+                ):
+                    _record_snapshot_rejection(
+                        journal_slug,
+                        volume,
+                        issue,
+                        url,
+                        snapshot,
+                        "membership_hash",
+                        "reparsed membership hash does not match snapshot",
+                        html,
+                    )
+                else:
+                    if hasattr(provider_runtime, "stats"):
+                        provider_runtime.stats.snapshot_hit += 1
+                    return cached
 
     request = IssueRequest(
         canonical_url=APS_ISSUE_URL.format(
@@ -495,6 +567,8 @@ def _query_aps_with_runtime(
         snapshot_path=str(stored.body_path),
         membership_hash=stored.membership_hash,
     )
+    if hasattr(provider_runtime, "stats"):
+        provider_runtime.stats.live_success += 1
     return result
 
 

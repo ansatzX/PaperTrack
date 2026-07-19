@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .identity import normalize_doi
 
@@ -60,6 +61,33 @@ class OfficialSnapshot:
     validation: SnapshotValidation
     body_path: Path
     attachment_paths: dict[str, Path]
+
+
+def html_snapshot_provenance_rejection(
+    snapshot: OfficialSnapshot, requested_url: str
+) -> tuple[str, str] | None:
+    """Return why an HTML issue snapshot cannot represent the requested URL."""
+    if snapshot.canonical_url != requested_url:
+        return "canonical_url", "snapshot canonical URL does not match request"
+
+    requested = urlsplit(requested_url)
+    final = urlsplit(snapshot.final_url)
+    if (
+        requested.scheme != "https"
+        or final.scheme != requested.scheme
+        or final.netloc != requested.netloc
+        or final.path != requested.path
+        or bool(final.fragment)
+    ):
+        return (
+            "final_url",
+            "snapshot final URL must remain on the requested HTTPS host and path",
+        )
+
+    media_type = snapshot.media_type.partition(";")[0].strip().lower()
+    if media_type != "text/html":
+        return "media_type", "snapshot media type is not HTML"
+    return None
 
 
 class OfficialSnapshotStore:

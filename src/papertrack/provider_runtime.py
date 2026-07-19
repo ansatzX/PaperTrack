@@ -262,7 +262,6 @@ class ProviderRuntime:
             else:
                 self.consecutive_blocks = 0
                 self._canonical_origin = expected_origin
-                self.stats.live_success += 1
                 result = OfficialBrowserResult(
                     outcome=SUCCESS,
                     canonical_url=request.canonical_url,

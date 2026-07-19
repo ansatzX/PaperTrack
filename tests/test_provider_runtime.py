@@ -320,6 +320,18 @@ def test_issue_navigation_permits_query_change_on_canonical_path(tmp_path):
     assert result.outcome == SUCCESS
 
 
+def test_transport_success_does_not_claim_adapter_live_success(tmp_path):
+    clock = FakeClock()
+    fake = FakePlaywright(clock)
+    runtime = make_runtime(tmp_path, fake, clock)
+
+    with runtime:
+        result = runtime.fetch_issue(aps_request(0))
+
+    assert result.outcome == SUCCESS
+    assert runtime.stats.live_success == 0
+
+
 def test_same_origin_request_is_paced_and_returns_captured_response(tmp_path):
     clock = FakeClock()
     fake = FakePlaywright(clock)

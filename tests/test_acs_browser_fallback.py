@@ -15,7 +15,7 @@ from papertrack.official_snapshot import (
     SnapshotKey,
     SnapshotValidation,
 )
-from papertrack.provider_runtime import OfficialBrowserResult
+from papertrack.provider_runtime import OfficialBrowserResult, ProviderRunStats
 
 
 ACS_FIXTURE = b"""
@@ -39,6 +39,7 @@ class Runtime:
         self.snapshot_store = snapshot_store
         self.fetch_calls = []
         self.results = []
+        self.stats = ProviderRunStats()
 
     def queue_html(self, html, *, outcome=SUCCESS, message=""):
         if isinstance(html, bytes):
@@ -70,13 +71,20 @@ def runtime(snapshot_store):
     return Runtime(snapshot_store)
 
 
-def seed_acs_snapshot(snapshot_store, body=ACS_FIXTURE):
+def seed_acs_snapshot(
+    snapshot_store,
+    body=ACS_FIXTURE,
+    *,
+    canonical_url="https://pubs.acs.org/toc/jcisd8/66/12",
+    final_url="https://pubs.acs.org/toc/jcisd8/66/12",
+    media_type="text/html",
+):
     key = SnapshotKey("acs", "jcisd8", "66", "12")
     return snapshot_store.commit(
         key,
-        "https://pubs.acs.org/toc/jcisd8/66/12",
-        "https://pubs.acs.org/toc/jcisd8/66/12",
-        "text/html",
+        canonical_url,
+        final_url,
+        media_type,
         body,
         SnapshotValidation(
             selector_counts={"div.issue-item.clearfix": 1},
@@ -87,7 +95,10 @@ def seed_acs_snapshot(snapshot_store, body=ACS_FIXTURE):
 
 
 def test_acs_uses_valid_snapshot_without_network(runtime, snapshot_store):
-    seed_acs_snapshot(snapshot_store)
+    seed_acs_snapshot(
+        snapshot_store,
+        final_url="https://pubs.acs.org/toc/jcisd8/66/12?view=expanded",
+    )
 
     result = acs_fetch.query_acs_issue_result(
         "jcisd8", "66", "12", "JCIM", runtime
@@ -99,7 +110,7 @@ def test_acs_uses_valid_snapshot_without_network(runtime, snapshot_store):
 
 
 def test_acs_reparses_snapshot_and_rejects_changed_membership(
-    runtime, snapshot_store
+    monkeypatch, runtime, snapshot_store
 ):
     stored = seed_acs_snapshot(snapshot_store)
     mismatched = replace(
@@ -110,6 +121,12 @@ def test_acs_reparses_snapshot_and_rejects_changed_membership(
     loads = iter((mismatched,))
     snapshot_store.load = lambda key: next(loads, original_load(key))
     runtime.queue_html(ACS_FIXTURE)
+    events = []
+    monkeypatch.setattr(
+        acs_fetch,
+        "record_fetch_attempt",
+        lambda event, html=None: events.append(event),
+    )
 
     result = acs_fetch.query_acs_issue_result(
         "jcisd8", "66", "12", "JCIM", runtime
@@ -118,6 +135,13 @@ def test_acs_reparses_snapshot_and_rejects_changed_membership(
     assert result.outcome == SUCCESS
     assert result.metadata["official_transport"] == "live"
     assert len(runtime.fetch_calls) == 1
+    assert runtime.stats.snapshot_hit == 0
+    rejection = [
+        event for event in events
+        if event["stage"] == "snapshot_validation"
+    ]
+    assert len(rejection) == 1
+    assert rejection[0]["rejection_reason"] == "membership_hash"
 
 
 def test_acs_live_success_commits_validated_snapshot(runtime, snapshot_store):
@@ -137,6 +161,7 @@ def test_acs_live_success_commits_validated_snapshot(runtime, snapshot_store):
         "div.issue-item.clearfix": 1
     }
     assert result.metadata["membership_hash"] == stored.membership_hash
+    assert runtime.stats.live_success == 1
     request = runtime.fetch_calls[0]
     assert request.canonical_url == "https://pubs.acs.org/toc/jcisd8/66/12"
     assert request.required_selector == "div.issue-item.clearfix"
@@ -145,6 +170,92 @@ def test_acs_live_success_commits_validated_snapshot(runtime, snapshot_store):
         "cf-chl",
         "Access denied",
     )
+
+
+def test_acs_malformed_live_html_does_not_increment_live_success(
+    runtime, snapshot_store
+):
+    runtime.queue_html(
+        '<div class="issue-item clearfix"><h3 class="issue-item_title">'
+        '<a href="/article/no-doi">Title</a></h3></div>'
+    )
+
+    result = acs_fetch.query_acs_issue_result(
+        "jcisd8", "66", "12", "JCIM", runtime
+    )
+
+    assert result.outcome == PARSE_FAILED
+    assert runtime.stats.live_success == 0
+    assert snapshot_store.load(SnapshotKey("acs", "jcisd8", "66", "12")) is None
+
+
+@pytest.mark.parametrize(
+    ("snapshot_kwargs", "rejection_reason"),
+    [
+        (
+            {"canonical_url": "https://pubs.acs.org/toc/jcisd8/66/13"},
+            "canonical_url",
+        ),
+        (
+            {"final_url": "https://pubs.acs.org/doi/10.1021/example"},
+            "final_url",
+        ),
+        ({"media_type": "application/json"}, "media_type"),
+    ],
+)
+def test_acs_rejects_snapshot_with_invalid_provenance(
+    monkeypatch, snapshot_store, snapshot_kwargs, rejection_reason
+):
+    seed_acs_snapshot(snapshot_store, **snapshot_kwargs)
+    runtime = Runtime(snapshot_store)
+    runtime.queue_html(ACS_FIXTURE)
+    events = []
+    monkeypatch.setattr(
+        acs_fetch,
+        "record_fetch_attempt",
+        lambda event, html=None: events.append(event),
+    )
+
+    result = acs_fetch.query_acs_issue_result(
+        "jcisd8", "66", "12", "JCIM", runtime
+    )
+
+    assert result.outcome == SUCCESS
+    assert result.metadata["official_transport"] == "live"
+    assert len(runtime.fetch_calls) == 1
+    assert runtime.stats.snapshot_hit == 0
+    rejection = [
+        event for event in events
+        if event["stage"] == "snapshot_validation"
+    ]
+    assert len(rejection) == 1
+    assert rejection[0]["cache_validation"] == "rejected"
+    assert rejection[0]["rejection_reason"] == rejection_reason
+
+
+def test_acs_records_snapshot_parse_rejection(monkeypatch, snapshot_store):
+    seed_acs_snapshot(snapshot_store, body=b"<html>No issue cards</html>")
+    runtime = Runtime(snapshot_store)
+    runtime.queue_html(ACS_FIXTURE)
+    events = []
+    monkeypatch.setattr(
+        acs_fetch,
+        "record_fetch_attempt",
+        lambda event, html=None: events.append(event),
+    )
+
+    result = acs_fetch.query_acs_issue_result(
+        "jcisd8", "66", "12", "JCIM", runtime
+    )
+
+    assert result.outcome == SUCCESS
+    assert runtime.stats.snapshot_hit == 0
+    rejection = [
+        event for event in events
+        if event["stage"] == "snapshot_validation"
+    ]
+    assert len(rejection) == 1
+    assert rejection[0]["rejection_reason"] == "parse"
 
 
 @pytest.mark.parametrize(

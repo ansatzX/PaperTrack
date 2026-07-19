@@ -16,7 +16,7 @@ from papertrack.official_snapshot import (
     SnapshotKey,
     SnapshotValidation,
 )
-from papertrack.provider_runtime import OfficialBrowserResult
+from papertrack.provider_runtime import OfficialBrowserResult, ProviderRunStats
 
 
 APS_FIXTURE = """
@@ -44,6 +44,7 @@ class Runtime:
         self.snapshot_store = snapshot_store
         self.fetch_calls = []
         self.results = []
+        self.stats = ProviderRunStats()
 
     def queue_html(
         self,
@@ -96,13 +97,20 @@ def runtime(snapshot_store):
     return Runtime(snapshot_store)
 
 
-def seed_aps_snapshot(snapshot_store, body=APS_FIXTURE):
+def seed_aps_snapshot(
+    snapshot_store,
+    body=APS_FIXTURE,
+    *,
+    canonical_url="https://journals.aps.org/prl/issues/127/27",
+    final_url="https://journals.aps.org/prl/issues/127/27",
+    media_type="text/html",
+):
     key = SnapshotKey("aps", "prl", "127", "27")
     return snapshot_store.commit(
         key,
-        "https://journals.aps.org/prl/issues/127/27",
-        "https://journals.aps.org/prl/issues/127/27",
-        "text/html",
+        canonical_url,
+        final_url,
+        media_type,
         body,
         SnapshotValidation(
             selector_counts={".browse-result-card.issue": 1},
@@ -115,7 +123,12 @@ def seed_aps_snapshot(snapshot_store, body=APS_FIXTURE):
 def test_aps_snapshot_rebuild_preserves_official_doi_case(
     runtime, snapshot_store
 ):
-    seed_aps_snapshot(snapshot_store)
+    seed_aps_snapshot(
+        snapshot_store,
+        final_url=(
+            "https://journals.aps.org/prl/issues/127/27?view=expanded"
+        ),
+    )
 
     result = aps_fetch.query_aps_issue_result(
         "prl", "127", "27", "PRL", runtime
@@ -127,7 +140,7 @@ def test_aps_snapshot_rebuild_preserves_official_doi_case(
 
 
 def test_aps_reparses_snapshot_and_rejects_changed_membership(
-    runtime, snapshot_store
+    monkeypatch, runtime, snapshot_store
 ):
     stored = seed_aps_snapshot(snapshot_store)
     mismatched = replace(stored, membership_hash="0" * 64)
@@ -135,6 +148,12 @@ def test_aps_reparses_snapshot_and_rejects_changed_membership(
     loads = iter((mismatched,))
     snapshot_store.load = lambda key: next(loads, original_load(key))
     runtime.queue_html(APS_FIXTURE)
+    events = []
+    monkeypatch.setattr(
+        aps_fetch,
+        "record_fetch_attempt",
+        lambda event, html=None: events.append(event),
+    )
 
     result = aps_fetch.query_aps_issue_result(
         "prl", "127", "27", "PRL", runtime
@@ -143,6 +162,13 @@ def test_aps_reparses_snapshot_and_rejects_changed_membership(
     assert result.outcome == SUCCESS
     assert result.metadata["official_transport"] == "live"
     assert len(runtime.fetch_calls) == 1
+    assert runtime.stats.snapshot_hit == 0
+    rejection = [
+        event for event in events
+        if event["stage"] == "snapshot_validation"
+    ]
+    assert len(rejection) == 1
+    assert rejection[0]["rejection_reason"] == "membership_hash"
 
 
 def test_aps_live_success_commits_validated_snapshot(runtime, snapshot_store):
@@ -161,6 +187,7 @@ def test_aps_live_success_commits_validated_snapshot(runtime, snapshot_store):
     assert result.metadata["official_transport"] == "live"
     assert result.metadata["snapshot_path"] == str(stored.body_path)
     assert result.metadata["membership_hash"] == stored.membership_hash
+    assert runtime.stats.live_success == 1
     request = runtime.fetch_calls[0]
     assert request.canonical_url == (
         "https://journals.aps.org/prl/issues/127/27"
@@ -177,6 +204,100 @@ def test_aps_live_success_commits_validated_snapshot(runtime, snapshot_store):
         and "/articles/" not in call.canonical_url
         for call in runtime.fetch_calls
     )
+
+
+def test_aps_malformed_live_html_does_not_increment_live_success(
+    runtime, snapshot_store
+):
+    runtime.queue_html(
+        '<div class="browse-result-card issue"><div class="title">'
+        '<a href="/prl/abstract/not-a-doi">Title</a></div></div>'
+    )
+
+    result = aps_fetch.query_aps_issue_result(
+        "prl", "127", "27", "PRL", runtime
+    )
+
+    assert result.outcome == PARSE_FAILED
+    assert runtime.stats.live_success == 0
+    assert snapshot_store.load(SnapshotKey("aps", "prl", "127", "27")) is None
+
+
+@pytest.mark.parametrize(
+    ("snapshot_kwargs", "rejection_reason"),
+    [
+        (
+            {
+                "canonical_url": (
+                    "https://journals.aps.org/prl/issues/127/26"
+                )
+            },
+            "canonical_url",
+        ),
+        (
+            {
+                "final_url": (
+                    "https://journals.aps.org/prl/abstract/10.1103/example"
+                )
+            },
+            "final_url",
+        ),
+        ({"media_type": "application/json"}, "media_type"),
+    ],
+)
+def test_aps_rejects_snapshot_with_invalid_provenance(
+    monkeypatch, snapshot_store, snapshot_kwargs, rejection_reason
+):
+    seed_aps_snapshot(snapshot_store, **snapshot_kwargs)
+    runtime = Runtime(snapshot_store)
+    runtime.queue_html(APS_FIXTURE)
+    events = []
+    monkeypatch.setattr(
+        aps_fetch,
+        "record_fetch_attempt",
+        lambda event, html=None: events.append(event),
+    )
+
+    result = aps_fetch.query_aps_issue_result(
+        "prl", "127", "27", "PRL", runtime
+    )
+
+    assert result.outcome == SUCCESS
+    assert result.metadata["official_transport"] == "live"
+    assert len(runtime.fetch_calls) == 1
+    assert runtime.stats.snapshot_hit == 0
+    rejection = [
+        event for event in events
+        if event["stage"] == "snapshot_validation"
+    ]
+    assert len(rejection) == 1
+    assert rejection[0]["cache_validation"] == "rejected"
+    assert rejection[0]["rejection_reason"] == rejection_reason
+
+
+def test_aps_records_snapshot_parse_rejection(monkeypatch, snapshot_store):
+    seed_aps_snapshot(snapshot_store, body=b"<html>No issue cards</html>")
+    runtime = Runtime(snapshot_store)
+    runtime.queue_html(APS_FIXTURE)
+    events = []
+    monkeypatch.setattr(
+        aps_fetch,
+        "record_fetch_attempt",
+        lambda event, html=None: events.append(event),
+    )
+
+    result = aps_fetch.query_aps_issue_result(
+        "prl", "127", "27", "PRL", runtime
+    )
+
+    assert result.outcome == SUCCESS
+    assert runtime.stats.snapshot_hit == 0
+    rejection = [
+        event for event in events
+        if event["stage"] == "snapshot_validation"
+    ]
+    assert len(rejection) == 1
+    assert rejection[0]["rejection_reason"] == "parse"
 
 
 def test_aps_requires_issue_cards_before_snapshot_commit(runtime, snapshot_store):
