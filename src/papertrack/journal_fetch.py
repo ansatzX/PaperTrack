@@ -224,22 +224,24 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
                                     acs_code: str = "", provider: str = "",
                                     journal_slug: str = "",
                                     source_policy: SourcePolicy | None = None,
+                                    provider_runtime=None,
                                     ) -> AdapterResult[dict[str, JournalEntry]]:
     """Fetch articles for a journal volume/issue.
 
-    Official journal providers define issue membership. CrossRef may fill
-    missing abstracts by DOI, but only after an official issue fetch succeeds.
+    Official journal providers define issue membership and metadata. CrossRef
+    helpers remain available to legacy callers but are not part of authoritative
+    issue dispatch.
     """
-    policy = source_policy or SourcePolicy.official_only()
-
     if acs_code:
         try:
             from .acs_fetch import query_acs_issue_result
-            official = query_acs_issue_result(acs_code, volume, issue, journal_name)
-            if official.entries and policy.crossref_metadata_enabled:
-                _record_crossref_abstract_fill(
-                    official, issn, year, journal_slug or journal_name or issn, volume, issue
-                )
+            official = query_acs_issue_result(
+                acs_code,
+                volume,
+                issue,
+                journal_name,
+                provider_runtime=provider_runtime,
+            )
             if official.entries:
                 return official
             logger.warning("ACS scraping returned %s; not using CrossRef for issue membership", official.outcome)
@@ -264,9 +266,13 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
     if provider == "aip" and journal_slug:
         try:
             from .aip_fetch import query_aip_issue_result
-            official = query_aip_issue_result(journal_slug, volume, issue, journal_name)
-            if official.entries and policy.crossref_metadata_enabled:
-                _record_crossref_abstract_fill(official, issn, year, journal_slug, volume, issue)
+            official = query_aip_issue_result(
+                journal_slug,
+                volume,
+                issue,
+                journal_name,
+                provider_runtime=provider_runtime,
+            )
             if official.entries:
                 return official
             logger.warning("AIP scraping returned %s; not using CrossRef for issue membership", official.outcome)
@@ -291,9 +297,13 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
     if provider == "aps" and journal_slug:
         try:
             from .aps_fetch import query_aps_issue_result
-            official = query_aps_issue_result(journal_slug, volume, issue, journal_name)
-            if official.entries and policy.crossref_metadata_enabled:
-                _record_crossref_abstract_fill(official, issn, year, journal_slug, volume, issue)
+            official = query_aps_issue_result(
+                journal_slug,
+                volume,
+                issue,
+                journal_name,
+                provider_runtime=provider_runtime,
+            )
             if official.entries:
                 return official
             logger.warning("APS scraping returned %s; not using CrossRef for issue membership", official.outcome)

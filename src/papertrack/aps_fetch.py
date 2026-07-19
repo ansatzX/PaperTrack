@@ -164,7 +164,8 @@ def _parse_summary(card) -> str:
 
 
 def query_aps_issue_result(journal_slug: str, volume: str, issue: str,
-                           journal_name: str = "") -> AdapterResult[dict[str, JournalEntry]]:
+                           journal_name: str = "", provider_runtime=None,
+                           ) -> AdapterResult[dict[str, JournalEntry]]:
     """Scrape a specific APS issue page without visiting article pages."""
     cache_key = f"{journal_slug}:{volume}:{issue}"
     if cache_key in _cache:

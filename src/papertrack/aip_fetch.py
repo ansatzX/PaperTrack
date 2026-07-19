@@ -474,6 +474,7 @@ def query_aip_issue_result(
     volume: str,
     issue: str,
     journal_name: str = "",
+    provider_runtime=None,
 ) -> AdapterResult[dict[str, JournalEntry]]:
     """Scrape one AIP issue without requesting any article detail page."""
     cache_key = f"{journal_slug}:{volume}:{issue}"

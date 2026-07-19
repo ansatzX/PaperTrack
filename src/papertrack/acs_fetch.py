@@ -227,7 +227,8 @@ def _normalize_date(raw: str) -> str:
 
 
 def query_acs_issue_result(journal_code: str, volume: str, issue: str,
-                           journal_name: str = "") -> AdapterResult[dict[str, JournalEntry]]:
+                           journal_name: str = "", provider_runtime=None,
+                           ) -> AdapterResult[dict[str, JournalEntry]]:
     """Scrape ACS TOC page for a specific volume/issue.
 
     Args:

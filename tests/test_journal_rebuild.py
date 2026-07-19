@@ -11,9 +11,56 @@ from papertrack.journal_rebuild import (
     _load_progress,
     load_provider_candidates,
     materialize_manifest,
-    run_provider_rebuild,
+    run_provider_rebuild as _run_provider_rebuild,
 )
 from papertrack.source_policy import CrossrefMode
+from papertrack.provider_runtime import ProviderRunStats
+
+
+class FakeRuntime:
+    def __init__(self, provider: str):
+        self.provider = provider
+        self.stats = ProviderRunStats()
+        self.enter_count = 0
+        self.exit_count = 0
+
+    def __enter__(self):
+        self.enter_count += 1
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.exit_count += 1
+
+
+def run_provider_rebuild(*args, **kwargs):
+    """Supply a no-browser runtime for legacy orchestration test calls."""
+    provider = args[0] if args else kwargs["provider"]
+    diagnostics_dir = (
+        args[3] if len(args) > 3 else kwargs["diagnostics_dir"]
+    )
+    diagnostics_dir = Path(diagnostics_dir)
+    kwargs.setdefault("profile_root", diagnostics_dir / "profiles")
+    kwargs.setdefault("snapshot_root", diagnostics_dir / "snapshots")
+    kwargs.setdefault(
+        "runtime_factory", lambda **factory_kwargs: FakeRuntime(provider)
+    )
+    return _run_provider_rebuild(*args, **kwargs)
+
+
+def _two_acs_candidates() -> tuple[RebuildCandidate, RebuildCandidate]:
+    return (
+        _candidate(priority=10),
+        RebuildCandidate(
+            "acs",
+            "jctc",
+            "22",
+            "12",
+            "acs/jctc/22/12.md",
+            "must_rebuild",
+            20,
+            ("raw_html",),
+        ),
+    )
 
 
 def _candidate(*reasons: str, priority: int = 10) -> RebuildCandidate:
@@ -59,10 +106,46 @@ def _configure(monkeypatch):
                 "slug": "jcim",
                 "issn": "1549-9596",
                 "acs_code": "jcisd8",
-            }
+            },
+            "jctc": {
+                "name": "Journal of Chemical Theory and Computation",
+                "slug": "jctc",
+                "issn": "1549-9618",
+                "acs_code": "jctcce",
+            },
         },
     )
     return journal_rebuild
+
+
+def test_provider_rebuild_owns_one_runtime_for_all_candidates(
+    monkeypatch, tmp_path
+):
+    from papertrack import journal_rebuild
+
+    _configure(monkeypatch)
+    runtime = FakeRuntime(provider="acs")
+    seen = []
+    monkeypatch.setattr(
+        journal_rebuild,
+        "filter_journal_to_md",
+        lambda **kwargs: seen.append(kwargs["provider_runtime"]) or False,
+    )
+
+    summary = journal_rebuild.run_provider_rebuild(
+        "acs",
+        _two_acs_candidates(),
+        data_dir=tmp_path / "data",
+        diagnostics_dir=tmp_path / "diagnostics",
+        profile_root=tmp_path / "profiles",
+        snapshot_root=tmp_path / "snapshots",
+        runtime_factory=lambda **kwargs: runtime,
+    )
+
+    assert seen == [runtime, runtime]
+    assert runtime.enter_count == 1
+    assert runtime.exit_count == 1
+    assert summary.runtime_stats is runtime.stats
 
 
 def test_candidate_manifest_round_trip_is_stably_priority_ordered(tmp_path):
@@ -536,6 +619,83 @@ def test_fetch_failure_restores_original_bytes_and_remains_eligible(
     assert second.fetch_failed_keys == (candidate.key,)
     assert path.read_bytes() == original
     assert calls == 2
+
+
+def test_fetch_exception_closes_runtime_restores_report_and_records_failure(
+    tmp_path, monkeypatch
+):
+    module = _configure(monkeypatch)
+    path = tmp_path / "data" / "acs" / "jcim" / "66" / "12.md"
+    path.parent.mkdir(parents=True)
+    original = b"durable user report\n"
+    path.write_bytes(original)
+    runtime = FakeRuntime("acs")
+
+    def rebuild(**kwargs):
+        path.write_text("partial replacement", encoding="utf-8")
+        raise RuntimeError("fetch exploded")
+
+    monkeypatch.setattr(module, "filter_journal_to_md", rebuild)
+    summary = module.run_provider_rebuild(
+        "acs",
+        (_candidate(),),
+        data_dir=tmp_path / "data",
+        diagnostics_dir=tmp_path / "diagnostics",
+        profile_root=tmp_path / "profiles",
+        snapshot_root=tmp_path / "snapshots",
+        runtime_factory=lambda **kwargs: runtime,
+    )
+
+    progress = _load_progress(
+        tmp_path / "diagnostics" / "journal_rebuild_acs_state.json", "acs"
+    )
+    assert runtime.enter_count == 1
+    assert runtime.exit_count == 1
+    assert path.read_bytes() == original
+    assert progress.issues[_candidate().key].outcome == FETCH_FAILED
+    assert summary.fetch_failed_keys == (_candidate().key,)
+
+
+def test_assessment_exception_closes_runtime_restores_report_and_records_failure(
+    tmp_path, monkeypatch
+):
+    module = _configure(monkeypatch)
+    path = tmp_path / "data" / "acs" / "jcim" / "66" / "12.md"
+    path.parent.mkdir(parents=True)
+    original = b"durable user report\n"
+    path.write_bytes(original)
+    runtime = FakeRuntime("acs")
+
+    def rebuild(**kwargs):
+        path.write_text("complete replacement", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(module, "filter_journal_to_md", rebuild)
+    monkeypatch.setattr(
+        module,
+        "_assess_report",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("assessment exploded")
+        ),
+    )
+    summary = module.run_provider_rebuild(
+        "acs",
+        (_candidate(),),
+        data_dir=tmp_path / "data",
+        diagnostics_dir=tmp_path / "diagnostics",
+        profile_root=tmp_path / "profiles",
+        snapshot_root=tmp_path / "snapshots",
+        runtime_factory=lambda **kwargs: runtime,
+    )
+
+    progress = _load_progress(
+        tmp_path / "diagnostics" / "journal_rebuild_acs_state.json", "acs"
+    )
+    assert runtime.enter_count == 1
+    assert runtime.exit_count == 1
+    assert path.read_bytes() == original
+    assert progress.issues[_candidate().key].outcome == FETCH_FAILED
+    assert summary.fetch_failed_keys == (_candidate().key,)
 
 
 def test_failed_new_report_removes_partial_file(tmp_path, monkeypatch):

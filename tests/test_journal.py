@@ -465,8 +465,11 @@ def test_aip_provider_uses_official_source_before_crossref(monkeypatch):
         abstract="Official abstract",
     )
 
-    def fake_aip_issue(journal_slug, volume, issue, journal_name):
+    def fake_aip_issue(
+        journal_slug, volume, issue, journal_name, provider_runtime=None
+    ):
         assert journal_slug == "jcp"
+        assert provider_runtime is None
         return AdapterResult(
             entries={official_entry.doi: official_entry},
             outcome=SUCCESS,
@@ -533,7 +536,7 @@ def test_aps_provider_uses_official_source_before_crossref(monkeypatch):
     assert entries == {official_entry.doi: official_entry}
 
 
-def test_aip_provider_uses_crossref_only_to_fill_missing_official_abstracts(monkeypatch):
+def test_aip_metadata_mode_does_not_fill_official_abstracts_from_crossref(monkeypatch):
     from papertrack import aip_fetch, journal_fetch
     from papertrack.adapter_result import AdapterResult, SUCCESS
 
@@ -559,19 +562,8 @@ def test_aip_provider_uses_crossref_only_to_fill_missing_official_abstracts(monk
         }, outcome=SUCCESS, provider="aip", source="journal"),
     )
 
-    def fake_crossref_year(issn, year):
-        return [
-            {
-                "DOI": "10.1063/missing-abstract",
-                "title": ["CrossRef title should not replace official title"],
-                "abstract": "<jats:p>CrossRef fallback abstract.</jats:p>",
-            },
-            {
-                "DOI": "10.1063/crossref-extra",
-                "title": ["CrossRef extra article"],
-                "abstract": "<jats:p>Must not be added.</jats:p>",
-            },
-        ]
+    def fake_crossref_year(*args, **kwargs):
+        raise AssertionError("authoritative issue dispatch must not call CrossRef")
 
     monkeypatch.setattr(journal_fetch, "_fetch_year", fake_crossref_year)
     events = []
@@ -593,24 +585,11 @@ def test_aip_provider_uses_crossref_only_to_fill_missing_official_abstracts(monk
     assert list(entries) == ["10.1063/with-abstract", "10.1063/missing-abstract"]
     assert entries["10.1063/with-abstract"].abstract == "Official abstract"
     assert entries["10.1063/missing-abstract"].title == "Official article missing abstract"
-    assert entries["10.1063/missing-abstract"].abstract == "CrossRef fallback abstract."
-    assert events == [
-        {
-            "source_role": "third_party_metadata",
-            "source": "journal",
-            "provider": "crossref",
-            "journal": "jcp",
-            "volume": "163",
-            "issue": "24",
-            "stage": "abstract_fill",
-            "outcome": "success",
-            "fallback_used": ["crossref_abstract_fill"],
-            "filled_abstracts": 1,
-        }
-    ]
+    assert entries["10.1063/missing-abstract"].abstract == ""
+    assert events == []
 
 
-def test_aip_crossref_abstract_fallback_infers_year_from_official_metadata(monkeypatch):
+def test_aip_metadata_mode_does_not_infer_crossref_year_from_official_metadata(monkeypatch):
     from papertrack import aip_fetch, journal_fetch
     from papertrack.adapter_result import AdapterResult, SUCCESS
 
@@ -657,8 +636,8 @@ def test_aip_crossref_abstract_fallback_infers_year_from_official_metadata(monke
         ),
     )
 
-    assert seen_years == [2025]
-    assert entries["10.1063/missing-abstract"].abstract == "CrossRef fallback abstract."
+    assert seen_years == []
+    assert entries["10.1063/missing-abstract"].abstract == ""
 
 
 def test_official_only_provider_does_not_request_crossref_abstracts(monkeypatch):
@@ -735,6 +714,69 @@ def test_official_provider_does_not_use_crossref_for_issue_membership(monkeypatc
 
     assert result.outcome == OFFICIAL_EMPTY_SUSPICIOUS
     assert result.entries == {}
+
+
+@pytest.mark.parametrize(
+    ("provider", "module_name", "function_name", "dispatch_kwargs"),
+    (
+        (
+            "acs",
+            "acs_fetch",
+            "query_acs_issue_result",
+            {"acs_code": "jcisd8", "journal_slug": "jcim"},
+        ),
+        (
+            "aip",
+            "aip_fetch",
+            "query_aip_issue_result",
+            {"provider": "aip", "journal_slug": "jcp"},
+        ),
+        (
+            "aps",
+            "aps_fetch",
+            "query_aps_issue_result",
+            {"provider": "aps", "journal_slug": "prl"},
+        ),
+    ),
+)
+def test_authoritative_dispatch_passes_identical_provider_runtime(
+    monkeypatch, provider, module_name, function_name, dispatch_kwargs
+):
+    from papertrack import journal_fetch
+    from papertrack.adapter_result import AdapterResult, SUCCESS
+
+    adapter = __import__(f"papertrack.{module_name}", fromlist=[function_name])
+    runtime = object()
+    seen = []
+
+    def query_issue(*args, **kwargs):
+        seen.append(kwargs["provider_runtime"])
+        return AdapterResult(
+            entries={
+                "10.0000/example": JournalEntry(
+                    doi="10.0000/example",
+                    title="Official article",
+                    authors=[],
+                    abstract="Official abstract",
+                )
+            },
+            outcome=SUCCESS,
+            provider=provider,
+            source="journal",
+        )
+
+    monkeypatch.setattr(adapter, function_name, query_issue)
+    result = journal_fetch.query_journal_issue_full_result(
+        "1234-5678",
+        "1",
+        "2",
+        "Example Journal",
+        provider_runtime=runtime,
+        **dispatch_kwargs,
+    )
+
+    assert result.ok
+    assert seen == [runtime]
 
 
 @pytest.mark.parametrize(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import fcntl
 import json
 import logging
@@ -15,6 +15,7 @@ from typing import Iterable
 
 from .codex import journal_configs
 from .report import filter_journal_to_md
+from .provider_runtime import ProviderRuntime, ProviderRunStats
 from .source_policy import SourcePolicy
 
 
@@ -139,6 +140,7 @@ class RebuildSummary:
     attempted_keys: tuple[str, ...]
     skipped_keys: tuple[str, ...]
     outcomes: dict[str, str]
+    runtime_stats: ProviderRunStats = field(default_factory=ProviderRunStats)
 
     @property
     def resolved_keys(self) -> tuple[str, ...]:
@@ -613,11 +615,76 @@ def _journal_config(candidate: RebuildCandidate) -> dict[str, str]:
     return config
 
 
+def _rebuild_candidate(
+    candidate: RebuildCandidate,
+    data_path: Path,
+    provider_runtime: ProviderRuntime,
+) -> str:
+    """Rebuild one candidate while preserving its prior report on failure."""
+    config = _journal_config(candidate)
+    report_path = data_path / PurePosixPath(candidate.relative_path)
+    backup = _create_report_backup(report_path)
+    try:
+        collected_dois = (
+            _existing_collected_dois(backup.read_text(encoding="utf-8"))
+            if backup is not None
+            else set()
+        )
+    except UnicodeError:
+        collected_dois = set()
+    try:
+        success = filter_journal_to_md(
+            journal_name=config["name"],
+            journal_slug=config.get("slug", candidate.journal),
+            volume=candidate.volume,
+            issue=candidate.issue,
+            issn=config["issn"],
+            md_folder=str(data_path / candidate.provider),
+            zotero=None,
+            acs_code=config.get("acs_code", ""),
+            provider=config.get("provider", candidate.provider),
+            source_policy=SourcePolicy.from_environment(),
+            existing_collected_dois=collected_dois,
+            provider_runtime=provider_runtime,
+        )
+    except BaseException as exc:
+        _restore_report(report_path, backup)
+        if not isinstance(exc, Exception):
+            raise
+        return FETCH_FAILED
+
+    if not success:
+        _restore_report(report_path, backup)
+        return FETCH_FAILED
+
+    try:
+        outcome = _assess_report(report_path, candidate)
+    except BaseException as exc:
+        _restore_report(report_path, backup)
+        if not isinstance(exc, Exception):
+            raise
+        logger.warning(
+            "Journal rebuild assessment failed for %s at %s; "
+            "restored prior state and recorded fetch_failed: %s",
+            candidate.key,
+            report_path,
+            exc,
+        )
+        return FETCH_FAILED
+
+    _discard_report_backup(backup)
+    return outcome
+
+
 def run_provider_rebuild(
     provider: str,
     candidates: Iterable[RebuildCandidate],
     data_dir: str | os.PathLike,
     diagnostics_dir: str | os.PathLike,
+    *,
+    profile_root: str | os.PathLike,
+    snapshot_root: str | os.PathLike,
+    runtime_factory=ProviderRuntime,
     retry_unresolved: bool = False,
     reset_progress: bool = False,
     dry_run: bool = False,
@@ -648,75 +715,33 @@ def run_provider_rebuild(
     attempted: list[str] = []
     skipped: list[str] = []
     outcomes: dict[str, str] = {}
-    for candidate in ordered:
-        previous = progress.issues.get(candidate.key)
-        if previous and (
-            previous.outcome == RESOLVED
-            or (
-                previous.outcome == OFFICIAL_SUCCESS_UNRESOLVED
-                and not retry_unresolved
-            )
-        ):
-            skipped.append(candidate.key)
-            outcomes[candidate.key] = previous.outcome
-            continue
+    with runtime_factory(
+        provider=provider,
+        profile_root=profile_root,
+        snapshot_root=snapshot_root,
+    ) as provider_runtime:
+        for candidate in ordered:
+            previous = progress.issues.get(candidate.key)
+            if previous and (
+                previous.outcome == RESOLVED
+                or (
+                    previous.outcome == OFFICIAL_SUCCESS_UNRESOLVED
+                    and not retry_unresolved
+                )
+            ):
+                skipped.append(candidate.key)
+                outcomes[candidate.key] = previous.outcome
+                continue
 
-        config = _journal_config(candidate)
-        report_path = data_path / PurePosixPath(candidate.relative_path)
-        backup = _create_report_backup(report_path)
-        try:
-            collected_dois = (
-                _existing_collected_dois(backup.read_text(encoding="utf-8"))
-                if backup is not None
-                else set()
+            attempted.append(candidate.key)
+            outcome = _rebuild_candidate(
+                candidate,
+                data_path,
+                provider_runtime,
             )
-        except UnicodeError:
-            collected_dois = set()
-        attempted.append(candidate.key)
-        try:
-            success = filter_journal_to_md(
-                journal_name=config["name"],
-                journal_slug=config.get("slug", candidate.journal),
-                volume=candidate.volume,
-                issue=candidate.issue,
-                issn=config["issn"],
-                md_folder=str(data_path / provider),
-                zotero=None,
-                acs_code=config.get("acs_code", ""),
-                provider=config.get("provider", provider),
-                source_policy=SourcePolicy.from_environment(),
-                existing_collected_dois=collected_dois,
-            )
-        except BaseException as exc:
-            _restore_report(report_path, backup)
-            if not isinstance(exc, Exception):
-                raise
-            outcome = FETCH_FAILED
-        else:
-            if not success:
-                _restore_report(report_path, backup)
-                outcome = FETCH_FAILED
-            else:
-                try:
-                    outcome = _assess_report(report_path, candidate)
-                except BaseException as exc:
-                    _restore_report(report_path, backup)
-                    if not isinstance(exc, Exception):
-                        raise
-                    logger.warning(
-                        "Journal rebuild assessment failed for %s at %s; "
-                        "restored prior state and recorded fetch_failed: %s",
-                        candidate.key,
-                        report_path,
-                        exc,
-                    )
-                    outcome = FETCH_FAILED
-                else:
-                    _discard_report_backup(backup)
-
-        outcomes[candidate.key] = outcome
-        progress.issues[candidate.key] = ProgressRecord(outcome)
-        _write_progress(progress_path, progress)
+            outcomes[candidate.key] = outcome
+            progress.issues[candidate.key] = ProgressRecord(outcome)
+            _write_progress(progress_path, progress)
 
     return RebuildSummary(
         provider=provider,
@@ -724,4 +749,5 @@ def run_provider_rebuild(
         attempted_keys=tuple(attempted),
         skipped_keys=tuple(skipped),
         outcomes=outcomes,
+        runtime_stats=provider_runtime.stats,
     )

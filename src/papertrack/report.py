@@ -413,21 +413,23 @@ def filter_journal_to_md(journal_name: str, journal_slug: str,
                          provider: str = "",
                          source_policy: SourcePolicy | None = None,
                          existing_collected_dois: set[str] | None = None,
+                         provider_runtime=None,
                          ) -> bool:
     """Fetch journal articles for a volume/issue and write a Markdown report.
 
     The report goes to {md_folder}/{journal_slug}/{volume}/{issue}.md
     """
     fetch_result = query_journal_issue_full_result(
-        issn,
-        volume,
-        issue,
-        journal_name,
-        year,
-        acs_code,
-        provider,
-        journal_slug,
-        source_policy,
+        issn=issn,
+        volume=volume,
+        issue=issue,
+        journal_name=journal_name,
+        year=year,
+        acs_code=acs_code,
+        provider=provider,
+        journal_slug=journal_slug,
+        source_policy=source_policy,
+        provider_runtime=provider_runtime,
     )
     if not fetch_result.ok:
         logger.warning(

@@ -436,6 +436,38 @@ Title:  Old title
         assert "Updated title" in rendered
         assert not report_file.with_suffix(".md.bak").exists()
 
+    def test_filter_journal_to_md_passes_identical_provider_runtime(
+        self, tmp_path, monkeypatch
+    ):
+        from papertrack import report
+        from papertrack.adapter_result import AdapterResult, FETCH_FAILED
+
+        runtime = object()
+        seen = []
+        monkeypatch.setattr(
+            report,
+            "query_journal_issue_full_result",
+            lambda *args, **kwargs: seen.append(kwargs["provider_runtime"])
+            or AdapterResult(
+                entries={},
+                outcome=FETCH_FAILED,
+                provider="aip",
+                source="journal",
+            ),
+        )
+
+        assert not filter_journal_to_md(
+            journal_name="Journal of Chemical Physics",
+            journal_slug="jcp",
+            volume="164",
+            issue="16",
+            issn="0021-9606",
+            md_folder=str(tmp_path),
+            provider="aip",
+            provider_runtime=runtime,
+        )
+        assert seen == [runtime]
+
     def test_filter_journal_to_md_infers_acs_provider_for_schema(self, tmp_path, monkeypatch):
         from papertrack import report
         from papertrack.adapter_result import AdapterResult, SUCCESS
