@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from papertrack import acs_fetch, report
+from papertrack import acs_fetch, aip_fetch, aps_fetch, journal_fetch, report
 from papertrack.adapter_result import (
     AdapterResult,
     BLOCKED,
@@ -176,10 +176,13 @@ def test_blocked_live_fetch_preserves_snapshot_report_and_progress(tmp_path):
 
 class _SuccessRuntime:
     events = None
+    instance = None
 
     def __init__(self, provider, profile_root, snapshot_root):
         self.snapshot_store = OfficialSnapshotStore(snapshot_root)
         self.stats = ProviderRunStats(attempted=1)
+        self.fetch_calls = []
+        self.__class__.instance = self
         original_commit = self.snapshot_store.commit
 
         def commit(*args, **kwargs):
@@ -196,6 +199,7 @@ class _SuccessRuntime:
         return None
 
     def fetch_issue(self, request):
+        self.fetch_calls.append(request)
         return OfficialBrowserResult(
             outcome=SUCCESS,
             canonical_url=request.canonical_url,
@@ -298,6 +302,7 @@ def test_verifier_checks_one_official_issue_and_does_not_write_markdown_by_defau
         "diagnostic_path": str(tmp_path / "diagnostics/attempts.jsonl"),
         "issue_key": "acs/jcim/66/12",
         "membership_count": 1,
+        "message": "",
         "outcome": "success",
         "provider": "acs",
         "selector_counts": {"div.issue-item.clearfix": 1},
@@ -318,3 +323,122 @@ def test_verifier_rejects_repeated_or_provider_mismatched_scope(tmp_path):
         verifier.main(["--provider", "acs", "--provider", "aps", *common])
     with pytest.raises(SystemExit):
         verifier.main(["--provider", "aps", *common])
+
+
+@pytest.mark.parametrize(
+    ("provider", "journal", "volume", "issue", "module", "function"),
+    [
+        ("acs", "jcim", "66", "12", acs_fetch, "query_acs_issue_result"),
+        ("aip", "jcp", "164", "16", aip_fetch, "query_aip_issue_result"),
+        ("aps", "prl", "127", "27", aps_fetch, "query_aps_issue_result"),
+    ],
+)
+def test_verifier_forces_one_live_adapter_fetch(
+    monkeypatch, provider, journal, volume, issue, module, function
+):
+    calls = []
+
+    def query(*args, **kwargs):
+        calls.append((args, kwargs))
+        return AdapterResult(
+            entries={"10.example/item": object()},
+            outcome=SUCCESS,
+            provider=provider,
+            source="journal",
+            metadata={"official_transport": "live"},
+        )
+
+    monkeypatch.setattr(module, function, query)
+    scope = verifier.IssueScope(provider, journal, volume, issue)
+
+    verifier._fetch_official_issue(scope, object())
+
+    assert len(calls) == 1
+    assert calls[0][1]["force_live"] is True
+
+
+def test_verifier_exception_prints_reason_and_records_structured_attempt(
+    tmp_path, capsys
+):
+    diagnostics_dir = tmp_path / "diagnostics"
+
+    def fail(scope, runtime):
+        raise RuntimeError("browser could not start")
+
+    exit_code = verifier.main(
+        [
+            "--provider", "acs",
+            "--journal", "jcim",
+            "--volume", "66",
+            "--issue", "12",
+            "--profile-root", str(tmp_path / "profiles"),
+            "--snapshot-root", str(tmp_path / "snapshots"),
+            "--diagnostics-dir", str(diagnostics_dir),
+        ],
+        runtime_factory=_VerifierRuntime,
+        fetch_issue=fail,
+    )
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["message"] == "RuntimeError: browser could not start"
+    attempt = json.loads(
+        (diagnostics_dir / "attempts.jsonl").read_text(encoding="utf-8")
+    )
+    time = attempt.pop("time")
+    assert time
+    assert attempt == {
+        "event_type": "fetch_attempt",
+        "exception": "RuntimeError: browser could not start",
+        "issue": "12",
+        "journal": "jcim",
+        "outcome": FETCH_FAILED,
+        "provider": "acs",
+        "source": "journal",
+        "source_role": "authoritative",
+        "stage": "verifier",
+        "url": "https://pubs.acs.org/toc/jcisd8/66/12",
+        "volume": "66",
+    }
+
+
+def test_verifier_write_report_preserves_checkbox_and_never_calls_crossref(
+    tmp_path, capsys, monkeypatch
+):
+    data_dir = tmp_path / "data"
+    report_path = data_dir / "acs/jcim/66/12.md"
+    _seed_report(report_path)
+    _seed_snapshot(OfficialSnapshotStore(tmp_path / "snapshots"))
+    _SuccessRuntime.events = []
+
+    def crossref_forbidden(*args, **kwargs):
+        raise AssertionError("official verifier must not call CrossRef")
+
+    monkeypatch.setattr(journal_fetch, "_crossref_get", crossref_forbidden)
+    monkeypatch.setattr(journal_fetch, "_fetch_year", crossref_forbidden)
+    monkeypatch.setattr(
+        journal_fetch, "_fill_missing_abstracts_from_crossref", crossref_forbidden
+    )
+
+    exit_code = verifier.main(
+        [
+            "--provider", "acs",
+            "--journal", "jcim",
+            "--volume", "66",
+            "--issue", "12",
+            "--profile-root", str(tmp_path / "profiles"),
+            "--snapshot-root", str(tmp_path / "snapshots"),
+            "--diagnostics-dir", str(tmp_path / "diagnostics"),
+            "--write-report",
+            "--data-dir", str(data_dir),
+        ],
+        runtime_factory=_SuccessRuntime,
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["transport"] == "live"
+    content = report_path.read_text(encoding="utf-8")
+    assert "- [x] [10.1021/acs.jcim.6c00001]" in content
+    assert "Official abstract." in content
+    assert len(_SuccessRuntime.instance.fetch_calls) == 1

@@ -908,14 +908,19 @@ def _query_aip_with_runtime(
     issue: str,
     journal_name: str,
     provider_runtime,
+    *,
+    force_live: bool = False,
 ) -> AdapterResult[dict[str, JournalEntry]]:
     url = AIP_ISSUE_URL.format(
         journal_slug=journal_slug, volume=volume, issue=issue
     )
     key = SnapshotKey("aip", journal_slug, volume, issue)
-    load_result = provider_runtime.snapshot_store.load_result(key)
-    snapshot = load_result.snapshot
-    if load_result.status == "rejected":
+    load_result = None
+    snapshot = None
+    if not force_live:
+        load_result = provider_runtime.snapshot_store.load_result(key)
+        snapshot = load_result.snapshot
+    if load_result is not None and load_result.status == "rejected":
         _record_store_load_rejection(
             journal_slug, volume, issue, url, load_result
         )
@@ -1181,6 +1186,8 @@ def query_aip_issue_result(
     issue: str,
     journal_name: str = "",
     provider_runtime=None,
+    *,
+    force_live: bool = False,
 ) -> AdapterResult[dict[str, JournalEntry]]:
     """Scrape one AIP issue without requesting any article detail page.
 
@@ -1191,7 +1198,8 @@ def query_aip_issue_result(
     """
     if provider_runtime is not None:
         return _query_aip_with_runtime(
-            journal_slug, volume, issue, journal_name, provider_runtime
+            journal_slug, volume, issue, journal_name, provider_runtime,
+            force_live=force_live,
         )
     cache_key = f"{journal_slug}:{volume}:{issue}"
     if cache_key in _cache:

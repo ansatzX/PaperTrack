@@ -186,6 +186,31 @@ def test_aip_snapshot_reload_preserves_blocked_abstract_outcome(
     assert cached_runtime.fetch_calls == []
 
 
+def test_aip_force_live_bypasses_but_preserves_valid_snapshot(
+    runtime, snapshot_store
+):
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    runtime.queue_json({"Success": True, "Html": "<p>Official abstract.</p>"})
+    live = aip_fetch.query_aip_issue_result(
+        "jcp", "160", "4", "JCP", runtime
+    )
+    stored = snapshot_store.load(SnapshotKey("aip", "jcp", "160", "4"))
+    assert live.outcome == SUCCESS
+    assert stored is not None
+    before = stored.body_path.read_bytes()
+
+    blocked_runtime = Runtime(snapshot_store)
+    blocked_runtime.queue_issue_html("challenge", outcome=BLOCKED)
+    result = aip_fetch.query_aip_issue_result(
+        "jcp", "160", "4", "JCP", blocked_runtime, force_live=True
+    )
+
+    assert result.outcome == BLOCKED
+    assert len(blocked_runtime.fetch_calls) == 1
+    assert blocked_runtime.stats.snapshot_hit == 0
+    assert stored.body_path.read_bytes() == before
+
+
 def test_aip_absent_official_abstract_control_is_distinguishable(runtime):
     runtime.queue_issue_html(
         AIP_ISSUE_FIXTURE.replace(

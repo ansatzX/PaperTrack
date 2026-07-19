@@ -144,6 +144,25 @@ def test_aps_snapshot_rebuild_preserves_official_doi_case(
     assert runtime.stats.snapshot_hit == 1
 
 
+def test_aps_force_live_bypasses_but_preserves_valid_snapshot(
+    runtime, snapshot_store
+):
+    stored = seed_aps_snapshot(snapshot_store)
+    before = stored.body_path.read_bytes()
+    runtime.queue_html(
+        "challenge", outcome=BLOCKED, message="blocked", status_code=403
+    )
+
+    result = aps_fetch.query_aps_issue_result(
+        "prl", "127", "27", "PRL", runtime, force_live=True
+    )
+
+    assert result.outcome == BLOCKED
+    assert len(runtime.fetch_calls) == 1
+    assert runtime.stats.snapshot_hit == 0
+    assert stored.body_path.read_bytes() == before
+
+
 def test_aps_reparses_snapshot_and_rejects_changed_membership(
     monkeypatch, runtime, snapshot_store
 ):

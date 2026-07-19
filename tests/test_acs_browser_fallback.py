@@ -114,6 +114,23 @@ def test_acs_uses_valid_snapshot_without_network(runtime, snapshot_store):
     assert runtime.stats.snapshot_hit == 1
 
 
+def test_acs_force_live_bypasses_but_preserves_valid_snapshot(
+    runtime, snapshot_store
+):
+    stored = seed_acs_snapshot(snapshot_store)
+    before = stored.body_path.read_bytes()
+    runtime.queue_html("challenge", outcome=BLOCKED, message="blocked")
+
+    result = acs_fetch.query_acs_issue_result(
+        "jcisd8", "66", "12", "JCIM", runtime, force_live=True
+    )
+
+    assert result.outcome == BLOCKED
+    assert len(runtime.fetch_calls) == 1
+    assert runtime.stats.snapshot_hit == 0
+    assert stored.body_path.read_bytes() == before
+
+
 def test_acs_reparses_snapshot_and_rejects_changed_membership(
     monkeypatch, runtime, snapshot_store
 ):

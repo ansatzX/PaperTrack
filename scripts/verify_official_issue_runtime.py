@@ -12,7 +12,11 @@ from typing import Callable
 
 from papertrack.adapter_result import AdapterResult, FETCH_FAILED
 from papertrack.codex import journal_configs
-from papertrack.diagnostics import ATTEMPTS_FILE, configure_diagnostics
+from papertrack.diagnostics import (
+    ATTEMPTS_FILE,
+    configure_diagnostics,
+    record_fetch_attempt,
+)
 from papertrack.provider_runtime import ProviderRuntime
 from papertrack.source_policy import SourcePolicy
 
@@ -79,6 +83,7 @@ def _fetch_official_issue(scope: IssueScope, runtime) -> AdapterResult:
             scope.issue,
             config["name"],
             provider_runtime=runtime,
+            force_live=True,
         )
     if scope.provider == "aip":
         from papertrack.aip_fetch import query_aip_issue_result
@@ -89,6 +94,7 @@ def _fetch_official_issue(scope: IssueScope, runtime) -> AdapterResult:
             scope.issue,
             config["name"],
             provider_runtime=runtime,
+            force_live=True,
         )
 
     from papertrack.aps_fetch import query_aps_issue_result
@@ -99,6 +105,26 @@ def _fetch_official_issue(scope: IssueScope, runtime) -> AdapterResult:
         scope.issue,
         config["name"],
         provider_runtime=runtime,
+        force_live=True,
+    )
+
+
+def _official_issue_url(scope: IssueScope) -> str:
+    config = _journal_config(scope.journal)
+    if scope.provider == "acs":
+        return (
+            f"https://pubs.acs.org/toc/{config['acs_code']}/"
+            f"{scope.volume}/{scope.issue}"
+        )
+    slug = config.get("slug", scope.journal)
+    if scope.provider == "aip":
+        return (
+            f"https://pubs.aip.org/aip/{slug}/issue/"
+            f"{scope.volume}/{scope.issue}"
+        )
+    return (
+        f"https://journals.aps.org/{slug}/issues/"
+        f"{scope.volume}/{scope.issue}"
     )
 
 
@@ -144,6 +170,7 @@ def _observation(
         "membership_count": len(result.entries),
         "cache_commit_status": _cache_commit_status(result),
         "diagnostic_path": str(diagnostics_dir / ATTEMPTS_FILE),
+        "message": result.message,
     }
 
 
@@ -209,12 +236,25 @@ def main(
                         metadata=result.metadata,
                     )
     except Exception as exc:
+        exception_message = f"{type(exc).__name__}: {exc}"
+        record_fetch_attempt({
+            "source_role": "authoritative",
+            "source": "journal",
+            "provider": scope.provider,
+            "journal": scope.journal,
+            "volume": scope.volume,
+            "issue": scope.issue,
+            "url": _official_issue_url(scope),
+            "stage": "verifier",
+            "outcome": FETCH_FAILED,
+            "exception": exception_message,
+        })
         result = AdapterResult(
             entries={},
             outcome=FETCH_FAILED,
             provider=scope.provider,
             source="journal",
-            message=f"{type(exc).__name__}: {exc}",
+            message=exception_message,
         )
 
     print(

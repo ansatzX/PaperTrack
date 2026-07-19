@@ -426,14 +426,19 @@ def _query_aps_with_runtime(
     issue: str,
     journal_name: str,
     provider_runtime,
+    *,
+    force_live: bool = False,
 ):
     url = APS_ISSUE_URL.format(
         journal_slug=journal_slug, volume=volume, issue=issue
     )
     key = SnapshotKey("aps", journal_slug, volume, issue)
-    load_result = provider_runtime.snapshot_store.load_result(key)
-    snapshot = load_result.snapshot
-    if load_result.status == "rejected":
+    load_result = None
+    snapshot = None
+    if not force_live:
+        load_result = provider_runtime.snapshot_store.load_result(key)
+        snapshot = load_result.snapshot
+    if load_result is not None and load_result.status == "rejected":
         _record_store_load_rejection(
             journal_slug, volume, issue, url, load_result
         )
@@ -603,11 +608,13 @@ def _query_aps_with_runtime(
 
 def query_aps_issue_result(journal_slug: str, volume: str, issue: str,
                            journal_name: str = "", provider_runtime=None,
+                           *, force_live: bool = False,
                            ) -> AdapterResult[dict[str, JournalEntry]]:
     """Scrape a specific APS issue page without visiting article pages."""
     if provider_runtime is not None:
         return _query_aps_with_runtime(
-            journal_slug, volume, issue, journal_name, provider_runtime
+            journal_slug, volume, issue, journal_name, provider_runtime,
+            force_live=force_live,
         )
 
     cache_key = f"{journal_slug}:{volume}:{issue}"

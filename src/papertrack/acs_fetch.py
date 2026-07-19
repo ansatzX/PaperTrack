@@ -380,14 +380,18 @@ def _result_from_html(html: str, journal_name: str, *, url: str,
 
 
 def _query_acs_with_runtime(journal_code: str, volume: str, issue: str,
-                            journal_name: str, provider_runtime):
+                            journal_name: str, provider_runtime,
+                            *, force_live: bool = False):
     url = ACS_ISSUE_URL.format(
         journal_code=journal_code, volume=volume, issue=issue
     )
     key = SnapshotKey("acs", journal_code, volume, issue)
-    load_result = provider_runtime.snapshot_store.load_result(key)
-    snapshot = load_result.snapshot
-    if load_result.status == "rejected":
+    load_result = None
+    snapshot = None
+    if not force_live:
+        load_result = provider_runtime.snapshot_store.load_result(key)
+        snapshot = load_result.snapshot
+    if load_result is not None and load_result.status == "rejected":
         _record_store_load_rejection(
             journal_code, volume, issue, url, load_result
         )
@@ -525,6 +529,7 @@ def _query_acs_with_runtime(journal_code: str, volume: str, issue: str,
 
 def query_acs_issue_result(journal_code: str, volume: str, issue: str,
                            journal_name: str = "", provider_runtime=None,
+                           *, force_live: bool = False,
                            ) -> AdapterResult[dict[str, JournalEntry]]:
     """Scrape ACS TOC page for a specific volume/issue.
 
@@ -539,7 +544,8 @@ def query_acs_issue_result(journal_code: str, volume: str, issue: str,
     """
     if provider_runtime is not None:
         return _query_acs_with_runtime(
-            journal_code, volume, issue, journal_name, provider_runtime
+            journal_code, volume, issue, journal_name, provider_runtime,
+            force_live=force_live,
         )
 
     cache_key = f"{journal_code}:{volume}:{issue}"

@@ -30,7 +30,7 @@ The unattended official runtime also needs Playwright, Google Chrome, and Xvfb:
 
 ```bash
 pip install -e ".[dev,browser]"
-playwright install chromium
+playwright install chrome
 ```
 
 ## Quick Start
@@ -138,12 +138,6 @@ passed identically to all three workers:
 
 The flags can be combined. Unknown arguments are rejected rather than forwarded
 to the worker commands.
-
-To retry the currently unresolved official issues:
-
-```bash
-./run_j.sh --retry-unresolved
-```
 
 Journal rebuild runtime files live under ignored, machine-local directories.
 Browser profiles persist in `.papertrack_browser_profiles/`, validated official
@@ -464,8 +458,13 @@ For a deliberately bounded live check of exactly one formal issue:
   --diagnostics-dir .papertrack_diagnostics
 ```
 
-The verifier contacts only the canonical official issue resource (plus AIP's
+The verifier deliberately bypasses a valid cached snapshot for this single
+check so it performs one canonical live issue fetch; it never deletes or
+damages the prior snapshot, and a blocked or failed live check leaves it
+available to production. Production `run_j.sh` remains snapshot-first. The
+verifier contacts only the canonical official issue resource (plus AIP's
 required same-origin official abstract endpoint). It never uses CrossRef and
 does not write Markdown unless `--write-report --data-dir PATH` is explicitly
-supplied. It prints one JSON observation; `blocked` is a legitimate visible
-outcome and is never converted into an empty successful issue.
+supplied. It prints one JSON observation, including a concise failure message;
+`blocked` is a legitimate visible outcome and is never converted into an empty
+successful issue.
