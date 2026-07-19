@@ -605,6 +605,42 @@ class TestParseArxivResult:
         assert entry is not None
         assert entry.subjects == ["cs.CV", "cs.AI", "cs.LG"]
 
+    def test_strips_escaped_publisher_markup_from_title_and_abstract(self):
+        html = """<li class="arxiv-result">
+ <p class="list-title"><a>arXiv:2602.14927</a></p>
+ <p class="title">H&lt;sub&gt;2&lt;/sub&gt; with &lt;i&gt;markup&lt;/i&gt;</p>
+ <p class="authors"><a>A Author</a></p>
+ <span class="abstract-full">Use H&lt;sub&gt;2&lt;/sub&gt; and &lt;a href="https://example.test"&gt;a citation&lt;/a&gt;.</span>
+</li>"""
+
+        entry = _parse_arxiv_result(BeautifulSoup(html, "lxml").find("li"))
+
+        assert entry is not None
+        assert entry.title == "H2 with markup"
+        assert entry.abstract == "Use H2 and a citation."
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "$x <a > y$",
+            "overlap <a|b> remains",
+            "comparison <i <= j> remains",
+        ],
+    )
+    def test_preserves_angle_bracket_math_that_is_not_html(self, text):
+        html = f"""<li class="arxiv-result">
+ <p class="list-title"><a>arXiv:2602.14927</a></p>
+ <p class="title">{text.replace('<', '&lt;').replace('>', '&gt;')}</p>
+ <p class="authors"><a>A Author</a></p>
+ <span class="abstract-full">{text.replace('<', '&lt;').replace('>', '&gt;')}</span>
+</li>"""
+
+        entry = _parse_arxiv_result(BeautifulSoup(html, "lxml").find("li"))
+
+        assert entry is not None
+        assert entry.title == text
+        assert entry.abstract == text
+
     @pytest.mark.parametrize(
         "missing_html",
         [

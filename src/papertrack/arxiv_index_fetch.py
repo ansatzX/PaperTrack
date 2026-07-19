@@ -20,6 +20,12 @@ MAX_RETRIES = 3
 RETRY_BACKOFF = (1, 2, 4)
 RATE_LIMIT_BACKOFF = (30, 60, 120)
 _last_request_at = 0.0
+_ESCAPED_INLINE_TAG = re.compile(
+    r"</?(?:b|cite|em|i|strong|sub|sup)>"
+    r"|</?a>"
+    r"|<a[ \t]+(?=[^>]*(?:class|href|title)[ \t]*=)[^>]*>",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -48,7 +54,7 @@ def _parse_arxiv_result(res) -> ArxivEntry | None:
     arxiv_id = arxiv_link.text.strip()
 
     title_el = aso.find(class_="title")
-    title = title_el.text.strip() if title_el else ""
+    title = _strip_escaped_inline_markup(title_el.text.strip()) if title_el else ""
 
     authors = []
     authors_el = aso.find(class_="authors")
@@ -61,7 +67,7 @@ def _parse_arxiv_result(res) -> ArxivEntry | None:
     abstract = ""
     abstract_full = aso.find(class_="abstract-full")
     if abstract_full:
-        abstract = abstract_full.text.strip()
+        abstract = _strip_escaped_inline_markup(abstract_full.text.strip())
 
     if not arxiv_id or not title or not authors or not abstract:
         return None
@@ -108,6 +114,11 @@ def _parse_arxiv_result(res) -> ArxivEntry | None:
         comments=comments,
         subjects=subjects,
     )
+
+
+def _strip_escaped_inline_markup(value: str) -> str:
+    """Remove escaped presentation tags while preserving their text content."""
+    return _ESCAPED_INLINE_TAG.sub("", value)
 
 
 def query_arxiv_result(date_from_date: str = "2025-02-01",
