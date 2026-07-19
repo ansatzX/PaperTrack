@@ -212,6 +212,35 @@ def aps_request_with_capture(index):
     )
 
 
+def aip_request(index):
+    return IssueRequest(
+        canonical_url=f"https://pubs.aip.org/aip/jcp/issue/160/{index + 4}",
+        required_selector="main.issue",
+        challenge_markers=("just a moment", "cloudflare"),
+        capture_url_patterns=(
+            re.compile(r"/Handlers/ArticleAbstractHandler\.ashx"),
+        ),
+    )
+
+
+def make_aip_runtime(tmp_path, fake, clock, **kwargs):
+    options = {
+        "playwright_factory": lambda: fake,
+        "clock": clock.time,
+        "sleep": clock.sleep,
+        "issue_interval": 30.0,
+        "challenge_retry_delay": 60.0,
+        "max_consecutive_blocks": 3,
+    }
+    options.update(kwargs)
+    return ProviderRuntime(
+        provider="aip",
+        profile_root=tmp_path / "profiles",
+        snapshot_root=tmp_path / "snapshots",
+        **options,
+    )
+
+
 def make_runtime(tmp_path, fake, clock, **kwargs):
     options = {
         "playwright_factory": lambda: fake,
@@ -633,25 +662,92 @@ def test_successful_next_issue_does_not_reset_endpoint_denial_streak(tmp_path):
     assert runtime.circuit_open is True
 
 
-def test_endpoint_denial_is_observed_even_when_response_body_read_fails(tmp_path):
+@pytest.mark.parametrize(
+    ("status", "blocked", "rate_limited"),
+    [(403, 1, 0), (429, 0, 1)],
+)
+def test_endpoint_denial_returns_bodyless_evidence_when_body_read_fails(
+    tmp_path, status, blocked, rate_limited
+):
     clock = FakeClock()
     fake = FakePlaywright(clock)
-    fake.explicit_response_statuses = [403]
+    fake.explicit_response_statuses = [status]
     fake.explicit_response_body_error = True
     runtime = make_runtime(tmp_path, fake, clock)
 
     with runtime:
         assert runtime.fetch_issue(aps_request(0)).outcome == SUCCESS
-        with pytest.raises(OSError, match="response body unavailable"):
+        response = runtime.request_same_origin(
+            "https://journals.aps.org/api/abstract",
+            "POST",
+            {"id": "one"},
+            10,
+        )
+
+    assert response.status_code == status
+    assert response.body == b""
+    assert runtime.consecutive_endpoint_denials == 1
+    assert runtime.stats.blocked == blocked
+    assert runtime.stats.rate_limited == rate_limited
+
+
+def test_selected_captured_endpoint_denials_open_circuit_exactly_once(tmp_path):
+    clock = FakeClock()
+    fake = FakePlaywright(clock)
+    statuses = [403, 429, 403]
+    for index, status in enumerate(statuses):
+        response = FakeApiResponse(
+            "https://pubs.aip.org/Handlers/ArticleAbstractHandler.ashx"
+            f"?articleId={10000 + index}",
+            body=b"denied",
+            media_type="text/html",
+        )
+        response.status = status
+        fake.navigation_responses.append(response)
+    runtime = make_aip_runtime(tmp_path, fake, clock)
+
+    with runtime:
+        first = runtime.fetch_issue(aip_request(0))
+        second = runtime.fetch_issue(aip_request(1))
+
+    assert first.outcome == SUCCESS
+    assert [response.status_code for response in first.captured] == statuses
+    assert runtime.consecutive_endpoint_denials == 3
+    assert runtime.stats.blocked == 2
+    assert runtime.stats.rate_limited == 1
+    assert second.outcome == CIRCUIT_OPEN
+    assert len(fake.goto_calls) == 1
+    assert fake.context.request.calls == []
+
+
+def test_selected_captured_http_200_resets_prior_explicit_denial_streak(tmp_path):
+    clock = FakeClock()
+    fake = FakePlaywright(clock)
+    runtime = make_aip_runtime(tmp_path, fake, clock)
+
+    with runtime:
+        assert runtime.fetch_issue(aip_request(0)).outcome == SUCCESS
+        fake.explicit_response_statuses = [403, 429]
+        for article_id in ("one", "two"):
             runtime.request_same_origin(
-                "https://journals.aps.org/api/abstract",
+                "https://pubs.aip.org/Handlers/ArticleAbstractHandler.ashx",
                 "POST",
-                {"id": "one"},
+                {"articleId": article_id},
                 10,
             )
+        assert runtime.consecutive_endpoint_denials == 2
+        captured = FakeApiResponse(
+            "https://pubs.aip.org/Handlers/ArticleAbstractHandler.ashx"
+            "?articleId=three"
+        )
+        fake.navigation_responses = [captured]
+        assert runtime.fetch_issue(aip_request(1)).outcome == SUCCESS
 
-    assert runtime.consecutive_endpoint_denials == 1
+    assert runtime.consecutive_endpoint_denials == 0
+    assert runtime.circuit_open is False
     assert runtime.stats.blocked == 1
+    assert runtime.stats.rate_limited == 1
+    assert len(fake.context.request.calls) == 2
 
 
 def test_same_origin_request_rejects_other_origin(tmp_path):

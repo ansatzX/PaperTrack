@@ -1118,6 +1118,9 @@ def _query_aip_with_runtime(
     for captured in fetched.captured:
         article_id = _captured_article_id(captured)
         if article_id and article_id in abstract_ids.values():
+            abstract_result = _abstract_result_from_response(
+                captured, article_id
+            )
             try:
                 attachment = _snapshot_attachment(article_id, captured)
             except ValueError as exc:
@@ -1136,15 +1139,17 @@ def _query_aip_with_runtime(
                         message=str(exc),
                     )
                 )
-                continue
-            responses_by_id[article_id] = _abstract_result_from_response(
-                captured, article_id
-            )
-            attachments_by_id[article_id] = attachment
+                if abstract_result.outcome in {BLOCKED, RATE_LIMITED}:
+                    responses_by_id[article_id] = abstract_result
+            else:
+                responses_by_id[article_id] = abstract_result
+                attachments_by_id[article_id] = attachment
     response_missing = False
     for article_id in dict.fromkeys(abstract_ids.values()):
         if not article_id or article_id in responses_by_id:
             continue
+        if getattr(provider_runtime, "circuit_open", False):
+            break
         try:
             response = provider_runtime.request_same_origin(
                 aip_abstract_url(journal_slug),

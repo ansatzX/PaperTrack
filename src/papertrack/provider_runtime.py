@@ -407,7 +407,12 @@ class ProviderRuntime:
             raise ValueError("response must remain on the exact origin over HTTPS")
         status_code = getattr(response, "status", 0)
         self._observe_same_origin_status(status_code)
-        body = response.body()
+        try:
+            body = response.body()
+        except Exception:
+            if status_code not in {403, 429}:
+                raise
+            body = b""
         media_type = _media_type(getattr(response, "headers", {}))
         captured = CapturedResponse(
             url=response_url,
@@ -502,6 +507,11 @@ class ProviderRuntime:
                 return
             if self._capture_origin is None or _origin(url) != self._capture_origin:
                 return
+            selected = any(
+                pattern.search(url) for pattern in self._capture_patterns
+            )
+            if selected:
+                self._observe_same_origin_status(response.status)
             media_type = _media_type(response.headers)
             if media_type not in _CAPTURE_MEDIA_TYPES:
                 return
@@ -516,7 +526,7 @@ class ProviderRuntime:
                     "content_hash": "sha256:" + hashlib.sha256(body).hexdigest(),
                 }
             )
-            if any(pattern.search(url) for pattern in self._capture_patterns):
+            if selected:
                 self._captured_responses.append(
                     CapturedResponse(url, response.status, media_type, body)
                 )

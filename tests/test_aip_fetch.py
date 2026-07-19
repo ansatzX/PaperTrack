@@ -233,13 +233,54 @@ def test_aip_stops_abstract_requests_when_provider_circuit_opens(
     runtime = CircuitRuntime(snapshot_store)
     runtime.queue_issue_html(_aip_issue_fixture(6))
     for _ in range(6):
-        runtime.queue_response(status=status, body=b"denied", media_type="text/html")
+        runtime.queue_response(status=status, body=b"", media_type="text/html")
 
     result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
 
     assert result.outcome == expected_outcome
     assert len(runtime.request_calls) == 3
     assert len(runtime.abstract_results) == 3
+    assert result.metadata["snapshot_committed"] is False
+    assert result.metadata["endpoint_circuit_open"] is True
+    assert snapshot_store.load(SnapshotKey("aip", "jcp", "160", "4")) is None
+    assert runtime.stats.live_success == 0
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_outcome"),
+    [(403, BLOCKED), (429, RATE_LIMITED)],
+)
+def test_aip_captured_denials_open_circuit_without_explicit_rerequests(
+    snapshot_store, status, expected_outcome
+):
+    captured = tuple(
+        CapturedResponse(
+            url=(
+                "https://pubs.aip.org/Handlers/ArticleAbstractHandler.ashx"
+                f"?articleId={10000 + index}"
+            ),
+            status_code=status,
+            media_type="text/html",
+            body=b"denied",
+        )
+        for index in range(3)
+    )
+
+    class CapturedCircuitRuntime(Runtime):
+        circuit_open = False
+
+        def fetch_issue(self, request):
+            result = super().fetch_issue(request)
+            self.circuit_open = True
+            return result
+
+    runtime = CapturedCircuitRuntime(snapshot_store)
+    runtime.queue_issue_html(_aip_issue_fixture(6), captured=captured)
+
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert result.outcome == expected_outcome
+    assert runtime.request_calls == []
     assert result.metadata["snapshot_committed"] is False
     assert result.metadata["endpoint_circuit_open"] is True
     assert snapshot_store.load(SnapshotKey("aip", "jcp", "160", "4")) is None
