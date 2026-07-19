@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import hashlib
 import logging
 import re
+from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup
 
@@ -58,6 +59,7 @@ _last_fetch_result: HttpFetchResult | None = None
 class AcsParseResult:
     entries: dict[str, JournalEntry]
     issue_item_count: int
+    ignored_sponsored_count: int
     missing_fields: list[dict]
     critical_field_failures: list[dict]
 
@@ -79,6 +81,25 @@ def _fetch_html(url: str) -> tuple[str, str, int | None]:
     return _last_fetch_result.html, _last_fetch_result.outcome, _last_fetch_result.status_code
 
 
+def _is_native_sponsored_card(item) -> bool:
+    """Recognize ACS native ads without weakening article validation."""
+    classes = set(item.get("class", ()))
+    if (
+        not item.get("data-ntv-id")
+        or not {"ntvClickOut", "noskim"}.issubset(classes)
+    ):
+        return False
+    if not any(
+        text.strip() == "SPONSORED CONTENT"
+        for text in item.find_all(string=True)
+    ):
+        return False
+    return any(
+        urlsplit(link.get("href", "")).hostname == "adclick.g.doubleclick.net"
+        for link in item.select("a[href]")
+    )
+
+
 def _parse_acs_toc_result(html: str, journal_name: str) -> AcsParseResult:
     """Parse ACS TOC page HTML into JournalEntry dict keyed by DOI."""
     soup = BeautifulSoup(html, "lxml")
@@ -86,12 +107,16 @@ def _parse_acs_toc_result(html: str, journal_name: str) -> AcsParseResult:
     missing_fields: list[dict] = []
     critical_field_failures: list[dict] = []
     issue_item_count = 0
+    ignored_sponsored_count = 0
 
     for card_number, item in enumerate(soup.select("div.issue-item.clearfix"), 1):
         # Skip non-article items
         text_preview = item.get_text(" ", strip=True)
         if any(skip in text_preview for skip in
                ("Issue Publication Information", "Editorial Masthead", "Issue Editorial")):
+            continue
+        if _is_native_sponsored_card(item):
+            ignored_sponsored_count += 1
             continue
         issue_item_count += 1
 
@@ -192,6 +217,7 @@ def _parse_acs_toc_result(html: str, journal_name: str) -> AcsParseResult:
     return AcsParseResult(
         entries=result,
         issue_item_count=issue_item_count,
+        ignored_sponsored_count=ignored_sponsored_count,
         missing_fields=missing_fields,
         critical_field_failures=critical_field_failures,
     )
@@ -337,6 +363,7 @@ def _result_from_html(html: str, journal_name: str, *, url: str,
         "url": url,
         "article_count": len(parsed.entries),
         "issue_item_count": parsed.issue_item_count,
+        "ignored_sponsored_count": parsed.ignored_sponsored_count,
         "missing_fields": parsed.missing_fields,
         "critical_field_failures": parsed.critical_field_failures,
         "official_transport": transport,
@@ -631,6 +658,7 @@ def query_acs_issue_result(journal_code: str, volume: str, issue: str,
         "url": url,
         "article_count": len(parsed.entries),
         "issue_item_count": parsed.issue_item_count,
+        "ignored_sponsored_count": parsed.ignored_sponsored_count,
         "missing_fields": parsed.missing_fields,
         "critical_field_failures": parsed.critical_field_failures,
         "fetch_history": (

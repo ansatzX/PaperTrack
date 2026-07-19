@@ -35,6 +35,19 @@ ACS_FIXTURE = b"""
 </body></html>
 """
 
+ACS_NATIVE_SPONSORED_CARD = b"""
+<div class="issue-item clearfix ntv1101380-687192-6235 ntvClickOut noskim"
+     data-ntv-id="1101380-687192">
+  <div class="issue-item_metadata">
+    <div>SPONSORED CONTENT</div>
+    <a aria-label="3rd party ad, opens in a new window"
+       href="https://adclick.g.doubleclick.net/pcs/click?adurl=https://example.com">
+      Rapid Sample Analysis with 100 MHz NMR
+    </a>
+  </div>
+</div>
+"""
+
 
 class Runtime:
     def __init__(self, snapshot_store):
@@ -96,6 +109,43 @@ def seed_acs_snapshot(
         ),
         attachments,
     )
+
+
+def test_acs_ignores_recognized_native_sponsored_card():
+    html = ACS_FIXTURE.replace(
+        b"</body>", ACS_NATIVE_SPONSORED_CARD + b"</body>"
+    )
+
+    parsed = acs_fetch._parse_acs_toc_result(html, "JCIM")
+
+    assert set(parsed.entries) == {"10.1021/acs.jcim.6c00001"}
+    assert parsed.issue_item_count == 1
+    assert parsed.ignored_sponsored_count == 1
+    assert parsed.critical_field_failures == []
+
+    result, _, _ = acs_fetch._result_from_html(
+        html,
+        "JCIM",
+        url="https://pubs.acs.org/toc/jcisd8/66/12",
+        journal_code="jcisd8",
+        volume="66",
+        issue="12",
+        transport="live",
+    )
+    assert result.metadata["ignored_sponsored_count"] == 1
+
+
+def test_acs_does_not_ignore_malformed_card_with_partial_sponsored_markers():
+    html = ACS_FIXTURE.replace(
+        b"</body>",
+        ACS_NATIVE_SPONSORED_CARD.replace(b" noskim", b"") + b"</body>",
+    )
+
+    parsed = acs_fetch._parse_acs_toc_result(html, "JCIM")
+
+    assert parsed.issue_item_count == 2
+    assert parsed.ignored_sponsored_count == 0
+    assert parsed.critical_field_failures == [{"card": 2, "field": "title"}]
 
 
 def test_acs_uses_valid_snapshot_without_network(runtime, snapshot_store):
