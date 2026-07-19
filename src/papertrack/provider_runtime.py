@@ -93,6 +93,12 @@ class ProviderRuntime:
             raise ValueError(f"unsupported official provider: {provider}")
         self._validate_interval("issue_interval", issue_interval)
         self._validate_interval("challenge_retry_delay", challenge_retry_delay)
+        if issue_interval < 30:
+            raise ValueError("issue_interval must be at least 30 seconds")
+        if challenge_retry_delay < 60:
+            raise ValueError(
+                "challenge_retry_delay must be at least 60 seconds"
+            )
         if max_consecutive_blocks < 1:
             raise ValueError("max_consecutive_blocks must be positive")
 
@@ -117,6 +123,7 @@ class ProviderRuntime:
         self._last_issue_navigation_at: float | None = None
         self._same_origin_request_at: dict[tuple[str, str], float] = {}
         self._canonical_origin: tuple[str, str, int | None] | None = None
+        self._capture_origin: tuple[str, str, int | None] | None = None
         self._capture_patterns: tuple[re.Pattern[str], ...] = ()
         self._captured_responses: list[CapturedResponse] = []
         self._response_evidence: list[dict] = []
@@ -158,22 +165,32 @@ class ProviderRuntime:
 
     def close(self) -> None:
         context, self._context = self._context, None
-        if context is not None:
-            context.close()
         manager, self._playwright_manager = self._playwright_manager, None
         playwright, self._playwright = self._playwright, None
-        if manager is not None and hasattr(manager, "__exit__"):
-            manager.__exit__(None, None, None)
-        elif playwright is not None and hasattr(playwright, "stop"):
-            playwright.stop()
         self._page = None
-        self._release_profile()
+        try:
+            if context is not None:
+                context.close()
+        finally:
+            try:
+                if manager is not None and hasattr(manager, "__exit__"):
+                    manager.__exit__(None, None, None)
+                elif playwright is not None and hasattr(playwright, "stop"):
+                    playwright.stop()
+            finally:
+                self._release_profile()
 
     def fetch_issue(self, request: IssueRequest) -> OfficialBrowserResult:
         self._validate_issue_url(request.canonical_url)
         if self._context is None or self._page is None:
             raise RuntimeError("provider runtime is not open")
+        self._canonical_origin = None
+        self._capture_origin = None
+        self._capture_patterns = ()
+        self._captured_responses = []
+        self._response_evidence = []
         if self._circuit_open:
+            self.consecutive_blocks = 0
             self.stats.circuit_skipped += 1
             result = OfficialBrowserResult(
                 outcome=CIRCUIT_OPEN,
@@ -189,10 +206,9 @@ class ProviderRuntime:
             return result
 
         self.stats.attempted += 1
-        self._canonical_origin = _origin(request.canonical_url)
+        expected_origin = _origin(request.canonical_url)
+        self._capture_origin = expected_origin
         self._capture_patterns = request.capture_url_patterns
-        self._captured_responses = []
-        self._response_evidence = []
         self._wait_for_issue_interval()
 
         status_code = None
@@ -209,6 +225,7 @@ class ProviderRuntime:
             if self._is_challenge(request, html):
                 self._sleep(self.challenge_retry_delay)
                 attempt_count = 2
+                self._wait_for_issue_interval()
                 response = self._page.reload()
                 status_code = getattr(response, "status", status_code)
                 selector_error = self._wait_for_selector(request.required_selector)
@@ -218,7 +235,7 @@ class ProviderRuntime:
                 result = self._blocked_result(
                     request, final_url, status_code, html, attempt_count
                 )
-            elif _origin(final_url) != self._canonical_origin:
+            elif _origin(final_url) != expected_origin:
                 result = self._failed_result(
                     request,
                     final_url,
@@ -238,6 +255,7 @@ class ProviderRuntime:
                 )
             else:
                 self.consecutive_blocks = 0
+                self._canonical_origin = expected_origin
                 self.stats.live_success += 1
                 result = OfficialBrowserResult(
                     outcome=SUCCESS,
@@ -302,10 +320,19 @@ class ProviderRuntime:
         if form is not None:
             kwargs["form"] = form
         response = self._context.request.fetch(url, **kwargs)
+        response_url = getattr(response, "url", url)
+        response_parts = urlsplit(response_url)
+        if (
+            response_parts.scheme != "https"
+            or response_parts.username is not None
+            or response_parts.password is not None
+            or _origin(response_url) != self._canonical_origin
+        ):
+            raise ValueError("response must remain on the exact origin over HTTPS")
         body = response.body()
         media_type = _media_type(getattr(response, "headers", {}))
         return CapturedResponse(
-            url=getattr(response, "url", url),
+            url=response_url,
             status_code=getattr(response, "status", 0),
             media_type=media_type,
             body=body,
@@ -356,6 +383,7 @@ class ProviderRuntime:
     def _failed_result(
         self, request, final_url, status_code, html, message, attempt_count
     ) -> OfficialBrowserResult:
+        self.consecutive_blocks = 0
         self.stats.fetch_failed += 1
         return OfficialBrowserResult(
             outcome=FETCH_FAILED,
@@ -374,7 +402,7 @@ class ProviderRuntime:
             url = response.url
             if resource_type not in {"xhr", "fetch"}:
                 return
-            if self._canonical_origin is None or _origin(url) != self._canonical_origin:
+            if self._capture_origin is None or _origin(url) != self._capture_origin:
                 return
             media_type = _media_type(response.headers)
             if media_type not in _CAPTURE_MEDIA_TYPES:
