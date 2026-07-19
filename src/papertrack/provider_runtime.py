@@ -71,6 +71,7 @@ class ProviderRunStats:
     live_success: int = 0
     snapshot_hit: int = 0
     blocked: int = 0
+    rate_limited: int = 0
     fetch_failed: int = 0
     circuit_skipped: int = 0
     # Observational only: rejected cache material may still be repaired live.
@@ -147,6 +148,7 @@ class ProviderRuntime:
 
         self.stats = ProviderRunStats()
         self.consecutive_blocks = 0
+        self.consecutive_endpoint_denials = 0
         self._circuit_open = False
         self._owner_fd: int | None = None
         self._playwright_manager = None
@@ -165,6 +167,11 @@ class ProviderRuntime:
     @property
     def captured_responses(self) -> tuple[CapturedResponse, ...]:
         return tuple(self._captured_responses)
+
+    @property
+    def circuit_open(self) -> bool:
+        """Whether publisher contact is disabled for the rest of this run."""
+        return self._circuit_open
 
     def __enter__(self):
         return self.open()
@@ -361,6 +368,8 @@ class ProviderRuntime:
             raise RuntimeError("provider runtime is not open")
         if self._canonical_origin is None:
             raise RuntimeError("canonical issue origin has not been established")
+        if self._circuit_open:
+            raise RuntimeError("provider circuit is open; contact is disabled")
         self._validate_interval("min_interval", min_interval)
         parsed = urlsplit(url)
         if (
@@ -396,14 +405,31 @@ class ProviderRuntime:
             or _origin(response_url) != self._canonical_origin
         ):
             raise ValueError("response must remain on the exact origin over HTTPS")
+        status_code = getattr(response, "status", 0)
+        self._observe_same_origin_status(status_code)
         body = response.body()
         media_type = _media_type(getattr(response, "headers", {}))
-        return CapturedResponse(
+        captured = CapturedResponse(
             url=response_url,
-            status_code=getattr(response, "status", 0),
+            status_code=status_code,
             media_type=media_type,
             body=body,
         )
+        return captured
+
+    def _observe_same_origin_status(self, status_code: int) -> None:
+        if status_code == 200:
+            self.consecutive_endpoint_denials = 0
+            return
+        if status_code not in {403, 429}:
+            return
+        self.consecutive_endpoint_denials += 1
+        if status_code == 403:
+            self.stats.blocked += 1
+        else:
+            self.stats.rate_limited += 1
+        if self.consecutive_endpoint_denials >= self.max_consecutive_blocks:
+            self._circuit_open = True
 
     def _wait_for_issue_interval(self) -> None:
         now = self._clock()

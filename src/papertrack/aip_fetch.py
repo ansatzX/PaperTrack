@@ -1179,6 +1179,8 @@ def _query_aip_with_runtime(
             )
         except ValueError:
             response_missing = True
+        if getattr(provider_runtime, "circuit_open", False):
+            break
 
     result, membership_dois, _ = _result_from_official_material(
         fetched.html,
@@ -1214,6 +1216,9 @@ def _query_aip_with_runtime(
             "metadata is incomplete"
         )
         result.metadata["snapshot_committed"] = False
+        if getattr(provider_runtime, "circuit_open", False):
+            result.metadata["endpoint_circuit_open"] = True
+            result.message += " after the provider endpoint circuit opened"
         return result
     if response_missing or set(attachments_by_id) != expected_attachment_ids:
         unavailable_outcomes = {

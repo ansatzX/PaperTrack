@@ -15,7 +15,7 @@ from papertrack.journal_rebuild import (
     run_provider_rebuild as _run_provider_rebuild,
 )
 from papertrack.source_policy import CrossrefMode
-from papertrack.adapter_result import RATE_LIMITED, SUCCESS
+from papertrack.adapter_result import BLOCKED, RATE_LIMITED, SUCCESS
 from papertrack.official_snapshot import (
     OfficialSnapshotStore,
     SnapshotKey,
@@ -822,7 +822,7 @@ def test_fetch_exception_closes_runtime_restores_report_and_records_failure(
     assert summary.fetch_failed_keys == (_candidate().key,)
 
 
-@pytest.mark.parametrize("abstract_status", [None, 429, 500])
+@pytest.mark.parametrize("abstract_status", [None, 403, 429, 500])
 def test_aip_incomplete_abstract_response_restores_report_and_records_failure(
     tmp_path, monkeypatch, abstract_status
 ):
@@ -921,9 +921,11 @@ def test_aip_incomplete_abstract_response_restores_report_and_records_failure(
     assert report_path.read_bytes() == original
     assert summary.fetch_failed_keys == (candidate.key,)
     assert progress.issues[candidate.key].outcome == FETCH_FAILED
-    assert progress.issues[candidate.key].source_outcome == (
-        RATE_LIMITED if abstract_status == 429 else FETCH_FAILED
-    )
+    expected_source = {
+        403: BLOCKED,
+        429: RATE_LIMITED,
+    }.get(abstract_status, FETCH_FAILED)
+    assert progress.issues[candidate.key].source_outcome == expected_source
     assert runtime.stats.candidate_attempted == 1
     assert runtime.stats.terminal_accounted == 1
     assert runtime.stats.endpoint_failure == 1

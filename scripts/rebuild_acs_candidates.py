@@ -69,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
         f"snapshot_hit={summary.runtime_stats.snapshot_hit} "
         f"live_success={summary.runtime_stats.live_success} "
         f"blocked={summary.runtime_stats.blocked} "
+        f"rate_limited={summary.runtime_stats.rate_limited} "
         f"fetch_failed={summary.runtime_stats.fetch_failed} "
         f"circuit_skipped={summary.runtime_stats.circuit_skipped}"
         f" cache_rejected={summary.runtime_stats.cache_rejected}"

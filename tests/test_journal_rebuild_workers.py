@@ -204,6 +204,7 @@ def test_worker_summary_reports_rates_and_structured_runtime_counts(
             snapshot_hit=1,
             live_success=0,
             blocked=0,
+            rate_limited=3,
             fetch_failed=1,
             circuit_skipped=0,
             cache_rejected=3,
@@ -226,6 +227,7 @@ def test_worker_summary_reports_rates_and_structured_runtime_counts(
     assert "snapshot_hit=1" in output
     assert "live_success=0" in output
     assert "blocked=0" in output
+    assert "rate_limited=3" in output
     assert "fetch_failed=1" in output
     assert "circuit_skipped=0" in output
     assert "cache_rejected=3" in output

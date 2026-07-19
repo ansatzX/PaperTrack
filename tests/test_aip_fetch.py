@@ -98,6 +98,32 @@ class Runtime:
         return result
 
 
+def _aip_issue_fixture(article_count):
+    return "<html><body>" + "".join(
+        f"""
+        <div class="al-article-items">
+          <h3 class="item-title">
+            <a href="/aip/jcp/article/160/4/04110{index}/{10000 + index}/Title">
+              Official article {index}
+            </a>
+          </h3>
+          <div class="ww-citation-primary">
+            160, 04110{index} (2024)
+            <span class="citation-label">
+              <a href="https://doi.org/10.1063/example{index}">
+                10.1063/example{index}
+              </a>
+            </span>
+          </div>
+          <a class="js-show-abstract" data-articleid="{10000 + index}">
+            Abstract
+          </a>
+        </div>
+        """
+        for index in range(article_count)
+    ) + "</body></html>"
+
+
 @pytest.fixture
 def snapshot_store(tmp_path):
     return OfficialSnapshotStore(tmp_path / "snapshots")
@@ -177,6 +203,45 @@ def test_aip_blocked_abstract_remains_retryable_and_is_not_snapshotted(
     live = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
     assert live.outcome == BLOCKED
     assert live.metadata["missing_fields"][0]["outcome"] == BLOCKED
+    assert snapshot_store.load(SnapshotKey("aip", "jcp", "160", "4")) is None
+    assert runtime.stats.live_success == 0
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_outcome"),
+    [(403, BLOCKED), (429, RATE_LIMITED)],
+)
+def test_aip_stops_abstract_requests_when_provider_circuit_opens(
+    snapshot_store, status, expected_outcome
+):
+    class CircuitRuntime(Runtime):
+        def __init__(self, store):
+            super().__init__(store)
+            self.circuit_open = False
+            self._endpoint_denials = 0
+
+        def request_same_origin(self, url, method, form, min_interval):
+            response = super().request_same_origin(url, method, form, min_interval)
+            if response.status_code == 200:
+                self._endpoint_denials = 0
+            elif response.status_code in {403, 429}:
+                self._endpoint_denials += 1
+                if self._endpoint_denials >= 3:
+                    self.circuit_open = True
+            return response
+
+    runtime = CircuitRuntime(snapshot_store)
+    runtime.queue_issue_html(_aip_issue_fixture(6))
+    for _ in range(6):
+        runtime.queue_response(status=status, body=b"denied", media_type="text/html")
+
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert result.outcome == expected_outcome
+    assert len(runtime.request_calls) == 3
+    assert len(runtime.abstract_results) == 3
+    assert result.metadata["snapshot_committed"] is False
+    assert result.metadata["endpoint_circuit_open"] is True
     assert snapshot_store.load(SnapshotKey("aip", "jcp", "160", "4")) is None
     assert runtime.stats.live_success == 0
 

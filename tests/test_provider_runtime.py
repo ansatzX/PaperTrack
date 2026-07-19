@@ -32,16 +32,20 @@ class FakeApiResponse:
         body=b'{"abstract": "official"}',
         media_type="application/json; charset=utf-8",
         resource_type="xhr",
+        body_error=False,
     ):
         self.url = url
         self.status = 200
         self.headers = {"content-type": media_type}
         self._body = body
         self.body_calls = 0
+        self.body_error = body_error
         self.request = type("Request", (), {"resource_type": resource_type})()
 
     def body(self):
         self.body_calls += 1
+        if self.body_error:
+            raise OSError("response body unavailable")
         return self._body
 
 
@@ -53,7 +57,12 @@ class FakeRequestContext:
     def fetch(self, url, **kwargs):
         self.calls.append((url, kwargs))
         final_url = self.browser.explicit_response_url or url
-        return FakeApiResponse(final_url)
+        response = FakeApiResponse(
+            final_url, body_error=self.browser.explicit_response_body_error
+        )
+        if self.browser.explicit_response_statuses:
+            response.status = self.browser.explicit_response_statuses.pop(0)
+        return response
 
 
 class FakePage:
@@ -161,6 +170,8 @@ class FakePlaywright:
         self.navigation_final_url = ""
         self.navigation_status = 200
         self.explicit_response_url = ""
+        self.explicit_response_statuses = []
+        self.explicit_response_body_error = False
         self.navigation_responses = []
         self.navigation_error_after_responses = False
         self.context_close_error = context_close_error
@@ -526,6 +537,121 @@ def test_same_origin_request_is_paced_and_returns_captured_response(tmp_path):
     assert first.media_type == "application/json"
     assert second.status_code == 200
     assert clock.sleeps == [10.0]
+
+
+@pytest.mark.parametrize(
+    ("statuses", "blocked", "rate_limited"),
+    [
+        ([403, 403, 403], 3, 0),
+        ([429, 429, 429], 0, 3),
+        ([403, 429, 403], 2, 1),
+    ],
+)
+def test_same_origin_denials_open_provider_circuit_after_three_contacts(
+    tmp_path, statuses, blocked, rate_limited
+):
+    clock = FakeClock()
+    fake = FakePlaywright(clock)
+    fake.explicit_response_statuses = list(statuses)
+    runtime = make_runtime(tmp_path, fake, clock)
+
+    with runtime:
+        assert runtime.fetch_issue(aps_request(0)).outcome == SUCCESS
+        for article_id in range(3):
+            runtime.request_same_origin(
+                "https://journals.aps.org/api/abstract",
+                "POST",
+                {"id": str(article_id)},
+                10,
+            )
+        assert runtime.circuit_open is True
+        with pytest.raises(RuntimeError, match="provider circuit is open"):
+            runtime.request_same_origin(
+                "https://journals.aps.org/api/abstract",
+                "POST",
+                {"id": "must-not-contact"},
+                10,
+            )
+        next_issue = runtime.fetch_issue(aps_request(1))
+
+    assert next_issue.outcome == CIRCUIT_OPEN
+    assert len(fake.context.request.calls) == 3
+    assert len(fake.goto_calls) == 1
+    assert runtime.stats.blocked == blocked
+    assert runtime.stats.rate_limited == rate_limited
+    assert runtime.stats.circuit_skipped == 1
+
+
+def test_same_origin_http_200_resets_consecutive_endpoint_denials(tmp_path):
+    clock = FakeClock()
+    fake = FakePlaywright(clock)
+    fake.explicit_response_statuses = [403, 429, 200, 403, 429, 429]
+    runtime = make_runtime(tmp_path, fake, clock)
+
+    with runtime:
+        assert runtime.fetch_issue(aps_request(0)).outcome == SUCCESS
+        observed_counts = []
+        for article_id in range(6):
+            runtime.request_same_origin(
+                "https://journals.aps.org/api/abstract",
+                "POST",
+                {"id": str(article_id)},
+                10,
+            )
+            observed_counts.append(runtime.consecutive_endpoint_denials)
+
+    assert observed_counts == [1, 2, 0, 1, 2, 3]
+    assert runtime.circuit_open is True
+
+
+def test_successful_next_issue_does_not_reset_endpoint_denial_streak(tmp_path):
+    clock = FakeClock()
+    fake = FakePlaywright(clock)
+    fake.explicit_response_statuses = [403, 429, 403]
+    runtime = make_runtime(tmp_path, fake, clock)
+
+    with runtime:
+        assert runtime.fetch_issue(aps_request(0)).outcome == SUCCESS
+        for article_id in range(2):
+            runtime.request_same_origin(
+                "https://journals.aps.org/api/abstract",
+                "POST",
+                {"id": str(article_id)},
+                10,
+            )
+        assert runtime.consecutive_endpoint_denials == 2
+        assert runtime.fetch_issue(aps_request(1)).outcome == SUCCESS
+        assert runtime.consecutive_endpoint_denials == 2
+        runtime.request_same_origin(
+            "https://journals.aps.org/api/abstract",
+            "POST",
+            {"id": "third"},
+            10,
+        )
+
+    assert runtime.consecutive_endpoint_denials == 3
+    assert runtime.circuit_open is True
+
+
+def test_endpoint_denial_is_observed_even_when_response_body_read_fails(tmp_path):
+    clock = FakeClock()
+    fake = FakePlaywright(clock)
+    fake.explicit_response_statuses = [403]
+    fake.explicit_response_body_error = True
+    runtime = make_runtime(tmp_path, fake, clock)
+
+    with runtime:
+        assert runtime.fetch_issue(aps_request(0)).outcome == SUCCESS
+        with pytest.raises(OSError, match="response body unavailable"):
+            runtime.request_same_origin(
+                "https://journals.aps.org/api/abstract",
+                "POST",
+                {"id": "one"},
+                10,
+            )
+
+    assert runtime.consecutive_endpoint_denials == 1
+    assert runtime.stats.blocked == 1
 
 
 def test_same_origin_request_rejects_other_origin(tmp_path):
