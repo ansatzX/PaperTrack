@@ -21,7 +21,6 @@ from .adapter_result import (
     FETCH_FAILED,
     OFFICIAL_EMPTY_SUSPICIOUS,
     PARSE_FAILED,
-    PARTIAL,
     RATE_LIMITED,
     SUCCESS,
 )
@@ -404,6 +403,18 @@ def _parse_aip_toc(
             article_id = abstract_link.get("data-articleid", "").strip()
             if article_id:
                 abstract_ids[doi] = article_id
+    dois_by_article_id: dict[str, list[str]] = {}
+    for doi, article_id in abstract_ids.items():
+        dois_by_article_id.setdefault(article_id, []).append(doi)
+    critical_field_failures.extend(
+        {
+            "field": "duplicate_article_id",
+            "article_id": article_id,
+            "dois": sorted(dois),
+        }
+        for article_id, dois in dois_by_article_id.items()
+        if len(dois) > 1
+    )
     return AipParseResult(
         entries=entries,
         abstract_ids=abstract_ids,
@@ -671,14 +682,18 @@ def _snapshot_response(body: bytes) -> CapturedResponse:
         or parsed_url.fragment
     ):
         raise ValueError("AIP abstract attachment URL is not official")
-    if status_code not in {200, 403, 429}:
+    if status_code != 200 and not 400 <= status_code <= 599:
         raise ValueError("AIP abstract attachment status is not approved")
     approved_media_types = (
-        {"application/json"}
+        {"application/json", "text/html"}
         if status_code == 200
-        else {"application/json", "text/html"}
+        else None
     )
-    if media_type.partition(";")[0].strip().lower() not in approved_media_types:
+    normalized_media_type = media_type.partition(";")[0].strip().lower()
+    if (
+        approved_media_types is not None
+        and normalized_media_type not in approved_media_types
+    ):
         raise ValueError("AIP abstract attachment media type is not approved")
     return CapturedResponse(
         url=response_url,
@@ -1031,7 +1046,22 @@ def _query_aip_with_runtime(
         if article_id and article_id in abstract_ids.values():
             try:
                 attachment = _snapshot_attachment(article_id, captured)
-            except ValueError:
+            except ValueError as exc:
+                record_fetch_attempt(
+                    _diagnostic_context(
+                        journal_slug,
+                        volume,
+                        issue,
+                        url,
+                        "abstract_capture_validation",
+                        FETCH_FAILED,
+                        article_id=article_id,
+                        abstract_url=captured.url,
+                        http_status=captured.status_code,
+                        media_type=captured.media_type,
+                        message=str(exc),
+                    )
+                )
                 continue
             responses_by_id[article_id] = _abstract_result_from_response(
                 captured, article_id
@@ -1083,7 +1113,7 @@ def _query_aip_with_runtime(
         article_id for article_id in abstract_ids.values() if article_id
     }
     if response_missing or set(attachments_by_id) != expected_attachment_ids:
-        result.outcome = PARTIAL
+        result.outcome = FETCH_FAILED
         result.message = (
             "AIP issue membership succeeded but an official abstract response "
             "was not captured"

@@ -3,7 +3,7 @@ import json
 import pytest
 
 from papertrack import aip_fetch
-from papertrack.adapter_result import BLOCKED, FETCH_FAILED, PARSE_FAILED, PARTIAL, SUCCESS
+from papertrack.adapter_result import BLOCKED, FETCH_FAILED, PARSE_FAILED, SUCCESS
 from papertrack.official_snapshot import (
     OfficialSnapshotStore,
     SnapshotKey,
@@ -563,6 +563,34 @@ def test_aip_malformed_card_fails_entire_multi_card_issue(
     assert event["critical_field_failures"] == [{"card": 2, "field": "doi"}]
 
 
+def test_aip_duplicate_article_id_for_distinct_dois_fails_closed(
+    monkeypatch, runtime, snapshot_store
+):
+    second = AIP_ISSUE_FIXTURE.replace(
+        "10.1063/example", "10.1063/second"
+    ).replace("Official article", "Second article")
+    html = AIP_ISSUE_FIXTURE.replace("</body>", second + "</body>")
+    runtime.queue_issue_html(html)
+    events = []
+    monkeypatch.setattr(
+        aip_fetch, "record_fetch_attempt", lambda event, html=None: events.append(event)
+    )
+
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert result.outcome == PARSE_FAILED
+    assert runtime.request_calls == []
+    assert snapshot_store.load(SnapshotKey("aip", "jcp", "160", "4")) is None
+    event = next(event for event in events if event["stage"] == "issue_page_parse")
+    assert event["critical_field_failures"] == [
+        {
+            "field": "duplicate_article_id",
+            "article_id": "12345",
+            "dois": ["10.1063/example", "10.1063/second"],
+        }
+    ]
+
+
 def test_aip_deliberately_excludes_known_non_article_card(runtime):
     excluded = """
     <div class="al-article-items">
@@ -580,7 +608,7 @@ def test_aip_deliberately_excludes_known_non_article_card(runtime):
     assert result.metadata["excluded_card_count"] == 1
 
 
-def test_aip_abstract_transport_exception_is_partial_and_not_snapshotted(
+def test_aip_abstract_transport_exception_fails_and_is_not_snapshotted(
     runtime, snapshot_store
 ):
     runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
@@ -588,7 +616,7 @@ def test_aip_abstract_transport_exception_is_partial_and_not_snapshotted(
 
     result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
 
-    assert result.outcome == PARTIAL
+    assert result.outcome == FETCH_FAILED
     assert result.entries["10.1063/example"].abstract == ""
     assert result.metadata["missing_fields"][0]["outcome"] == FETCH_FAILED
     assert snapshot_store.load(SnapshotKey("aip", "jcp", "160", "4")) is None
@@ -602,7 +630,7 @@ def test_aip_transport_retry_then_snapshot_reload_is_consistent(snapshot_store):
     failed = aip_fetch.query_aip_issue_result(
         "jcp", "160", "4", "JCP", failed_runtime
     )
-    assert failed.outcome == PARTIAL
+    assert failed.outcome == FETCH_FAILED
 
     live_runtime = Runtime(snapshot_store)
     live_runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
@@ -648,5 +676,63 @@ def test_aip_abstract_transport_failure_preserves_prior_snapshot_manifest(
 
     result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
 
-    assert result.outcome == PARTIAL
+    assert result.outcome == FETCH_FAILED
     assert manifest_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("media_type", ["text/plain", ""])
+def test_aip_non_200_error_envelope_reloads_with_blocked_outcome(
+    media_type, runtime, snapshot_store
+):
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    runtime.queue_response(status=403, body=b"forbidden", media_type=media_type)
+
+    live = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+    cached_runtime = Runtime(snapshot_store)
+    cached = aip_fetch.query_aip_issue_result(
+        "jcp", "160", "4", "JCP", cached_runtime
+    )
+
+    assert live.outcome == cached.outcome == SUCCESS
+    assert live.metadata["missing_fields"][0]["outcome"] == BLOCKED
+    assert cached.metadata["missing_fields"][0]["outcome"] == BLOCKED
+    assert cached_runtime.fetch_calls == []
+
+
+def test_aip_records_rejected_capture_then_explicit_request_failure(
+    monkeypatch, runtime
+):
+    runtime.queue_issue_html(
+        AIP_ISSUE_FIXTURE,
+        captured=(
+            CapturedResponse(
+                url=(
+                    "https://pubs.aip.org/Handlers/ArticleAbstractHandler.ashx"
+                    "?articleId=12345"
+                ),
+                status_code=200,
+                media_type="text/plain",
+                body=b"not supported",
+            ),
+        ),
+    )
+    runtime.queue_exception(OSError("retry offline"))
+    events = []
+    monkeypatch.setattr(
+        aip_fetch, "record_fetch_attempt", lambda event, html=None: events.append(event)
+    )
+
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert result.outcome == FETCH_FAILED
+    capture = next(
+        event for event in events
+        if event["stage"] == "abstract_capture_validation"
+    )
+    assert capture["article_id"] == "12345"
+    assert capture["outcome"] == FETCH_FAILED
+    assert "media type" in capture["message"]
+    retry = next(event for event in events if event["stage"] == "abstract_fetch")
+    assert retry["article_id"] == "12345"
+    assert retry["outcome"] == FETCH_FAILED
+    assert "retry offline" in retry["message"]

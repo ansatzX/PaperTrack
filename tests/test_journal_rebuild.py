@@ -14,7 +14,13 @@ from papertrack.journal_rebuild import (
     run_provider_rebuild as _run_provider_rebuild,
 )
 from papertrack.source_policy import CrossrefMode
-from papertrack.provider_runtime import ProviderRunStats
+from papertrack.adapter_result import SUCCESS
+from papertrack.official_snapshot import (
+    OfficialSnapshotStore,
+    SnapshotKey,
+    SnapshotValidation,
+)
+from papertrack.provider_runtime import OfficialBrowserResult, ProviderRunStats
 
 
 class FakeRuntime:
@@ -711,6 +717,99 @@ def test_fetch_exception_closes_runtime_restores_report_and_records_failure(
     assert path.read_bytes() == original
     assert progress.issues[_candidate().key].outcome == FETCH_FAILED
     assert summary.fetch_failed_keys == (_candidate().key,)
+
+
+def test_aip_incomplete_abstract_response_restores_report_and_records_failure(
+    tmp_path, monkeypatch
+):
+    from papertrack import journal_rebuild
+
+    monkeypatch.setattr(
+        journal_rebuild,
+        "journal_configs",
+        {
+            "jcp": {
+                "name": "Journal of Chemical Physics",
+                "slug": "jcp",
+                "issn": "0021-9606",
+                "provider": "aip",
+            }
+        },
+    )
+    issue_html = """
+    <div class="al-article-items">
+      <h3 class="item-title"><a href="/aip/jcp/article/160/4/041101/12345/Title">Article</a></h3>
+      <div class="ww-citation-primary">160, 041101 (2024)
+        <span class="citation-label"><a href="https://doi.org/10.1063/example">10.1063/example</a></span>
+      </div>
+      <a class="js-show-abstract" data-articleid="12345">Abstract</a>
+    </div>
+    """
+    snapshot_store = OfficialSnapshotStore(tmp_path / "snapshots")
+    stored = snapshot_store.commit(
+        SnapshotKey("aip", "jcp", "160", "4"),
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "text/html",
+        issue_html.encode(),
+        SnapshotValidation(
+            selector_counts={".al-article-items": 1},
+            membership_dois=("10.1063/example",),
+            parser_version="aip-issue-v1",
+        ),
+    )
+    stored.body_path.write_bytes(b"corrupt")
+
+    class Runtime(FakeRuntime):
+        def __init__(self):
+            super().__init__("aip")
+            self.snapshot_store = snapshot_store
+
+        def fetch_issue(self, request):
+            return OfficialBrowserResult(
+                outcome=SUCCESS,
+                canonical_url=request.canonical_url,
+                final_url=request.canonical_url,
+                status_code=200,
+                html=issue_html,
+                captured=(),
+            )
+
+        def request_same_origin(self, url, method, form, min_interval):
+            raise OSError("abstract retry offline")
+
+    runtime = Runtime()
+    candidate = RebuildCandidate(
+        "aip",
+        "jcp",
+        "160",
+        "4",
+        "aip/jcp/160/4.md",
+        "must_rebuild",
+        10,
+        ("whole_issue_missing_abstracts",),
+    )
+    report_path = tmp_path / "data/aip/jcp/160/4.md"
+    report_path.parent.mkdir(parents=True)
+    original = _report(("10.1063/example", "Old title", "Old abstract")).encode()
+    report_path.write_bytes(original)
+
+    summary = journal_rebuild.run_provider_rebuild(
+        "aip",
+        (candidate,),
+        data_dir=tmp_path / "data",
+        diagnostics_dir=tmp_path / "diagnostics",
+        profile_root=tmp_path / "profiles",
+        snapshot_root=tmp_path / "snapshots",
+        runtime_factory=lambda **kwargs: runtime,
+    )
+
+    progress = _load_progress(
+        tmp_path / "diagnostics/journal_rebuild_aip_state.json", "aip"
+    )
+    assert report_path.read_bytes() == original
+    assert summary.fetch_failed_keys == (candidate.key,)
+    assert progress.issues[candidate.key].outcome == FETCH_FAILED
 
 
 def test_assessment_exception_closes_runtime_restores_report_and_records_failure(
