@@ -340,26 +340,49 @@ def _repair_current_arxiv_identity(content: str, path: Path, data_dir: str) -> s
 
     category = parts[1]
     report_date = f"{parts[2]}-{parts[3]}-{path.stem}"
+    category_match = re.search(
+        r"^papertrack_category:[ \t]*(\S+)[ \t]*$",
+        content,
+        re.MULTILINE,
+    )
+    date_match = re.search(
+        r'^papertrack_date:[ \t]*["\']?(\d{4}-\d{2}-\d{2})["\']?[ \t]*$',
+        content,
+        re.MULTILINE,
+    )
+    if category_match is None or date_match is None:
+        return content
+    if category_match.group(1) == category and date_match.group(1) == report_date:
+        return content
+
     expected_lines = (
         f"papertrack_category: {category}",
         f'papertrack_date: "{report_date}"',
         f"  - #{category}-{report_date}",
         f"from #{category}-{report_date}",
     )
-    if all(re.search(rf"^{re.escape(line)}$", content, re.MULTILINE) for line in expected_lines):
-        return content
-
     replacements = (
         (r"^papertrack_category:[ \t]*\S+[ \t]*$", expected_lines[0]),
         (r'^papertrack_date:[ \t]*["\']?\d{4}-\d{2}-\d{2}["\']?[ \t]*$', expected_lines[1]),
         (r"^  - #\S+-\d{4}-\d{2}-\d{2}[ \t]*$", expected_lines[2]),
-        (r"^from #\S+-\d{4}-\d{2}-\d{2}[ \t]*$", expected_lines[3]),
     )
     repaired = content
     for pattern, replacement in replacements:
         repaired, count = re.subn(pattern, replacement, repaired, count=1, flags=re.MULTILINE)
         if count != 1:
             raise ValueError(f"current arXiv report is missing identity field: {pattern}")
+    dataview_pattern = r"^(from|TASK FROM) #\S+-\d{4}-\d{2}-\d{2}[ \t]*$"
+    repaired, count = re.subn(
+        dataview_pattern,
+        lambda match: f"{match.group(1)} #{category}-{report_date}",
+        repaired,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if count != 1:
+        raise ValueError(
+            f"current arXiv report is missing identity field: {dataview_pattern}"
+        )
     return repaired
 
 

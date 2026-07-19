@@ -397,6 +397,71 @@ from #chem-ph-2025-03-01
     assert report_file.read_text(encoding="utf-8") == original
 
 
+def test_current_arxiv_migration_does_not_normalize_incomplete_matching_report(
+    tmp_path,
+):
+    report_file = tmp_path / "arxiv" / "chem-ph" / "2025" / "03" / "01.md"
+    report_file.parent.mkdir(parents=True)
+    original = """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+papertrack_category: chem-ph
+papertrack_date: "2025-03-01"
+tags:
+  - #chem-ph-2025-03-01
+---
+
+```dataview
+TASK
+```
+
+## collected
+
+## not collected
+
+### arXiv:2503.00001
+"""
+    report_file.write_text(original, encoding="utf-8")
+
+    result = migrate_report_file(str(report_file), data_dir=str(tmp_path))
+
+    assert result.status == "current"
+    assert report_file.read_text(encoding="utf-8") == original
+
+
+def test_current_arxiv_migration_repairs_legacy_inline_dataview_identity(tmp_path):
+    report_file = tmp_path / "arxiv" / "chem-ph" / "2025" / "04" / "01.md"
+    report_file.parent.mkdir(parents=True)
+    original = """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+papertrack_category: quant-ph
+papertrack_date: "2025-04-01"
+tags:
+  - #quant-ph-2025-04-01
+---
+
+```dataview
+TASK FROM #quant-ph-2025-04-01
+WHERE completion
+```
+
+## collected
+
+## not collected
+
+### arXiv:2504.00001
+"""
+    report_file.write_text(original, encoding="utf-8")
+
+    result = migrate_report_file(str(report_file), data_dir=str(tmp_path))
+
+    repaired = report_file.read_text(encoding="utf-8")
+    assert result.status == "repaired"
+    assert "TASK FROM #chem-ph-2025-04-01" in repaired
+    assert "TASK\nfrom" not in repaired
+
+
 def test_preserve_task_state_keeps_checkbox_and_plugin_suffix():
     old = "- [x] [10.1063/example](https://doi.org/10.1063/example) [completion:: 2026-06-09]\n"
     new = "- [ ] [10.1063/example](https://doi.org/10.1063/example)\n"
