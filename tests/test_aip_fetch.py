@@ -3,7 +3,7 @@ import json
 import pytest
 
 from papertrack import aip_fetch
-from papertrack.adapter_result import BLOCKED, FETCH_FAILED, SUCCESS
+from papertrack.adapter_result import BLOCKED, FETCH_FAILED, PARSE_FAILED, PARTIAL, SUCCESS
 from papertrack.official_snapshot import (
     OfficialSnapshotStore,
     SnapshotKey,
@@ -69,6 +69,9 @@ class Runtime:
     def queue_json(self, payload, *, status=200):
         self.queue_response(status=status, body=json.dumps(payload).encode())
 
+    def queue_exception(self, exception):
+        self.abstract_results.append(exception)
+
     def fetch_issue(self, request):
         self.fetch_calls.append(request)
         return self.issue_results.pop(0)
@@ -83,7 +86,10 @@ class Runtime:
                 "same_origin": url.startswith("https://pubs.aip.org/"),
             }
         )
-        return self.abstract_results.pop(0)
+        result = self.abstract_results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 @pytest.fixture
@@ -161,7 +167,7 @@ def test_aip_snapshot_reload_preserves_blocked_abstract_outcome(
     runtime, snapshot_store
 ):
     runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
-    runtime.queue_response(status=403, body=b"forbidden", media_type="text/plain")
+    runtime.queue_response(status=403, body=b"forbidden", media_type="text/html")
     live = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
     assert live.metadata["missing_fields"][0]["outcome"] == BLOCKED
 
@@ -229,6 +235,26 @@ def test_aip_reuses_captured_official_abstract_response(runtime, snapshot_store)
     assert set(stored.attachment_paths) == {"abstract-12345.json"}
 
 
+def test_aip_never_guesses_unlabelled_captured_abstract(runtime):
+    runtime.queue_issue_html(
+        AIP_ISSUE_FIXTURE,
+        captured=(
+            CapturedResponse(
+                url="https://pubs.aip.org/Handlers/ArticleAbstractHandler.ashx",
+                status_code=200,
+                media_type="application/json",
+                body=b'{"Success": true, "Html": "<p>Unlabelled.</p>"}',
+            ),
+        ),
+    )
+    runtime.queue_json({"Success": True, "Html": "<p>Explicit response.</p>"})
+
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert result.entries["10.1063/example"].abstract == "Explicit response."
+    assert len(runtime.request_calls) == 1
+
+
 def test_aip_abstract_pacing_never_drops_below_ten_seconds(monkeypatch, runtime):
     monkeypatch.setattr(aip_fetch, "AIP_ABSTRACT_INTERVAL", 2)
     runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
@@ -255,7 +281,9 @@ def test_aip_reloads_snapshot_without_network(runtime, snapshot_store):
             aip_fetch.SnapshotAttachment(
                 "abstract-12345.json",
                 "application/json",
-                b'{"Success": true, "Html": "<p>Cached abstract.</p>"}',
+                _attachment_envelope(
+                    body=b'{"Success": true, "Html": "<p>Cached abstract.</p>"}'
+                ),
             ),
         ),
     )
@@ -289,6 +317,98 @@ def test_aip_snapshot_missing_expected_attachment_refetches(runtime, snapshot_st
     result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
 
     assert result.entries["10.1063/example"].abstract == "Fresh abstract."
+    assert len(runtime.fetch_calls) == 1
+
+
+def _attachment_envelope(
+    *,
+    url="https://pubs.aip.org/Handlers/ArticleAbstractHandler.ashx",
+    status=200,
+    media_type="application/json",
+    body=b'{"Success": true, "Html": "<p>Cached.</p>"}',
+):
+    import base64
+
+    return json.dumps(
+        {
+            "schema": "papertrack-aip-abstract-response-v1",
+            "url": url,
+            "status_code": status,
+            "media_type": media_type,
+            "body_base64": base64.b64encode(body).decode(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+
+@pytest.mark.parametrize(
+    "invalid_body",
+    [
+        b'{"Success": true, "Html": "<p>Legacy raw.</p>"}',
+        _attachment_envelope(url="https://evil.example/Handlers/ArticleAbstractHandler.ashx"),
+        _attachment_envelope(url="http://pubs.aip.org/Handlers/ArticleAbstractHandler.ashx"),
+        _attachment_envelope(url="https://pubs.aip.org/not-approved"),
+        _attachment_envelope(status=302),
+        _attachment_envelope(media_type="text/plain"),
+    ],
+)
+def test_aip_rejects_untrusted_attachment_envelope(
+    invalid_body, runtime, snapshot_store
+):
+    snapshot_store.commit(
+        SnapshotKey("aip", "jcp", "160", "4"),
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "text/html",
+        AIP_ISSUE_FIXTURE.encode(),
+        SnapshotValidation(
+            selector_counts={".al-article-items": 1},
+            membership_dois=("10.1063/example",),
+            parser_version="aip-issue-v1",
+        ),
+        (
+            aip_fetch.SnapshotAttachment(
+                "abstract-12345.json", "application/json", invalid_body
+            ),
+        ),
+    )
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    runtime.queue_json({"Success": True, "Html": "<p>Fresh.</p>"})
+
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert result.entries["10.1063/example"].abstract == "Fresh."
+    assert len(runtime.fetch_calls) == 1
+
+
+def test_aip_rejects_extra_snapshot_attachment(runtime, snapshot_store):
+    snapshot_store.commit(
+        SnapshotKey("aip", "jcp", "160", "4"),
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "text/html",
+        AIP_ISSUE_FIXTURE.encode(),
+        SnapshotValidation(
+            selector_counts={".al-article-items": 1},
+            membership_dois=("10.1063/example",),
+            parser_version="aip-issue-v1",
+        ),
+        (
+            aip_fetch.SnapshotAttachment(
+                "abstract-12345.json", "application/json", _attachment_envelope()
+            ),
+            aip_fetch.SnapshotAttachment(
+                "abstract-extra.json", "application/json", _attachment_envelope()
+            ),
+        ),
+    )
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    runtime.queue_json({"Success": True, "Html": "<p>Fresh.</p>"})
+
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert result.entries["10.1063/example"].abstract == "Fresh."
     assert len(runtime.fetch_calls) == 1
 
 
@@ -356,19 +476,177 @@ def test_aip_failed_live_refetch_does_not_replace_validated_snapshot(runtime, sn
     assert manifest.read_bytes() == before
 
 
-def test_aip_rejects_unsafe_article_id_without_abstract_request(runtime):
+def test_aip_rejects_unsafe_article_id_without_abstract_request(monkeypatch, runtime):
     runtime.queue_issue_html(AIP_ISSUE_FIXTURE.replace("12345", "../bad"))
+    events = []
+    monkeypatch.setattr(
+        aip_fetch, "record_fetch_attempt", lambda event, html=None: events.append(event)
+    )
 
     result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
 
     assert result.outcome != SUCCESS
     assert runtime.request_calls == []
+    event = next(event for event in events if event["stage"] == "issue_page_parse")
+    assert event["journal"] == "jcp"
+    assert event["volume"] == "160"
+    assert event["issue"] == "4"
+    assert event["url"] == "https://pubs.aip.org/aip/jcp/issue/160/4"
+    assert event["critical_field_failures"][0]["field"] == "article_id"
 
 
-def test_aip_rejects_invalid_official_membership_before_abstract_requests(runtime):
+def test_aip_rejects_invalid_official_membership_before_abstract_requests(
+    monkeypatch, runtime
+):
     runtime.queue_issue_html(AIP_ISSUE_FIXTURE.replace("10.1063/example", "10.9999/wrong"))
+    events = []
+    monkeypatch.setattr(
+        aip_fetch, "record_fetch_attempt", lambda event, html=None: events.append(event)
+    )
 
     result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
 
     assert result.outcome != SUCCESS
     assert runtime.request_calls == []
+    event = next(event for event in events if event["stage"] == "issue_page_parse")
+    assert event["outcome"] == PARSE_FAILED
+    assert event["critical_field_failures"] == [
+        {"field": "doi_membership", "doi": "10.9999/wrong"}
+    ]
+
+
+def test_aip_suspicious_empty_preflight_records_full_diagnostic(
+    monkeypatch, runtime
+):
+    runtime.queue_issue_html("<html><body>No issue cards</body></html>")
+    events = []
+    monkeypatch.setattr(
+        aip_fetch, "record_fetch_attempt", lambda event, html=None: events.append(event)
+    )
+
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert result.outcome == aip_fetch.OFFICIAL_EMPTY_SUSPICIOUS
+    event = next(event for event in events if event["stage"] == "issue_page_parse")
+    assert event["selector_counts"] == {".al-article-items": 0}
+    assert event["card_count"] == 0
+    assert event["journal"] == "jcp"
+    assert event["volume"] == "160"
+    assert event["issue"] == "4"
+    assert event["url"] == "https://pubs.aip.org/aip/jcp/issue/160/4"
+
+
+def test_aip_malformed_card_fails_entire_multi_card_issue(
+    monkeypatch, runtime, snapshot_store
+):
+    malformed = """
+    <div class="al-article-items">
+      <h3 class="item-title"><a href="/aip/jcp/article/160/4/x/2/Bad">Bad card</a></h3>
+      <a class="js-show-abstract" data-articleid="broken">Abstract</a>
+    </div>
+    """
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE.replace("</body>", malformed + "</body>"))
+    events = []
+    monkeypatch.setattr(
+        aip_fetch, "record_fetch_attempt", lambda event, html=None: events.append(event)
+    )
+
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert result.outcome == PARSE_FAILED
+    assert result.entries == {}
+    assert runtime.request_calls == []
+    assert snapshot_store.load(SnapshotKey("aip", "jcp", "160", "4")) is None
+    event = next(event for event in events if event["stage"] == "issue_page_parse")
+    assert event["selector_counts"] == {".al-article-items": 2}
+    assert event["card_count"] == 2
+    assert event["critical_field_failures"] == [{"card": 2, "field": "doi"}]
+
+
+def test_aip_deliberately_excludes_known_non_article_card(runtime):
+    excluded = """
+    <div class="al-article-items">
+      <h3 class="item-title"><a href="/aip/jcp/article/160/4/x/2/Info">Issue Publication Information</a></h3>
+      <span class="citation-label"><a href="https://doi.org/10.1063/ctv160i004">10.1063/ctv160i004</a></span>
+    </div>
+    """
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE.replace("</body>", excluded + "</body>"))
+    runtime.queue_json({"Success": True, "Html": "<p>Official.</p>"})
+
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert result.outcome == SUCCESS
+    assert result.metadata["card_count"] == 2
+    assert result.metadata["excluded_card_count"] == 1
+
+
+def test_aip_abstract_transport_exception_is_partial_and_not_snapshotted(
+    runtime, snapshot_store
+):
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    runtime.queue_exception(OSError("offline"))
+
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert result.outcome == PARTIAL
+    assert result.entries["10.1063/example"].abstract == ""
+    assert result.metadata["missing_fields"][0]["outcome"] == FETCH_FAILED
+    assert snapshot_store.load(SnapshotKey("aip", "jcp", "160", "4")) is None
+    assert runtime.stats.live_success == 0
+
+
+def test_aip_transport_retry_then_snapshot_reload_is_consistent(snapshot_store):
+    failed_runtime = Runtime(snapshot_store)
+    failed_runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    failed_runtime.queue_exception(OSError("offline"))
+    failed = aip_fetch.query_aip_issue_result(
+        "jcp", "160", "4", "JCP", failed_runtime
+    )
+    assert failed.outcome == PARTIAL
+
+    live_runtime = Runtime(snapshot_store)
+    live_runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    live_runtime.queue_json({"Success": True, "Html": "<p>Stable.</p>"})
+    live = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", live_runtime)
+
+    reload_runtime = Runtime(snapshot_store)
+    cached = aip_fetch.query_aip_issue_result(
+        "jcp", "160", "4", "JCP", reload_runtime
+    )
+    assert live.outcome == cached.outcome == SUCCESS
+    assert live.entries["10.1063/example"].abstract == "Stable."
+    assert cached.entries["10.1063/example"].abstract == "Stable."
+    assert reload_runtime.fetch_calls == []
+
+
+def test_aip_abstract_transport_failure_preserves_prior_snapshot_manifest(
+    snapshot_store,
+):
+    stored = snapshot_store.commit(
+        SnapshotKey("aip", "jcp", "160", "4"),
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "https://pubs.aip.org/aip/jcp/issue/160/4",
+        "text/html",
+        AIP_ISSUE_FIXTURE.encode(),
+        SnapshotValidation(
+            selector_counts={".al-article-items": 1},
+            membership_dois=("10.1063/example",),
+            parser_version="aip-issue-v1",
+        ),
+        (
+            aip_fetch.SnapshotAttachment(
+                "abstract-12345.json", "application/json", _attachment_envelope()
+            ),
+        ),
+    )
+    stored.body_path.write_bytes(b"corrupt")
+    manifest_path = snapshot_store.root / "aip/jcp/160/4/manifest.json"
+    before = manifest_path.read_bytes()
+    runtime = Runtime(snapshot_store)
+    runtime.queue_issue_html(AIP_ISSUE_FIXTURE)
+    runtime.queue_exception(OSError("offline"))
+
+    result = aip_fetch.query_aip_issue_result("jcp", "160", "4", "JCP", runtime)
+
+    assert result.outcome == PARTIAL
+    assert manifest_path.read_bytes() == before

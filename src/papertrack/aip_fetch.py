@@ -21,6 +21,7 @@ from .adapter_result import (
     FETCH_FAILED,
     OFFICIAL_EMPTY_SUSPICIOUS,
     PARSE_FAILED,
+    PARTIAL,
     RATE_LIMITED,
     SUCCESS,
 )
@@ -59,6 +60,20 @@ class AipAbstractResult:
     message: str = ""
     url: str = ""
     article_id: str = ""
+
+
+@dataclass
+class AipParseResult:
+    entries: dict[str, JournalEntry]
+    abstract_ids: dict[str, str]
+    card_count: int
+    excluded_cards: list[dict]
+    critical_field_failures: list[dict]
+
+    def __iter__(self):
+        """Preserve the staged internal tuple API for legacy parser callers."""
+        yield self.entries
+        yield self.abstract_ids
 
 
 _cache: dict[str, AdapterResult[dict[str, JournalEntry]]] = {}
@@ -305,16 +320,27 @@ def _fetch_aip_abstract(
 
 def _parse_aip_toc(
     html: str, journal_name: str
-) -> tuple[dict[str, JournalEntry], dict[str, str]]:
+) -> AipParseResult:
     """Parse an AIP issue page into entries and official abstract controls."""
     soup = BeautifulSoup(html, "lxml")
     entries: dict[str, JournalEntry] = {}
     abstract_ids: dict[str, str] = {}
-    for item in soup.select(".al-article-items"):
+    excluded_cards = []
+    critical_field_failures = []
+    cards = soup.select(AIP_ISSUE_SELECTOR)
+    for card_number, item in enumerate(cards, 1):
         title_el = item.select_one("h3.item-title a, .item-title a")
         if not title_el:
+            critical_field_failures.append(
+                {"card": card_number, "field": "title"}
+            )
             continue
         title = title_el.get_text(" ", strip=True)
+        if not title:
+            critical_field_failures.append(
+                {"card": card_number, "field": "title"}
+            )
+            continue
         article_href = title_el.get("href", "")
         doi = ""
         doi_el = item.select_one('.citation-label a[href*="doi.org/10."]')
@@ -327,7 +353,20 @@ def _parse_aip_toc(
         if not doi:
             doi_element = item.select_one("[data-doi]")
             doi = (doi_element.get("data-doi", "") if doi_element else "").strip()
-        if not doi or JournalEntry.is_non_article(doi, title):
+        if JournalEntry.is_non_article(doi, title):
+            excluded_cards.append(
+                {"card": card_number, "reason": "known_non_article"}
+            )
+            continue
+        if not doi:
+            critical_field_failures.append(
+                {"card": card_number, "field": "doi"}
+            )
+            continue
+        if doi in entries:
+            critical_field_failures.append(
+                {"card": card_number, "field": "duplicate_doi", "doi": doi}
+            )
             continue
         authors = [
             author.get_text(" ", strip=True)
@@ -365,7 +404,13 @@ def _parse_aip_toc(
             article_id = abstract_link.get("data-articleid", "").strip()
             if article_id:
                 abstract_ids[doi] = article_id
-    return entries, abstract_ids
+    return AipParseResult(
+        entries=entries,
+        abstract_ids=abstract_ids,
+        card_count=len(cards),
+        excluded_cards=excluded_cards,
+        critical_field_failures=critical_field_failures,
+    )
 
 
 def _record_abstract_outcome(
@@ -591,6 +636,7 @@ def _snapshot_attachment(
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+    _snapshot_response(body)
     return SnapshotAttachment(
         _attachment_name(article_id), "application/json", body
     )
@@ -599,17 +645,17 @@ def _snapshot_attachment(
 def _snapshot_response(body: bytes) -> CapturedResponse:
     try:
         payload = json.loads(body)
-    except (UnicodeError, json.JSONDecodeError, TypeError):
-        payload = None
-    if not isinstance(payload, dict) or payload.get("schema") != (
-        "papertrack-aip-abstract-response-v1"
+    except (UnicodeError, json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("AIP abstract attachment is not a versioned envelope") from exc
+    expected_keys = {
+        "schema", "url", "status_code", "media_type", "body_base64"
+    }
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != expected_keys
+        or payload.get("schema") != "papertrack-aip-abstract-response-v1"
     ):
-        return CapturedResponse(
-            url=AIP_ABSTRACT_ENDPOINT,
-            status_code=200,
-            media_type="application/json",
-            body=body,
-        )
+        raise ValueError("AIP abstract attachment is not a versioned envelope")
     try:
         response_body = base64.b64decode(payload["body_base64"], validate=True)
         status_code = int(payload["status_code"])
@@ -617,8 +663,23 @@ def _snapshot_response(body: bytes) -> CapturedResponse:
         media_type = str(payload["media_type"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("invalid AIP abstract attachment envelope") from exc
-    if urlsplit(response_url).path != urlsplit(AIP_ABSTRACT_ENDPOINT).path:
+    parsed_url = urlsplit(response_url)
+    if (
+        parsed_url.scheme != "https"
+        or parsed_url.netloc != "pubs.aip.org"
+        or parsed_url.path != urlsplit(AIP_ABSTRACT_ENDPOINT).path
+        or parsed_url.fragment
+    ):
         raise ValueError("AIP abstract attachment URL is not official")
+    if status_code not in {200, 403, 429}:
+        raise ValueError("AIP abstract attachment status is not approved")
+    approved_media_types = (
+        {"application/json"}
+        if status_code == 200
+        else {"application/json", "text/html"}
+    )
+    if media_type.partition(";")[0].strip().lower() not in approved_media_types:
+        raise ValueError("AIP abstract attachment media type is not approved")
     return CapturedResponse(
         url=response_url,
         status_code=status_code,
@@ -640,24 +701,51 @@ def _result_from_official_material(
     snapshot=None,
     record_missing: bool = True,
 ):
-    entries, abstract_ids = _parse_aip_toc(html, journal_name)
+    parsed = _parse_aip_toc(html, journal_name)
+    entries = parsed.entries
+    abstract_ids = parsed.abstract_ids
     selector_counts = {
         AIP_ISSUE_SELECTOR: len(BeautifulSoup(html, "lxml").select(AIP_ISSUE_SELECTOR))
     }
     membership_dois = _membership_dois(entries)
+    critical_field_failures = list(parsed.critical_field_failures)
+    critical_field_failures.extend(
+        {"field": "doi_membership", "doi": doi}
+        for doi in membership_dois
+        if not re.fullmatch(r"10\.1063/[^\s]+", doi, re.IGNORECASE)
+    )
     metadata = {
         "url": url,
         "article_count": len(entries),
         "missing_fields": [],
         "official_transport": transport,
         "selector_counts": selector_counts,
+        "card_count": parsed.card_count,
+        "excluded_card_count": len(parsed.excluded_cards),
+        "excluded_cards": parsed.excluded_cards,
+        "critical_field_failures": critical_field_failures,
     }
     if snapshot is not None:
         metadata.update(
             snapshot_path=str(snapshot.body_path),
             membership_hash=snapshot.membership_hash,
         )
-    if selector_counts[AIP_ISSUE_SELECTOR] < 1 or not entries:
+    if selector_counts[AIP_ISSUE_SELECTOR] < 1:
+        record_fetch_attempt(
+            _diagnostic_context(
+                journal_slug,
+                volume,
+                issue,
+                url,
+                "issue_page_parse",
+                OFFICIAL_EMPTY_SUSPICIOUS,
+                selector_counts=selector_counts,
+                card_count=parsed.card_count,
+                excluded_card_count=len(parsed.excluded_cards),
+                critical_field_failures=critical_field_failures,
+            ),
+            html=html,
+        )
         return AdapterResult(
             entries={},
             outcome=OFFICIAL_EMPTY_SUSPICIOUS,
@@ -666,19 +754,81 @@ def _result_from_official_material(
             message="AIP issue page parsed to zero official articles",
             metadata=metadata,
         ), membership_dois, abstract_ids
-    if not _valid_aip_membership(membership_dois):
+    if critical_field_failures or (
+        entries and not _valid_aip_membership(membership_dois)
+    ):
+        record_fetch_attempt(
+            _diagnostic_context(
+                journal_slug,
+                volume,
+                issue,
+                url,
+                "issue_page_parse",
+                PARSE_FAILED,
+                selector_counts=selector_counts,
+                card_count=parsed.card_count,
+                excluded_card_count=len(parsed.excluded_cards),
+                critical_field_failures=critical_field_failures,
+            ),
+            html=html,
+        )
         return AdapterResult(
             entries={},
             outcome=PARSE_FAILED,
             provider="aip",
             source="journal",
-            message="AIP article card is missing a valid official DOI",
+            message="AIP article card is missing a required membership field",
+            metadata=metadata,
+        ), membership_dois, abstract_ids
+    if not entries:
+        record_fetch_attempt(
+            _diagnostic_context(
+                journal_slug,
+                volume,
+                issue,
+                url,
+                "issue_page_parse",
+                OFFICIAL_EMPTY_SUSPICIOUS,
+                selector_counts=selector_counts,
+                card_count=parsed.card_count,
+                excluded_card_count=len(parsed.excluded_cards),
+                critical_field_failures=[],
+            ),
+            html=html,
+        )
+        return AdapterResult(
+            entries={},
+            outcome=OFFICIAL_EMPTY_SUSPICIOUS,
+            provider="aip",
+            source="journal",
+            message="AIP issue page contains no official article cards",
             metadata=metadata,
         ), membership_dois, abstract_ids
     if any(
         article_id and not _SAFE_ARTICLE_ID.fullmatch(article_id)
         for article_id in abstract_ids.values()
     ):
+        unsafe_ids = [
+            {"doi": doi, "article_id": article_id}
+            for doi, article_id in abstract_ids.items()
+            if article_id and not _SAFE_ARTICLE_ID.fullmatch(article_id)
+        ]
+        record_fetch_attempt(
+            _diagnostic_context(
+                journal_slug,
+                volume,
+                issue,
+                url,
+                "issue_page_parse",
+                PARSE_FAILED,
+                selector_counts=selector_counts,
+                card_count=parsed.card_count,
+                critical_field_failures=[
+                    {"field": "article_id", **item} for item in unsafe_ids
+                ],
+            ),
+            html=html,
+        )
         return AdapterResult(
             entries={},
             outcome=PARSE_FAILED,
@@ -763,11 +913,15 @@ def _query_aip_with_runtime(
             try:
                 html = snapshot.body_path.read_text(encoding="utf-8")
                 abstracts = _load_snapshot_abstracts(snapshot)
-                _, expected_abstract_ids = _parse_aip_toc(html, journal_name)
-                expected = {value for value in expected_abstract_ids.values() if value}
-                if not expected.issubset(abstracts):
+                snapshot_parse = _parse_aip_toc(html, journal_name)
+                expected = {
+                    value
+                    for value in snapshot_parse.abstract_ids.values()
+                    if value
+                }
+                if expected != set(abstracts):
                     raise ValueError(
-                        "AIP snapshot is missing an official abstract attachment"
+                        "AIP snapshot attachments do not exactly match controls"
                     )
                 cached, membership_dois, _ = _result_from_official_material(
                     html,
@@ -875,32 +1029,15 @@ def _query_aip_with_runtime(
     for captured in fetched.captured:
         article_id = _captured_article_id(captured)
         if article_id and article_id in abstract_ids.values():
+            try:
+                attachment = _snapshot_attachment(article_id, captured)
+            except ValueError:
+                continue
             responses_by_id[article_id] = _abstract_result_from_response(
                 captured, article_id
             )
-            attachments_by_id[article_id] = _snapshot_attachment(
-                article_id, captured
-            )
-    pending_ids = [
-        article_id
-        for article_id in dict.fromkeys(abstract_ids.values())
-        if article_id and article_id not in responses_by_id
-    ]
-    unassigned_captures = [
-        captured
-        for captured in fetched.captured
-        if urlsplit(captured.url).path == urlsplit(AIP_ABSTRACT_ENDPOINT).path
-        and not _captured_article_id(captured)
-    ]
-    if len(pending_ids) == 1 and len(unassigned_captures) == 1:
-        article_id = pending_ids[0]
-        captured = unassigned_captures[0]
-        responses_by_id[article_id] = _abstract_result_from_response(
-            captured, article_id
-        )
-        attachments_by_id[article_id] = _snapshot_attachment(
-            article_id, captured
-        )
+            attachments_by_id[article_id] = attachment
+    response_missing = False
     for article_id in dict.fromkeys(abstract_ids.values()):
         if not article_id or article_id in responses_by_id:
             continue
@@ -912,6 +1049,7 @@ def _query_aip_with_runtime(
                 max(10.0, AIP_ABSTRACT_INTERVAL),
             )
         except Exception as exc:
+            response_missing = True
             responses_by_id[article_id] = AipAbstractResult(
                 outcome=FETCH_FAILED,
                 message=str(exc),
@@ -922,9 +1060,12 @@ def _query_aip_with_runtime(
         responses_by_id[article_id] = _abstract_result_from_response(
             response, article_id
         )
-        attachments_by_id[article_id] = _snapshot_attachment(
-            article_id, response
-        )
+        try:
+            attachments_by_id[article_id] = _snapshot_attachment(
+                article_id, response
+            )
+        except ValueError:
+            response_missing = True
 
     result, membership_dois, _ = _result_from_official_material(
         fetched.html,
@@ -937,6 +1078,17 @@ def _query_aip_with_runtime(
         abstract_results=responses_by_id,
     )
     if result.outcome != SUCCESS:
+        return result
+    expected_attachment_ids = {
+        article_id for article_id in abstract_ids.values() if article_id
+    }
+    if response_missing or set(attachments_by_id) != expected_attachment_ids:
+        result.outcome = PARTIAL
+        result.message = (
+            "AIP issue membership succeeded but an official abstract response "
+            "was not captured"
+        )
+        result.metadata["snapshot_committed"] = False
         return result
     validation = SnapshotValidation(
         selector_counts=result.metadata["selector_counts"],
@@ -989,7 +1141,13 @@ def query_aip_issue_result(
     journal_name: str = "",
     provider_runtime=None,
 ) -> AdapterResult[dict[str, JournalEntry]]:
-    """Scrape one AIP issue without requesting any article detail page."""
+    """Scrape one AIP issue without requesting any article detail page.
+
+    Production ``run_j.sh`` workers always supply the one publisher-scoped
+    runtime opened by ``run_provider_rebuild``. The no-runtime branch remains
+    staged legacy compatibility, matching the ACS/APS adapter boundary; it is
+    not used by the unattended official-issue workflow.
+    """
     if provider_runtime is not None:
         return _query_aip_with_runtime(
             journal_slug, volume, issue, journal_name, provider_runtime
