@@ -8,9 +8,8 @@ The current journal workflow is source-conscious:
 - ACS journals such as JCTC use ACS issue pages as the primary source.
 - AIP journals such as JCP use AIP issue pages as the primary source.
 - APS journals such as PRL use APS issue pages as the primary source.
-- CrossRef is disabled by default. The journal-only `run_j.sh` wrapper enables
-  metadata mode only to fill missing abstracts by exact DOI; it never decides
-  issue membership.
+- CrossRef is disabled in the journal-only `run_j.sh` workflow. Formal issue
+  membership and metadata come only from official publisher resources.
 
 ## Requirements
 
@@ -27,7 +26,7 @@ pip install -e ".[dev]"
 The project depends on `curl_cffi` for publisher pages, plus `pyzotero`,
 `beautifulsoup4`, `lxml`, `feedparser`, `jinja2`, and `requests`.
 
-The bounded AIP Cloudflare fallback also needs Playwright, Chromium, and Xvfb:
+The unattended official runtime also needs Playwright, Google Chrome, and Xvfb:
 
 ```bash
 pip install -e ".[dev,browser]"
@@ -52,10 +51,10 @@ python main.py journal latest \
   --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
 ```
 
-In default official-only development mode, AIP `latest`/`backfill` cannot
-discover volume/issue pairs without CrossRef. Use the explicit `journal issue`
-command shown below. The repository-provided `run_j.sh` is the production
-journal rebuild path that enables metadata mode.
+In official-only mode, AIP `latest`/`backfill` cannot discover volume/issue
+pairs without a third-party index. Use the explicit `journal issue` command
+shown below. The repository-provided `run_j.sh` is the official-only production
+journal rebuild path over an audited list of formal issues.
 
 Backfill journal issues:
 
@@ -140,8 +139,16 @@ passed identically to all three workers:
 The flags can be combined. Unknown arguments are rejected rather than forwarded
 to the worker commands.
 
-Journal rebuild runtime files live under the ignored, machine-local
-`.papertrack_diagnostics/` directory:
+To retry the currently unresolved official issues:
+
+```bash
+./run_j.sh --retry-unresolved
+```
+
+Journal rebuild runtime files live under ignored, machine-local directories.
+Browser profiles persist in `.papertrack_browser_profiles/`, validated official
+snapshots persist in `.papertrack_official_cache/`, and progress and failure
+evidence live in `.papertrack_diagnostics/`:
 
 ```text
 journal_rebuild_manifest.json
@@ -160,11 +167,10 @@ issue pages. These values match the non-bypassable request floors enforced in
 code; lowering an environment value cannot weaken those floors.
 
 Official publisher issue pages remain authoritative for issue membership and
-publisher metadata. CrossRef metadata mode may complete a missing abstract by
-exact DOI, but cannot add or remove articles or replace official title, author,
-DOI, volume, issue, page, or date fields. A blocked fetch, parse failure, or
-unresolved repair produces a visible nonzero result and preserves the prior
-valid Markdown instead of replacing it with empty or partial output.
+publisher metadata. `run_j.sh` exports `PAPERTRACK_CROSSREF_MODE=disabled`; it
+does not make CrossRef requests. A blocked fetch, parse failure, or unresolved
+repair produces a visible nonzero result and preserves the prior valid Markdown
+instead of replacing it with empty or partial output.
 
 ## Output Layout
 
@@ -191,7 +197,7 @@ Journal output is always:
 
 ## Journal Source Policy
 
-`PAPERTRACK_CROSSREF_MODE` has two accepted values:
+`PAPERTRACK_CROSSREF_MODE` has two accepted values in the general CLI:
 
 - unset or `disabled`: official publisher pages only; this is the development
   default and makes no CrossRef requests;
@@ -199,9 +205,10 @@ Journal output is always:
   completion only after an official issue fetch succeeds.
 
 Any other value is an error. CrossRef cannot add or remove issue members, or
-replace official DOI, title, author, volume, issue, page, or date metadata. Only
-`run_j.sh` exports `PAPERTRACK_CROSSREF_MODE=metadata`; `run.sh` remains
-arXiv-only and does not configure CrossRef.
+replace official DOI, title, author, volume, issue, page, or date metadata.
+The production journal wrapper explicitly exports
+`PAPERTRACK_CROSSREF_MODE=disabled`; `run.sh` remains arXiv-only and does not
+configure CrossRef.
 
 ### JCTC / ACS
 
@@ -241,11 +248,10 @@ For each issue, PaperTrack:
 4. If direct HTTP receives a Cloudflare challenge, makes one bounded headful
    Playwright attempt under Xvfb, reusing one browser context for that issue and
    blocking images, fonts, media, and article-page navigation.
-5. In production `metadata` mode only, fills a still-missing `abstract` from
-   CrossRef by exact DOI.
+5. Validates the complete issue result before committing its official snapshot.
 
-PaperTrack does not visit each AIP article page. CrossRef is never allowed to
-add articles to an AIP issue or replace AIP metadata.
+PaperTrack does not visit each AIP article page. The production journal wrapper
+does not use CrossRef.
 
 ### PRL / APS
 
@@ -447,13 +453,19 @@ Current verification commands used during development:
 /home/ansatz/soft/miniconda3/bin/conda run -n arxiv python -m compileall -q src tests
 ```
 
-For a deliberately bounded live check of one fixed formal issue per provider:
+For a deliberately bounded live check of exactly one formal issue:
 
 ```bash
 /home/ansatz/soft/miniconda3/bin/conda run -n arxiv \
-  python scripts/verify_official_journal_issues.py --provider all
+  python scripts/verify_official_issue_runtime.py \
+  --provider acs --journal jcim --volume 66 --issue 12 \
+  --profile-root .papertrack_browser_profiles \
+  --snapshot-root .papertrack_official_cache \
+  --diagnostics-dir .papertrack_diagnostics
 ```
 
-The verifier is official-only and read-only: it does not import report, Zotero,
-CrossRef, or state code. Publisher blocking is reported as a failed observation,
-not converted into an empty successful issue.
+The verifier contacts only the canonical official issue resource (plus AIP's
+required same-origin official abstract endpoint). It never uses CrossRef and
+does not write Markdown unless `--write-report --data-dir PATH` is explicitly
+supplied. It prints one JSON observation; `blocked` is a legitimate visible
+outcome and is never converted into an empty successful issue.
