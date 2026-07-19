@@ -476,6 +476,7 @@ tags:
 ---
 
 ```dataview
+TASK
 from #personal-2025-03-01
 from #quant-ph-2025-03-01
 ```
@@ -529,6 +530,82 @@ from #chem-ph-2025-03-01
 
     assert result.status == "repaired"
     assert "  - #chem-ph-2025-03-01" in report_file.read_text(encoding="utf-8")
+
+
+def test_arxiv_identity_migration_selects_generated_dataview_block(tmp_path):
+    report_file = tmp_path / "arxiv" / "chem-ph" / "2025" / "03" / "01.md"
+    report_file.parent.mkdir(parents=True)
+    original = """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+papertrack_category: quant-ph
+papertrack_date: "2025-03-01"
+tags:
+  - #quant-ph-2025-03-01
+---
+
+```dataview
+LIST
+from #personal-2025-03-01
+```
+
+```dataview
+TASK
+from #quant-ph-2025-03-01
+WHERE completed
+```
+
+## collected
+
+## not collected
+
+### arXiv:2503.00001
+"""
+    report_file.write_text(original, encoding="utf-8")
+
+    result = migrate_report_file(str(report_file), data_dir=str(tmp_path))
+
+    repaired = report_file.read_text(encoding="utf-8")
+    assert result.status == "repaired"
+    assert "LIST\nfrom #personal-2025-03-01" in repaired
+    assert "TASK\nfrom #chem-ph-2025-03-01" in repaired
+
+
+def test_migrate_reports_isolates_invalid_utf8_and_continues(tmp_path):
+    bad = tmp_path / "arxiv" / "chem-ph" / "2025" / "03" / "01.md"
+    good = tmp_path / "arxiv" / "chem-ph" / "2025" / "03" / "02.md"
+    bad.parent.mkdir(parents=True)
+    bad.write_bytes(b"\xff\xfe")
+    good.write_text(
+        """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+papertrack_category: chem-ph
+papertrack_date: "2025-03-02"
+tags:
+  - #chem-ph-2025-03-02
+---
+
+```dataview
+TASK
+from #chem-ph-2025-03-02
+```
+
+## collected
+
+## not collected
+
+### arXiv:2503.00002
+""",
+        encoding="utf-8",
+    )
+
+    results = migrate_reports(str(tmp_path))
+
+    assert [(result.status, result.path) for result in results] == [
+        ("failed", str(bad)),
+        ("current", str(good)),
+    ]
 
 
 def test_preserve_task_state_keeps_checkbox_and_plugin_suffix():

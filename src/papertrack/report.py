@@ -67,7 +67,11 @@ def _classify_papers(arxiv_dict: dict[str, ArxivEntry],
     for arxiv_id, entry in arxiv_dict.items():
         if zotero is not None:
             try:
-                found = zotero.match_entry(entry).is_collected
+                match = zotero.match_entry(entry)
+                if getattr(zotero, "index_available", True) is False:
+                    found = arxiv_id in previously_collected
+                else:
+                    found = match.is_collected
             except Exception:
                 logger.exception("Zotero lookup failed for %s", arxiv_id)
                 found = arxiv_id in previously_collected

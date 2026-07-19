@@ -58,6 +58,9 @@ def _parse_arxiv_result(res) -> ArxivEntry | None:
     if abstract_full:
         abstract = abstract_full.text.strip()
 
+    if not title or not authors or not abstract:
+        return None
+
     external_doi = ""
     external_doi_url = ""
     subjects = []
@@ -316,6 +319,7 @@ def _parse_arxiv_page(results, url: str) -> dict[str, ArxivEntry] | None:
     for res in find_results:
         entry = _parse_arxiv_result(res)
         if entry is None:
+            missing_field = _missing_arxiv_result_field(res)
             record_fetch_attempt({
                 "source_role": "authoritative",
                 "source": "arxiv",
@@ -323,13 +327,29 @@ def _parse_arxiv_page(results, url: str) -> dict[str, ArxivEntry] | None:
                 "url": url,
                 "stage": "advanced_search_parse",
                 "outcome": "parse_failed",
-                "field": "arxiv_id",
-                "message": "one arXiv result was missing its identifier",
+                "field": missing_field,
+                "message": f"one arXiv result was missing required field {missing_field}",
             })
             return None
         result[entry.arxiv_id] = entry
 
     return result
+
+
+def _missing_arxiv_result_field(res) -> str:
+    list_title = res.find(class_="list-title")
+    if list_title is None or list_title.find("a") is None:
+        return "arxiv_id"
+    title = res.find(class_="title")
+    if title is None or not title.get_text(strip=True):
+        return "title"
+    authors = res.find(class_="authors")
+    if authors is None or not authors.find_all("a"):
+        return "authors"
+    abstract = res.find(class_="abstract-full")
+    if abstract is None or not abstract.get_text(strip=True):
+        return "abstract"
+    return "unknown"
 
 
 def query_arxiv_dict(date_from_date: str = "2025-02-01",

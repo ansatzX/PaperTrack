@@ -122,7 +122,14 @@ def migrate_report_file(path: str, data_dir: str = "") -> MigrationResult:
     if not report_path.exists():
         return MigrationResult(path=path, status="missing", message="file does not exist")
 
-    old_content = report_path.read_text(encoding="utf-8")
+    try:
+        old_content = report_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return MigrationResult(
+            path=path,
+            status="failed",
+            message=f"could not read report: {exc}",
+        )
     current_format = report_format(old_content)
     source = _detect_source(old_content, report_path, data_dir)
 
@@ -441,9 +448,16 @@ def _repair_arxiv_dataview_query(
     expected_tag: str,
     report_date: str,
 ) -> str:
-    block_match = re.search(r"```dataview\n.*?\n```", body, re.DOTALL)
-    if block_match is None:
+    block_matches = [
+        match
+        for match in re.finditer(r"```dataview\n.*?\n```", body, re.DOTALL)
+        if re.search(r"^TASK(?:[ \t]+FROM\b|[ \t]*$)", match.group(0), re.MULTILINE)
+    ]
+    if not block_matches:
         return body
+    if len(block_matches) != 1:
+        raise ValueError("current arXiv report has ambiguous generated Dataview blocks")
+    block_match = block_matches[0]
     block = block_match.group(0)
     query_pattern = r"^(from|TASK FROM) (#\S+-\d{4}-\d{2}-\d{2})[ \t]*$"
     queries = list(re.finditer(query_pattern, block, re.MULTILINE))

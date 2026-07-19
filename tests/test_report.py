@@ -605,6 +605,24 @@ class TestParseArxivResult:
         assert entry is not None
         assert entry.subjects == ["cs.CV", "cs.AI", "cs.LG"]
 
+    @pytest.mark.parametrize(
+        "missing_html",
+        [
+            '<p class="title">Title</p><p class="authors"><a>A</a></p>',
+            '<p class="title">Title</p><span class="abstract-full">Abstract</span>',
+            '<p class="authors"><a>A</a></p><span class="abstract-full">Abstract</span>',
+        ],
+    )
+    def test_rejects_entry_missing_required_report_metadata(self, missing_html):
+        html = f"""<li class="arxiv-result">
+ <p class="list-title"><a>arXiv:2606.00001</a></p>
+ {missing_html}
+</li>"""
+
+        entry = _parse_arxiv_result(BeautifulSoup(html, "lxml").find("li"))
+
+        assert entry is None
+
 
 class TestZoteroQuery:
     """Test ZoteroQuery index building and matching logic"""
@@ -716,6 +734,7 @@ class TestZoteroQuery:
         zq.zot = BrokenZotero()
         zq._ensure_index()
 
+        assert zq.index_available is False
         e = ArxivEntry(arxiv_id="arXiv:2502.07673", title="T", authors=[], abstract="")
         assert zq.find_by_entry(e) is False
         assert zq.match_entry(e).is_collected is False
@@ -1067,6 +1086,75 @@ Title:  Old title
     assert "Title:  Fresh title" in collected
 
 
+def test_refresh_preserves_collected_when_zotero_index_fetch_failed(
+    tmp_path, monkeypatch
+):
+    from papertrack import report
+    from papertrack.adapter_result import AdapterResult, SUCCESS
+    from papertrack.arxiv_entry import ArxivEntry
+    from papertrack.identity import MatchResult
+
+    class UnavailableZotero:
+        index_available = False
+
+        def match_entry(self, entry):
+            return MatchResult()
+
+    existing = tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "08.md"
+    existing.parent.mkdir(parents=True)
+    existing.write_text(
+        """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+---
+
+```dataview
+TASK
+```
+
+## collected
+
+### arXiv:2606.00001
+
+- [ ] [arXiv:2606.00001](https://arxiv.org/abs/2606.00001)
+
+Title:  Old title
+
+## not collected
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        report,
+        "query_arxiv_result",
+        lambda *args, **kwargs: AdapterResult(
+            entries={
+                "arXiv:2606.00001": ArxivEntry(
+                    arxiv_id="arXiv:2606.00001",
+                    title="Fresh title",
+                    authors=["A Author"],
+                    abstract="Fresh abstract",
+                )
+            },
+            outcome=SUCCESS,
+            provider="arxiv",
+            source="arxiv",
+        ),
+    )
+
+    report.filter_arxiv_days_to_md(
+        days=[date(2026, 6, 8)],
+        md_folder=str(tmp_path / "arxiv" / "quant-ph"),
+        category="quant-ph",
+        zotero=UnavailableZotero(),
+        refresh_existing=True,
+    )
+
+    refreshed = existing.read_text(encoding="utf-8")
+    collected = refreshed.split("## collected", 1)[1].split("## not collected", 1)[0]
+    assert "### arXiv:2606.00001" in collected
+
+
 def test_parse_arxiv_page_rejects_partial_entry_parse():
     results = {
         "feed": {
@@ -1083,6 +1171,31 @@ def test_parse_arxiv_page_rejects_partial_entry_parse():
     }
 
     assert _parse_arxiv_page(results, "https://arxiv.test/search") is None
+
+
+def test_parse_arxiv_page_records_the_missing_metadata_field(monkeypatch):
+    from papertrack import arxiv_index_fetch
+
+    attempts = []
+    monkeypatch.setattr(
+        arxiv_index_fetch,
+        "record_fetch_attempt",
+        lambda payload: attempts.append(payload),
+    )
+    results = {
+        "feed": {
+            "summary": """
+<li class="arxiv-result">
+  <p class="list-title"><a>arXiv:2606.00001</a></p>
+  <p class="title">Paper</p>
+  <p class="authors"><a>A Author</a></p>
+</li>
+"""
+        }
+    }
+
+    assert arxiv_index_fetch._parse_arxiv_page(results, "https://arxiv.test") is None
+    assert attempts[-1]["field"] == "abstract"
 
 
 def test_filter_arxiv_days_to_md_skips_empty_days(tmp_path, monkeypatch):

@@ -41,6 +41,7 @@ class ZoteroQuery:
         self._doi_index: dict[str, str] | None = None
         self._url_arxiv_index: dict[str, str] | None = None
         self._item_type_index: dict[str, str] = {}
+        self._index_available: bool | None = None
 
     def _ensure_index(self):
         """Build in-memory lookup indexes from Zotero top-level items.
@@ -61,6 +62,7 @@ class ZoteroQuery:
         try:
             items = self.zot.everything(self.zot.top())
         except Exception:
+            self._index_available = False
             logger.exception("Failed to fetch Zotero items")
             return
         for item in items:
@@ -79,6 +81,12 @@ class ZoteroQuery:
                     self._url_arxiv_index[bare_id] = key
         logger.info("Zotero index built: %d DOIs, %d arXiv URLs",
                     len(self._doi_index), len(self._url_arxiv_index))
+        self._index_available = True
+
+    @property
+    def index_available(self) -> bool:
+        self._ensure_index()
+        return self._index_available is True
 
     def match_entry(self, entry: "ArxivEntry | JournalEntry") -> MatchResult:
         """Match a source entry against Zotero by exact work identities."""
