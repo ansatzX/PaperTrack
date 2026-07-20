@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .diagnostics import record_all_attempts, record_migration_event
+from .report_tags import arxiv_report_tag, journal_report_tag
 
 CURRENT_ARXIV_FORMAT = "arxiv-v2"
 CURRENT_JOURNAL_FORMAT = "journal-v2"
@@ -167,8 +168,20 @@ def migrate_report_file(path: str, data_dir: str = "") -> MigrationResult:
             to_format=current_format,
         )
     if current_format == CURRENT_JOURNAL_FORMAT:
-        if _has_markdown_images(old_content):
-            new_content = _remove_markdown_images(old_content)
+        try:
+            new_content = _repair_current_journal_tags(old_content)
+        except ValueError as exc:
+            return MigrationResult(
+                path=path,
+                status="failed",
+                source=source,
+                from_format=current_format,
+                to_format=current_format,
+                message=str(exc),
+            )
+        if _has_markdown_images(new_content):
+            new_content = _remove_markdown_images(new_content)
+        if new_content != old_content:
             return _write_migrated_content(
                 report_path=report_path,
                 old_content=old_content,
@@ -176,7 +189,7 @@ def migrate_report_file(path: str, data_dir: str = "") -> MigrationResult:
                 source=source,
                 from_format=current_format,
                 to_format=current_format,
-                status="cleaned",
+                status="repaired",
             )
         return MigrationResult(
             path=path,
@@ -316,6 +329,12 @@ def _migrate_journal_legacy(content: str, path: Path, data_dir: str) -> str:
     metadata = _journal_metadata(content, path, data_dir)
     body = _remove_legacy_frontmatter(content)
     body = _remove_markdown_images(body)
+    tag = journal_report_tag(
+        metadata["journal_slug"],
+        metadata["volume"],
+        metadata["issue"],
+    )
+    body = _repair_generated_dataview_query(body, {f"#{tag}"}, f"#{tag}")
     frontmatter = [
         "---",
         f"papertrack_format: {CURRENT_JOURNAL_FORMAT}",
@@ -325,7 +344,7 @@ def _migrate_journal_legacy(content: str, path: Path, data_dir: str) -> str:
         f"papertrack_volume: \"{metadata['volume']}\"",
         f"papertrack_issue: \"{metadata['issue']}\"",
         "tags:",
-        f"  - #{metadata['journal_slug']}-v{metadata['volume']}-i{metadata['issue']}",
+        f"  - {tag}",
         "---",
         "",
     ]
@@ -335,6 +354,13 @@ def _migrate_journal_legacy(content: str, path: Path, data_dir: str) -> str:
 def _migrate_arxiv_legacy(content: str, path: Path, data_dir: str) -> str:
     metadata = _arxiv_metadata(content, path, data_dir)
     body = _remove_legacy_frontmatter(content)
+    tag = arxiv_report_tag(metadata["category"], metadata["date"])
+    legacy_source = f"#{metadata['category']}-{metadata['date']}"
+    body = _repair_generated_dataview_query(
+        body,
+        {legacy_source, f"#{tag}"},
+        f"#{tag}",
+    )
     frontmatter = [
         "---",
         f"papertrack_format: {CURRENT_ARXIV_FORMAT}",
@@ -342,7 +368,7 @@ def _migrate_arxiv_legacy(content: str, path: Path, data_dir: str) -> str:
         f"papertrack_category: {metadata['category']}",
         f"papertrack_date: \"{metadata['date']}\"",
         "tags:",
-        f"  - #{metadata['category']}-{metadata['date']}",
+        f"  - {tag}",
         "---",
         "",
     ]
@@ -378,8 +404,12 @@ def _repair_current_arxiv_identity(content: str, path: Path, data_dir: str) -> s
         return content
     old_category = category_match.group(1)
     old_date = date_match.group(1)
-    old_tag = f"#{old_category}-{old_date}"
-    expected_tag = f"#{category}-{report_date}"
+    canonical_tag = arxiv_report_tag(category, report_date)
+    candidate_tags = {
+        f"{old_category}-{old_date}",
+        f"{category}-{report_date}",
+        canonical_tag,
+    }
 
     frontmatter = re.sub(
         r"^papertrack_category:[ \t]*\S+[ \t]*$",
@@ -395,91 +425,112 @@ def _repair_current_arxiv_identity(content: str, path: Path, data_dir: str) -> s
         count=1,
         flags=re.MULTILINE,
     )
-    frontmatter = _repair_arxiv_tag_list(
+    frontmatter = _repair_generated_tag_list(
         frontmatter,
-        old_tag,
-        expected_tag,
-        report_date,
+        candidate_tags,
+        canonical_tag,
+        identity_suffix=report_date,
     )
-    body = _repair_arxiv_dataview_query(
+    body = _repair_generated_dataview_query(
         body,
-        old_tag,
-        expected_tag,
-        report_date,
+        {f"#{tag}" for tag in candidate_tags},
+        f"#{canonical_tag}",
     )
     return frontmatter + body
 
 
-def _repair_arxiv_tag_list(
+def _repair_generated_tag_list(
     frontmatter: str,
-    old_tag: str,
-    expected_tag: str,
-    report_date: str,
+    candidate_tags: set[str],
+    canonical_tag: str,
+    identity_suffix: str = "",
 ) -> str:
-    expected_line = f"  - {expected_tag}"
-    if re.search(rf"^{re.escape(expected_line)}[ \t]*$", frontmatter, re.MULTILINE):
+    matches = []
+    for match in re.finditer(r"^  -[ \t]+(#?\S+)[ \t]*$", frontmatter, re.MULTILINE):
+        value = match.group(1).removeprefix("#")
+        if value in candidate_tags:
+            matches.append(match)
+    if not matches and identity_suffix:
+        matches = [
+            match
+            for match in re.finditer(
+                r"^  -[ \t]+(#?\S+)[ \t]*$",
+                frontmatter,
+                re.MULTILINE,
+            )
+            if match.group(1).removeprefix("#").endswith(f"-{identity_suffix}")
+        ]
+    if not matches:
         return frontmatter
-
-    old_line = f"  - {old_tag}"
-    repaired, count = re.subn(
-        rf"^{re.escape(old_line)}[ \t]*$",
-        expected_line,
-        frontmatter,
-        count=1,
-        flags=re.MULTILINE,
-    )
-    if count == 1:
-        return repaired
-
-    candidates = list(re.finditer(
-        rf"^  - #\S+-{re.escape(report_date)}[ \t]*$",
-        frontmatter,
-        re.MULTILINE,
-    ))
-    if len(candidates) != 1:
-        raise ValueError("current arXiv report has ambiguous generated tag identity")
-    match = candidates[0]
-    return frontmatter[:match.start()] + expected_line + frontmatter[match.end():]
+    if len(matches) != 1:
+        raise ValueError("current report has ambiguous generated tag identity")
+    match = matches[0]
+    return frontmatter[:match.start()] + f"  - {canonical_tag}" + frontmatter[match.end():]
 
 
-def _repair_arxiv_dataview_query(
+def _repair_generated_dataview_query(
     body: str,
-    old_tag: str,
-    expected_tag: str,
-    report_date: str,
+    candidate_sources: set[str],
+    canonical_source: str,
 ) -> str:
     block_matches = [
         match
         for match in re.finditer(r"```dataview\n.*?\n```", body, re.DOTALL)
         if re.search(r"^TASK(?:[ \t]+FROM\b|[ \t]*$)", match.group(0), re.MULTILINE)
     ]
-    if not block_matches:
+    candidates = []
+    for block_match in block_matches:
+        for match in re.finditer(
+            r"^(from|FROM|TASK FROM)[ \t]+(#\S+)[ \t]*$",
+            block_match.group(0),
+            re.MULTILINE,
+        ):
+            if match.group(2) in candidate_sources:
+                candidates.append((block_match, match))
+    if not candidates:
         return body
-    if len(block_matches) != 1:
-        raise ValueError("current arXiv report has ambiguous generated Dataview blocks")
-    block_match = block_matches[0]
+    if len(candidates) != 1:
+        raise ValueError("current report has ambiguous generated Dataview identity")
+    block_match, match = candidates[0]
     block = block_match.group(0)
-    query_pattern = r"^(from|TASK FROM) (#\S+-\d{4}-\d{2}-\d{2})[ \t]*$"
-    queries = list(re.finditer(query_pattern, block, re.MULTILINE))
-    if any(match.group(2) == expected_tag for match in queries):
-        return body
-
-    old_matches = [match for match in queries if match.group(2) == old_tag]
-    if len(old_matches) == 1:
-        match = old_matches[0]
-    else:
-        dated = [match for match in queries if match.group(2).endswith(f"-{report_date}")]
-        if not dated:
-            return body
-        if len(dated) != 1:
-            raise ValueError("current arXiv report has ambiguous generated Dataview identity")
-        match = dated[0]
     repaired_block = (
         block[:match.start()]
-        + f"{match.group(1)} {expected_tag}"
+        + f"{match.group(1)} {canonical_source}"
         + block[match.end():]
     )
     return body[:block_match.start()] + repaired_block + body[block_match.end():]
+
+
+def _repair_current_journal_tags(content: str) -> str:
+    frontmatter_end = content.find("\n---", 4) if content.startswith("---\n") else -1
+    if frontmatter_end < 0:
+        return content
+    frontmatter_end += 4
+    frontmatter = content[:frontmatter_end]
+    body = content[frontmatter_end:]
+    values = {}
+    for field in ("papertrack_journal", "papertrack_volume", "papertrack_issue"):
+        match = re.search(
+            rf'^\s*{field}:[ \t]*["\']?([^\n"\']+)["\']?[ \t]*$',
+            frontmatter,
+            re.MULTILINE,
+        )
+        if match is None:
+            return content
+        values[field] = match.group(1).strip()
+    tag = journal_report_tag(
+        values["papertrack_journal"],
+        values["papertrack_volume"],
+        values["papertrack_issue"],
+    )
+    frontmatter = _repair_generated_tag_list(
+        frontmatter,
+        {tag},
+        tag,
+        identity_suffix=f"v{values['papertrack_volume']}-i{values['papertrack_issue']}",
+    )
+    body = _repair_generated_dataview_query(body, {f"#{tag}"}, f"#{tag}")
+    return frontmatter + body
 
 
 def _journal_metadata(content: str, path: Path, data_dir: str) -> dict[str, str]:
