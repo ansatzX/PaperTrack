@@ -190,6 +190,9 @@ def migrate_report_file(path: str, data_dir: str = "") -> MigrationResult:
                 from_format=current_format,
                 to_format=current_format,
                 status="repaired",
+                allow_preexisting_quality_failure=has_journal_quality_failure(
+                    old_content
+                ),
             )
         return MigrationResult(
             path=path,
@@ -281,6 +284,14 @@ def report_format(content: str) -> str:
 
 
 def validate_report_content(content: str, source: str = "") -> bool:
+    if not _validate_report_structure(content, source):
+        return False
+    if source == "journal":
+        return not has_journal_quality_failure(content)
+    return True
+
+
+def _validate_report_structure(content: str, source: str = "") -> bool:
     if "## collected" not in content or "## not collected" not in content:
         return False
     if "```dataview" not in content:
@@ -290,7 +301,6 @@ def validate_report_content(content: str, source: str = "") -> bool:
         return (
             fmt == CURRENT_JOURNAL_FORMAT
             and bool(re.search(r"^###\s*10\.\S+", content, re.MULTILINE))
-            and not has_journal_quality_failure(content)
             and _generated_tag_layout_is_valid(content, source)
         )
     if source == "arxiv":
@@ -694,13 +704,23 @@ def _write_migrated_content(
     from_format: str,
     to_format: str,
     status: str,
+    allow_preexisting_quality_failure: bool = False,
 ) -> MigrationResult:
     backup_path = _backup_path(report_path)
     shutil.copy2(report_path, backup_path)
     try:
         report_path.write_text(new_content, encoding="utf-8")
         written = report_path.read_text(encoding="utf-8")
-        if not validate_report_content(written, source=source):
+        valid = validate_report_content(written, source=source)
+        if (
+            not valid
+            and allow_preexisting_quality_failure
+            and source == "journal"
+            and has_journal_quality_failure(old_content)
+            and _validate_report_structure(written, source=source)
+        ):
+            valid = True
+        if not valid:
             raise ValueError("migrated report failed format validation")
     except Exception as exc:
         report_path.write_text(old_content, encoding="utf-8")

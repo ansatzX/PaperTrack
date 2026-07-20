@@ -474,6 +474,47 @@ WHERE completed
     assert not report_file.with_suffix(".md.bak").exists()
 
 
+def test_current_journal_tag_repair_preserves_known_quality_failure(tmp_path):
+    report_file = tmp_path / "aps" / "prl" / "127" / "27.md"
+    report_file.parent.mkdir(parents=True)
+    original = """---
+papertrack_format: journal-v2
+papertrack_source: journal
+papertrack_provider: aps
+papertrack_journal: prl
+papertrack_volume: "127"
+papertrack_issue: "27"
+tags:
+  - #prl-v127-i27
+---
+
+```dataview
+TASK
+from #prl-v127-i27
+WHERE completed
+```
+
+## collected
+
+## not collected
+
+### 10.1103/physrevlett.127.270401
+
+- [ ] [10.1103/physrevlett.127.270401](https://doi.org/10.1103/physrevlett.127.270401)
+
+Title:  Raw <mml:math></mml:math> title
+"""
+    report_file.write_text(original, encoding="utf-8")
+
+    result = migrate_report_file(str(report_file), data_dir=str(tmp_path))
+
+    repaired = report_file.read_text(encoding="utf-8")
+    assert result.status == "repaired"
+    assert repaired == original.replace("  - #prl-v127-i27", "  - prl-v127-i27")
+    assert has_journal_quality_failure(repaired) is True
+    assert not report_file.with_suffix(".md.bak").exists()
+
+
 def test_current_arxiv_migration_fails_closed_on_ambiguous_generated_tags(tmp_path):
     report_file = tmp_path / "arxiv" / "cs.AI" / "2026" / "07" / "07.md"
     report_file.parent.mkdir(parents=True)
