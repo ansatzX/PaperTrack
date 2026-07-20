@@ -13,7 +13,7 @@ papertrack_journal: jcp
 papertrack_volume: "164"
 papertrack_issue: "16"
 tags:
-  - #jcp-v164-i16
+  - jcp-v164-i16
 ---
 
 # Journal of Chemical Physics Vol. 164, Iss. 16 - 2026

@@ -509,6 +509,119 @@ WHERE completed
     assert not report_file.with_suffix(".md.bak").exists()
 
 
+def test_validation_rejects_hash_prefixed_generated_yaml_tag():
+    content = """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+papertrack_category: cs.AI
+papertrack_date: "2026-07-07"
+tags:
+  - #cs.AI-2026-07-07
+---
+
+```dataview
+TASK
+from #cs-ai-2026-07-07
+WHERE completed
+```
+
+## collected
+
+## not collected
+
+### arXiv:2607.00001
+"""
+
+    assert validate_report_content(content, source="arxiv") is False
+
+
+def test_validation_rejects_dotted_generated_arxiv_dataview_source():
+    content = """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+papertrack_category: cs.AI
+papertrack_date: "2026-07-07"
+tags:
+  - cs-ai-2026-07-07
+---
+
+```dataview
+TASK
+from #cs.AI-2026-07-07
+WHERE completed
+```
+
+## collected
+
+## not collected
+
+### arXiv:2607.00001
+"""
+
+    assert validate_report_content(content, source="arxiv") is False
+
+
+def test_validation_accepts_canonical_tag_with_unrelated_user_sources():
+    content = """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+papertrack_category: cs.AI
+papertrack_date: "2026-07-07"
+tags:
+  - personal
+  - cs-ai-2026-07-07
+---
+
+```dataview
+LIST
+from #personal
+```
+
+```dataview
+TASK
+from #personal
+from #cs-ai-2026-07-07
+WHERE completed
+```
+
+## collected
+
+## not collected
+
+### arXiv:2607.00001
+"""
+
+    assert validate_report_content(content, source="arxiv") is True
+
+
+def test_validation_rejects_hash_prefixed_generated_journal_yaml_tag():
+    content = """---
+papertrack_format: journal-v2
+papertrack_source: journal
+papertrack_provider: aip
+papertrack_journal: jcp
+papertrack_volume: "164"
+papertrack_issue: "16"
+tags:
+  - #jcp-v164-i16
+---
+
+```dataview
+TASK
+from #jcp-v164-i16
+WHERE completed
+```
+
+## collected
+
+## not collected
+
+### 10.1063/example
+"""
+
+    assert validate_report_content(content, source="journal") is False
+
+
 def test_current_arxiv_migration_leaves_canonical_identity_unchanged(tmp_path):
     report_file = tmp_path / "arxiv" / "chem-ph" / "2025" / "03" / "01.md"
     report_file.parent.mkdir(parents=True)

@@ -291,10 +291,73 @@ def validate_report_content(content: str, source: str = "") -> bool:
             fmt == CURRENT_JOURNAL_FORMAT
             and bool(re.search(r"^###\s*10\.\S+", content, re.MULTILINE))
             and not has_journal_quality_failure(content)
+            and _generated_tag_layout_is_valid(content, source)
         )
     if source == "arxiv":
-        return fmt == CURRENT_ARXIV_FORMAT and bool(re.search(r"^###\s*arXiv:\S+", content, re.MULTILINE))
+        return (
+            fmt == CURRENT_ARXIV_FORMAT
+            and bool(re.search(r"^###\s*arXiv:\S+", content, re.MULTILINE))
+            and _generated_tag_layout_is_valid(content, source)
+        )
     return fmt in {CURRENT_ARXIV_FORMAT, CURRENT_JOURNAL_FORMAT} and "### " in content
+
+
+def _generated_tag_layout_is_valid(content: str, source: str) -> bool:
+    frontmatter_end = content.find("\n---", 4) if content.startswith("---\n") else -1
+    if frontmatter_end < 0:
+        return True
+    frontmatter_end += 4
+    frontmatter = content[:frontmatter_end]
+    body = content[frontmatter_end:]
+
+    if source == "arxiv":
+        category = _frontmatter_value(frontmatter, "papertrack_category")
+        report_date = _frontmatter_value(frontmatter, "papertrack_date")
+        if not category or not report_date:
+            return True
+        expected_tag = arxiv_report_tag(category, report_date)
+        candidate_sources = {f"#{category}-{report_date}", f"#{expected_tag}"}
+    elif source == "journal":
+        journal_slug = _frontmatter_value(frontmatter, "papertrack_journal")
+        volume = _frontmatter_value(frontmatter, "papertrack_volume")
+        issue = _frontmatter_value(frontmatter, "papertrack_issue")
+        if not journal_slug or not volume or not issue:
+            return True
+        expected_tag = journal_report_tag(journal_slug, volume, issue)
+        candidate_sources = {f"#{expected_tag}"}
+    else:
+        return True
+
+    yaml_matches = re.findall(
+        rf"^  -[ \t]+{re.escape(expected_tag)}[ \t]*$",
+        frontmatter,
+        re.MULTILINE,
+    )
+    if len(yaml_matches) != 1:
+        return False
+
+    generated_sources = []
+    for block_match in re.finditer(r"```dataview\n.*?\n```", body, re.DOTALL):
+        block = block_match.group(0)
+        if not re.search(r"^TASK(?:[ \t]+FROM\b|[ \t]*$)", block, re.MULTILINE):
+            continue
+        for match in re.finditer(
+            r"^(?:from|FROM|TASK FROM)[ \t]+(#\S+)[ \t]*$",
+            block,
+            re.MULTILINE,
+        ):
+            if match.group(1) in candidate_sources:
+                generated_sources.append(match.group(1))
+    return not generated_sources or generated_sources == [f"#{expected_tag}"]
+
+
+def _frontmatter_value(frontmatter: str, field: str) -> str:
+    match = re.search(
+        rf'^\s*{re.escape(field)}:[ \t]*["\']?([^\n"\']+)["\']?[ \t]*$',
+        frontmatter,
+        re.MULTILINE,
+    )
+    return match.group(1).strip() if match else ""
 
 
 def has_journal_quality_failure(content: str) -> bool:
