@@ -91,4 +91,3 @@ After migration, verify:
 - paper heading IDs and checkbox states are unchanged;
 - no backup or temporary files remain after successful migration;
 - the complete test suite passes.
-

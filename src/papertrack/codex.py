@@ -1,8 +1,9 @@
 import logging
 import os
+import re
 from copy import deepcopy
 
-from .report_tags import arxiv_report_tag
+from .report_tags import arxiv_report_tag, journal_report_tag
 
 try:
     import tomllib
@@ -130,6 +131,7 @@ def _validate_category_tag_uniqueness(
     owners: dict[str, str] = {}
     for category in categories:
         normalized = arxiv_report_tag(category, "2000-01-01")
+        _validate_generated_tag(normalized, f"arXiv category {category!r}")
         previous = owners.get(normalized)
         if previous is not None:
             raise ValueError(
@@ -137,6 +139,11 @@ def _validate_category_tag_uniqueness(
                 f"arXiv categories {previous!r} and {category!r}"
             )
         owners[normalized] = category
+
+
+def _validate_generated_tag(tag: str, owner: str) -> None:
+    if not re.fullmatch(r"[a-z0-9_/-]+", tag):
+        raise ValueError(f"invalid generated report tag for {owner}: {tag!r}")
 
 
 # Categories are lazily loaded so that importing papertrack.codex (e.g. for
@@ -205,7 +212,25 @@ def get_journals() -> dict[str, dict[str, str]]:
     global _journals
     if _journals is None:
         _journals = _load_toml_journals()
+        _validate_journal_tag_uniqueness(_journals)
     return _journals
+
+
+def _validate_journal_tag_uniqueness(
+    journals: dict[str, dict[str, str]],
+) -> None:
+    owners: dict[str, str] = {}
+    for name, config in journals.items():
+        slug = config.get("slug", name)
+        normalized = journal_report_tag(slug, "1", "1")
+        _validate_generated_tag(normalized, f"journal {name!r}")
+        previous = owners.get(normalized)
+        if previous is not None:
+            raise ValueError(
+                "generated report tag collision between "
+                f"journals {previous!r} and {name!r}"
+            )
+        owners[normalized] = name
 
 
 class _JournalProxy:

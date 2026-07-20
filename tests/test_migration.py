@@ -119,7 +119,7 @@ def test_legacy_journal_migration_preserves_user_frontmatter(tmp_path):
     report_file.parent.mkdir(parents=True)
     original = _legacy_journal_report().replace(
         "tags:\n  - #jcp-v164-i16",
-        "tags:\n  - personal\n  - #jcp-v164-i16\naliases:\n  - weekly reading\nrating: 5",
+        "tags:\n  - personal\n  - #jcp-v164-i16\naliases:\n  - weekly reading\nrating: 5\npapertrack_user_note: keep me",
     )
     report_file.write_text(original, encoding="utf-8")
 
@@ -130,6 +130,7 @@ def test_legacy_journal_migration_preserves_user_frontmatter(tmp_path):
     assert "tags:\n  - personal\n  - jcp-v164-i16" in migrated
     assert "aliases:\n  - weekly reading" in migrated
     assert "rating: 5" in migrated
+    assert "papertrack_user_note: keep me" in migrated
 
 
 def test_legacy_arxiv_migration_preserves_user_frontmatter(tmp_path):
@@ -169,6 +170,88 @@ WHERE completed
     assert "tags:\n  - personal\n  - cs-ai-2026-07-07" in migrated
     assert "aliases:\n  - ai reading" in migrated
     assert "review_status: queued" in migrated
+
+
+def test_legacy_arxiv_path_identity_cannot_be_overridden_by_personal_tag(tmp_path):
+    report_file = tmp_path / "arxiv" / "cs.AI" / "2026" / "07" / "07.md"
+    report_file.parent.mkdir(parents=True)
+    original = """# 2026-07-07 preprint by arxiv_tools
+
+---
+tags:
+  - #personal-2026-07-07
+  - #cs.AI-2026-07-07
+---
+
+```dataview
+TASK
+from #cs.AI-2026-07-07
+```
+
+## collected
+
+## not collected
+
+### arXiv:2607.00001
+"""
+    report_file.write_text(original, encoding="utf-8")
+
+    result = migrate_report_file(str(report_file), data_dir=str(tmp_path))
+
+    migrated = report_file.read_text(encoding="utf-8")
+    assert result.status == "migrated"
+    assert "papertrack_category: cs.AI" in migrated
+    assert "tags:\n  - #personal-2026-07-07\n  - cs-ai-2026-07-07" in migrated
+
+
+def test_legacy_arxiv_without_stable_path_fails_on_multiple_identity_candidates(
+    tmp_path,
+):
+    report_file = tmp_path / "misc" / "report.md"
+    report_file.parent.mkdir(parents=True)
+    original = """# 2026-07-07 preprint by arxiv_tools
+
+---
+tags:
+  - #personal-2026-07-07
+  - #cs.AI-2026-07-07
+---
+
+```dataview
+TASK
+from #cs.AI-2026-07-07
+```
+
+## collected
+
+## not collected
+
+### arXiv:2607.00001
+"""
+    report_file.write_text(original, encoding="utf-8")
+
+    result = migrate_report_file(str(report_file), data_dir=str(tmp_path))
+
+    assert result.status == "failed"
+    assert "ambiguous" in result.message
+    assert report_file.read_text(encoding="utf-8") == original
+
+
+def test_legacy_journal_path_identity_cannot_be_overridden_by_personal_tag(tmp_path):
+    report_file = tmp_path / "aip" / "jcp" / "164" / "16.md"
+    report_file.parent.mkdir(parents=True)
+    original = _legacy_journal_report().replace(
+        "tags:\n  - #jcp-v164-i16",
+        "tags:\n  - #personal-v164-i16\n  - #jcp-v164-i16",
+    )
+    report_file.write_text(original, encoding="utf-8")
+
+    result = migrate_report_file(str(report_file), data_dir=str(tmp_path))
+
+    migrated = report_file.read_text(encoding="utf-8")
+    assert result.status == "migrated"
+    assert "papertrack_journal: jcp" in migrated
+    assert "tags:\n  - #personal-v164-i16\n  - jcp-v164-i16" in migrated
 
 
 def test_migration_validation_failure_restores_backup(tmp_path, monkeypatch):
@@ -844,6 +927,62 @@ TASK
 """
 
     assert validate_report_content(content, source="arxiv") is False
+
+
+def test_validation_rejects_mixed_inline_and_block_tags_properties():
+    content = """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+papertrack_category: cs.AI
+papertrack_date: "2026-07-07"
+tags: [personal]
+tags:
+  - cs-ai-2026-07-07
+---
+
+```dataview
+TASK
+```
+
+## collected
+
+## not collected
+
+### arXiv:2607.00001
+"""
+
+    assert validate_report_content(content, source="arxiv") is False
+
+
+def test_legacy_migration_fails_closed_on_inline_tags_property(tmp_path):
+    report_file = tmp_path / "arxiv" / "cs.AI" / "2026" / "07" / "07.md"
+    report_file.parent.mkdir(parents=True)
+    original = """# 2026-07-07 preprint by arxiv_tools
+
+---
+tags: [personal]
+aliases:
+  - ai reading
+---
+
+```dataview
+TASK
+from #cs.AI-2026-07-07
+```
+
+## collected
+
+## not collected
+
+### arXiv:2607.00001
+"""
+    report_file.write_text(original, encoding="utf-8")
+
+    result = migrate_report_file(str(report_file), data_dir=str(tmp_path))
+
+    assert result.status == "failed"
+    assert "tags" in result.message
+    assert report_file.read_text(encoding="utf-8") == original
 
 
 def test_current_report_with_missing_identity_is_failed_not_current(tmp_path):

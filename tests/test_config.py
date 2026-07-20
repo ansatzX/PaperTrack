@@ -72,6 +72,30 @@ def test_category_config_rejects_colliding_generated_tag_names(monkeypatch):
         codex.build_query_args()
 
 
+def test_journal_config_rejects_colliding_generated_tag_slugs(monkeypatch):
+    monkeypatch.setattr(
+        codex,
+        "_load_toml_journals",
+        lambda: {"first": {"slug": "JCP"}, "second": {"slug": "jcp"}},
+    )
+    monkeypatch.setattr(codex, "_journals", None)
+
+    with pytest.raises(ValueError, match="generated report tag collision"):
+        codex.get_journals()
+
+
+def test_journal_config_rejects_invalid_generated_tag_slug(monkeypatch):
+    monkeypatch.setattr(
+        codex,
+        "_load_toml_journals",
+        lambda: {"bad": {"slug": "journal name"}},
+    )
+    monkeypatch.setattr(codex, "_journals", None)
+
+    with pytest.raises(ValueError, match="invalid generated report tag"):
+        codex.get_journals()
+
+
 def test_ledger_category_maps_to_official_arxiv_subject():
     assert official_arxiv_category("chem-ph") == "physics.chem-ph"
     assert official_arxiv_category("cs.AI") == "cs.AI"

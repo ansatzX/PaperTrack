@@ -595,13 +595,15 @@ def _repair_generated_tag_list(
 def _frontmatter_list_property_span(frontmatter: str, field: str) -> tuple[int, int]:
     matches = list(
         re.finditer(
-            rf"^{re.escape(field)}:[ \t]*$",
+            rf"^{re.escape(field)}:[^\n]*$",
             frontmatter,
             re.MULTILINE,
         )
     )
     if len(matches) != 1:
         raise ValueError(f"current report must contain exactly one {field} list")
+    if matches[0].group(0).strip() != f"{field}:":
+        raise ValueError(f"current report {field} must use block-list syntax")
     start = matches[0].end()
     end_match = re.search(
         r"^(?:[A-Za-z_][A-Za-z0-9_-]*:|---[ \t]*$)",
@@ -677,17 +679,32 @@ def _repair_current_journal_tags(content: str) -> str:
 
 
 def _journal_metadata(content: str, path: Path, data_dir: str) -> dict[str, str]:
-    tag_match = re.search(r"#(.+)-v([^-\s]+)-i([^-\s]+)", content)
     title_match = re.search(
         r"^#\s*(.*?)\s+Vol\.\s*([^,]+),\s*Iss\.\s*([^\s]+)\s*(?:\u2014|-)\s*(.*)$",
         content,
         re.MULTILINE,
     )
     provider, slug, volume, issue = _path_metadata(path, data_dir)
-    if tag_match:
-        slug = tag_match.group(1)
-        volume = tag_match.group(2)
-        issue = tag_match.group(3)
+    if not (provider and slug and volume and issue):
+        candidates = set()
+        for source in _legacy_generated_identity_sources(content):
+            match = re.fullmatch(r"#(.+)-v([^-\s]+)-i([^-\s]+)", source)
+            if match:
+                candidates.add(match.groups())
+        if title_match:
+            title_identity = (
+                title_match.group(2).strip(),
+                title_match.group(3).strip(),
+            )
+            candidates = {
+                candidate
+                for candidate in candidates
+                if candidate[1:] == title_identity
+            }
+        if len(candidates) > 1:
+            raise ValueError("legacy journal report has ambiguous generated identity")
+        if len(candidates) == 1:
+            slug, volume, issue = next(iter(candidates))
     if title_match:
         volume = volume or title_match.group(2).strip()
         issue = issue or title_match.group(3).strip()
@@ -700,19 +717,30 @@ def _journal_metadata(content: str, path: Path, data_dir: str) -> dict[str, str]
 
 
 def _arxiv_metadata(content: str, path: Path, data_dir: str) -> dict[str, str]:
-    tag_match = re.search(r"#(.+)-(\d{4}-\d{2}-\d{2})", content)
-    title_match = re.search(r"^#\s*(\d{4}-\d{2}-\d{2})\b", content, re.MULTILINE)
-    category = ""
-    report_date = ""
-    if tag_match:
-        category = tag_match.group(1)
-        report_date = tag_match.group(2)
-    if title_match:
-        report_date = report_date or title_match.group(1)
     parts = _relative_parts(path, data_dir)
     if len(parts) >= 5 and parts[0] == "arxiv":
-        category = category or parts[1]
-        report_date = report_date or f"{parts[2]}-{parts[3]}-{path.stem}"
+        return {
+            "category": parts[1],
+            "date": f"{parts[2]}-{parts[3]}-{path.stem}",
+        }
+
+    title_match = re.search(r"^#\s*(\d{4}-\d{2}-\d{2})\b", content, re.MULTILINE)
+    candidates = set()
+    for source in _legacy_generated_identity_sources(content):
+        match = re.fullmatch(r"#(.+)-(\d{4}-\d{2}-\d{2})", source)
+        if match:
+            candidates.add(match.groups())
+    if title_match:
+        candidates = {
+            candidate for candidate in candidates if candidate[1] == title_match.group(1)
+        }
+    if len(candidates) > 1:
+        raise ValueError("legacy arXiv report has ambiguous generated identity")
+    if len(candidates) == 1:
+        category, report_date = next(iter(candidates))
+    else:
+        category = ""
+        report_date = title_match.group(1) if title_match else ""
     return {
         "category": category or "unknown",
         "date": report_date or "unknown",
@@ -721,9 +749,47 @@ def _arxiv_metadata(content: str, path: Path, data_dir: str) -> dict[str, str]:
 
 def _path_metadata(path: Path, data_dir: str) -> tuple[str, str, str, str]:
     parts = _relative_parts(path, data_dir)
-    if len(parts) >= 4:
-        return parts[-4], parts[-3], parts[-2], path.stem
+    if len(parts) == 4:
+        return parts[0], parts[1], parts[2], path.stem
     return "", "", "", ""
+
+
+def _legacy_generated_identity_sources(content: str) -> set[str]:
+    sources: set[str] = set()
+    frontmatter = _legacy_frontmatter_content(content)
+    tag_headers = list(re.finditer(r"^tags:[^\n]*$", frontmatter, re.MULTILINE))
+    if len(tag_headers) > 1:
+        raise ValueError("legacy report has ambiguous tags properties")
+    if tag_headers:
+        header = tag_headers[0]
+        if header.group(0).strip() != "tags:":
+            raise ValueError("legacy report tags must use block-list syntax")
+        block_start = header.end()
+        end_match = re.search(
+            r"^[A-Za-z_][A-Za-z0-9_-]*:",
+            frontmatter[block_start:],
+            re.MULTILINE,
+        )
+        block_end = block_start + end_match.start() if end_match else len(frontmatter)
+        for match in re.finditer(
+            r"^  -[ \t]+(#\S+)[ \t]*$",
+            frontmatter[block_start:block_end],
+            re.MULTILINE,
+        ):
+            sources.add(match.group(1))
+
+    body = _remove_legacy_frontmatter(content)
+    for block_match in re.finditer(r"```dataview\n.*?\n```", body, re.DOTALL):
+        block = block_match.group(0)
+        if not re.search(r"^TASK(?:[ \t]+FROM\b|[ \t]*$)", block, re.MULTILINE):
+            continue
+        for match in re.finditer(
+            r"^(?:from|FROM|TASK FROM)[ \t]+(#\S+)[ \t]*$",
+            block,
+            re.MULTILINE,
+        ):
+            sources.add(match.group(1))
+    return sources
 
 
 def _relative_parts(path: Path, data_dir: str) -> tuple[str, ...]:
@@ -785,11 +851,13 @@ def _merge_legacy_frontmatter(
 ) -> str:
     preserved_tags: list[str] = []
     remaining = legacy_frontmatter
-    tag_headers = list(re.finditer(r"^tags:[ \t]*$", remaining, re.MULTILINE))
+    tag_headers = list(re.finditer(r"^tags:[^\n]*$", remaining, re.MULTILINE))
     if len(tag_headers) > 1:
         raise ValueError("legacy report has ambiguous tags properties")
     if tag_headers:
         header = tag_headers[0]
+        if header.group(0).strip() != "tags:":
+            raise ValueError("legacy report tags must use block-list syntax")
         block_start = header.end()
         end_match = re.search(
             r"^[A-Za-z_][A-Za-z0-9_-]*:",
@@ -809,6 +877,7 @@ def _merge_legacy_frontmatter(
             raise ValueError("legacy report has ambiguous generated tag identity")
         remaining = remaining[:header.start()] + remaining[block_end:]
 
+    generated_keys = {field.split(":", 1)[0] for field in generated_fields}
     preserved_properties = []
     lines = remaining.splitlines()
     index = 0
@@ -825,7 +894,7 @@ def _merge_legacy_frontmatter(
             r"^[A-Za-z_][A-Za-z0-9_-]*:", lines[end]
         ):
             end += 1
-        if not property_match.group(1).startswith("papertrack_"):
+        if property_match.group(1) not in generated_keys:
             preserved_properties.extend(lines[index:end])
         index = end
 
