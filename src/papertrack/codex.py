@@ -2,6 +2,8 @@ import logging
 import os
 from copy import deepcopy
 
+from .report_tags import arxiv_report_tag
+
 try:
     import tomllib
 except ImportError:
@@ -75,6 +77,7 @@ def build_query_args() -> dict[str, dict[str, str]]:
     toml_cats = _load_toml_categories()
     if toml_cats:
         logger.debug("Using TOML categories")
+        _validate_category_tag_uniqueness(toml_cats)
         return toml_cats
 
     logger.debug("Using hardcoded category defaults")
@@ -107,7 +110,7 @@ def build_query_args() -> dict[str, dict[str, str]]:
     cs_lg = deepcopy(cs_ai)
     cs_lg["terms-1-term"] = "cs.LG"
 
-    return {
+    categories = {
         "quant-ph": quant_ph,
         "hep-ex": hep_ex,
         "hep-lat": hep_lat,
@@ -117,6 +120,23 @@ def build_query_args() -> dict[str, dict[str, str]]:
         "cs.AI": cs_ai,
         "cs.LG": cs_lg,
     }
+    _validate_category_tag_uniqueness(categories)
+    return categories
+
+
+def _validate_category_tag_uniqueness(
+    categories: dict[str, dict[str, str]],
+) -> None:
+    owners: dict[str, str] = {}
+    for category in categories:
+        normalized = arxiv_report_tag(category, "2000-01-01")
+        previous = owners.get(normalized)
+        if previous is not None:
+            raise ValueError(
+                "generated report tag collision between "
+                f"arXiv categories {previous!r} and {category!r}"
+            )
+        owners[normalized] = category
 
 
 # Categories are lazily loaded so that importing papertrack.codex (e.g. for

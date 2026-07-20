@@ -2,6 +2,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from papertrack import codex
 from papertrack.codex import get_query_args, official_arxiv_category
 from papertrack.arxiv_index_fetch import _advanced_search_url
@@ -57,6 +59,17 @@ def test_hardcoded_fallback_matches_toml_category_queries(monkeypatch):
     fallback = codex.build_query_args()
 
     assert fallback == configured
+
+
+def test_category_config_rejects_colliding_generated_tag_names(monkeypatch):
+    monkeypatch.setattr(
+        codex,
+        "_load_toml_categories",
+        lambda: {"cs.AI": {}, "cs-ai": {}},
+    )
+
+    with pytest.raises(ValueError, match="generated report tag collision"):
+        codex.build_query_args()
 
 
 def test_ledger_category_maps_to_official_arxiv_subject():

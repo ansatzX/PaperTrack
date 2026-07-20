@@ -14,6 +14,9 @@ from .report_tags import arxiv_report_tag, journal_report_tag
 
 CURRENT_ARXIV_FORMAT = "arxiv-v2"
 CURRENT_JOURNAL_FORMAT = "journal-v2"
+_GENERATED_TOC_IMAGE_PATTERN = (
+    r"(?m)^[ \t]*!\[\|700\|700x24\]\([^\n]*\)[ \t]*$"
+)
 
 
 @dataclass
@@ -60,7 +63,12 @@ def write_report_file(path: str, content: str, source: str) -> None:
     if not validate_report_content(content, source=source):
         raise ValueError(f"generated {source} report failed format validation")
 
-    report_path = Path(path)
+    _atomic_write_report(Path(path), content)
+
+
+def _atomic_write_report(report_path: Path, content: str) -> None:
+    """Durably replace one report while retaining a rollback copy."""
+
     report_path.parent.mkdir(parents=True, exist_ok=True)
     backup_path = _backup_path(report_path)
     had_existing = report_path.exists()
@@ -160,6 +168,8 @@ def migrate_report_file(path: str, data_dir: str = "") -> MigrationResult:
                 to_format=current_format,
                 status="repaired",
             )
+        if not _validate_report_structure(old_content, source="arxiv"):
+            return _failed_current_validation(report_path, "arxiv", current_format)
         return MigrationResult(
             path=path,
             status="current",
@@ -194,6 +204,8 @@ def migrate_report_file(path: str, data_dir: str = "") -> MigrationResult:
                     old_content
                 ),
             )
+        if not _validate_report_structure(old_content, source="journal"):
+            return _failed_current_validation(report_path, source, current_format)
         return MigrationResult(
             path=path,
             status="current",
@@ -212,12 +224,21 @@ def migrate_report_file(path: str, data_dir: str = "") -> MigrationResult:
             message="missing generated report skeleton",
         )
 
-    if source == "journal":
-        new_content = _migrate_journal_legacy(old_content, report_path, data_dir)
-        to_format = CURRENT_JOURNAL_FORMAT
-    else:
-        new_content = _migrate_arxiv_legacy(old_content, report_path, data_dir)
-        to_format = CURRENT_ARXIV_FORMAT
+    try:
+        if source == "journal":
+            new_content = _migrate_journal_legacy(old_content, report_path, data_dir)
+            to_format = CURRENT_JOURNAL_FORMAT
+        else:
+            new_content = _migrate_arxiv_legacy(old_content, report_path, data_dir)
+            to_format = CURRENT_ARXIV_FORMAT
+    except ValueError as exc:
+        return MigrationResult(
+            path=path,
+            status="failed",
+            source=source,
+            from_format="legacy",
+            message=str(exc),
+        )
 
     return _write_migrated_content(
         report_path=report_path,
@@ -315,32 +336,42 @@ def _validate_report_structure(content: str, source: str = "") -> bool:
 def _generated_tag_layout_is_valid(content: str, source: str) -> bool:
     frontmatter_end = content.find("\n---", 4) if content.startswith("---\n") else -1
     if frontmatter_end < 0:
-        return True
+        return False
     frontmatter_end += 4
     frontmatter = content[:frontmatter_end]
     body = content[frontmatter_end:]
 
     if source == "arxiv":
-        category = _frontmatter_value(frontmatter, "papertrack_category")
-        report_date = _frontmatter_value(frontmatter, "papertrack_date")
-        if not category or not report_date:
-            return True
+        categories = _frontmatter_values(frontmatter, "papertrack_category")
+        report_dates = _frontmatter_values(frontmatter, "papertrack_date")
+        if len(categories) != 1 or len(report_dates) != 1:
+            return False
+        category = categories[0]
+        report_date = report_dates[0]
         expected_tag = arxiv_report_tag(category, report_date)
         candidate_sources = {f"#{category}-{report_date}", f"#{expected_tag}"}
     elif source == "journal":
-        journal_slug = _frontmatter_value(frontmatter, "papertrack_journal")
-        volume = _frontmatter_value(frontmatter, "papertrack_volume")
-        issue = _frontmatter_value(frontmatter, "papertrack_issue")
-        if not journal_slug or not volume or not issue:
-            return True
+        journal_slugs = _frontmatter_values(frontmatter, "papertrack_journal")
+        volumes = _frontmatter_values(frontmatter, "papertrack_volume")
+        issues = _frontmatter_values(frontmatter, "papertrack_issue")
+        if len(journal_slugs) != 1 or len(volumes) != 1 or len(issues) != 1:
+            return False
+        journal_slug = journal_slugs[0]
+        volume = volumes[0]
+        issue = issues[0]
         expected_tag = journal_report_tag(journal_slug, volume, issue)
         candidate_sources = {f"#{expected_tag}"}
     else:
         return True
 
+    try:
+        tag_start, tag_end = _frontmatter_list_property_span(frontmatter, "tags")
+    except ValueError:
+        return False
+    tag_block = frontmatter[tag_start:tag_end]
     yaml_matches = re.findall(
         rf"^  -[ \t]+{re.escape(expected_tag)}[ \t]*$",
-        frontmatter,
+        tag_block,
         re.MULTILINE,
     )
     if len(yaml_matches) != 1:
@@ -362,12 +393,32 @@ def _generated_tag_layout_is_valid(content: str, source: str) -> bool:
 
 
 def _frontmatter_value(frontmatter: str, field: str) -> str:
-    match = re.search(
-        rf'^\s*{re.escape(field)}:[ \t]*["\']?([^\n"\']+)["\']?[ \t]*$',
+    values = _frontmatter_values(frontmatter, field)
+    return values[0] if values else ""
+
+
+def _frontmatter_values(frontmatter: str, field: str) -> list[str]:
+    matches = re.finditer(
+        rf'^{re.escape(field)}:[ \t]*["\']?([^\n"\']+)["\']?[ \t]*$',
         frontmatter,
         re.MULTILINE,
     )
-    return match.group(1).strip() if match else ""
+    return [match.group(1).strip() for match in matches]
+
+
+def _failed_current_validation(
+    report_path: Path,
+    source: str,
+    current_format: str,
+) -> MigrationResult:
+    return MigrationResult(
+        path=str(report_path),
+        status="failed",
+        source=source,
+        from_format=current_format,
+        to_format=current_format,
+        message="current report failed format validation",
+    )
 
 
 def has_journal_quality_failure(content: str) -> bool:
@@ -400,6 +451,7 @@ def validate_report_file(path: str, source: str = "") -> bool:
 
 def _migrate_journal_legacy(content: str, path: Path, data_dir: str) -> str:
     metadata = _journal_metadata(content, path, data_dir)
+    legacy_frontmatter = _legacy_frontmatter_content(content)
     body = _remove_legacy_frontmatter(content)
     body = _remove_markdown_images(body)
     tag = journal_report_tag(
@@ -408,24 +460,26 @@ def _migrate_journal_legacy(content: str, path: Path, data_dir: str) -> str:
         metadata["issue"],
     )
     body = _repair_generated_dataview_query(body, {f"#{tag}"}, f"#{tag}")
-    frontmatter = [
-        "---",
+    generated_fields = [
         f"papertrack_format: {CURRENT_JOURNAL_FORMAT}",
         "papertrack_source: journal",
         f"papertrack_provider: {metadata['provider']}",
         f"papertrack_journal: {metadata['journal_slug']}",
         f"papertrack_volume: \"{metadata['volume']}\"",
         f"papertrack_issue: \"{metadata['issue']}\"",
-        "tags:",
-        f"  - {tag}",
-        "---",
-        "",
     ]
-    return "\n".join(frontmatter) + body.lstrip()
+    frontmatter = _merge_legacy_frontmatter(
+        legacy_frontmatter,
+        generated_fields,
+        {tag},
+        tag,
+    )
+    return frontmatter + body.lstrip()
 
 
 def _migrate_arxiv_legacy(content: str, path: Path, data_dir: str) -> str:
     metadata = _arxiv_metadata(content, path, data_dir)
+    legacy_frontmatter = _legacy_frontmatter_content(content)
     body = _remove_legacy_frontmatter(content)
     tag = arxiv_report_tag(metadata["category"], metadata["date"])
     legacy_source = f"#{metadata['category']}-{metadata['date']}"
@@ -434,18 +488,19 @@ def _migrate_arxiv_legacy(content: str, path: Path, data_dir: str) -> str:
         {legacy_source, f"#{tag}"},
         f"#{tag}",
     )
-    frontmatter = [
-        "---",
+    generated_fields = [
         f"papertrack_format: {CURRENT_ARXIV_FORMAT}",
         "papertrack_source: arxiv",
         f"papertrack_category: {metadata['category']}",
         f"papertrack_date: \"{metadata['date']}\"",
-        "tags:",
-        f"  - {tag}",
-        "---",
-        "",
     ]
-    return "\n".join(frontmatter) + body.lstrip()
+    frontmatter = _merge_legacy_frontmatter(
+        legacy_frontmatter,
+        generated_fields,
+        {metadata["category"] + "-" + metadata["date"], tag},
+        tag,
+    )
+    return frontmatter + body.lstrip()
 
 
 def _repair_current_arxiv_identity(content: str, path: Path, data_dir: str) -> str:
@@ -502,7 +557,6 @@ def _repair_current_arxiv_identity(content: str, path: Path, data_dir: str) -> s
         frontmatter,
         candidate_tags,
         canonical_tag,
-        identity_suffix=report_date,
     )
     body = _repair_generated_dataview_query(
         body,
@@ -516,29 +570,46 @@ def _repair_generated_tag_list(
     frontmatter: str,
     candidate_tags: set[str],
     canonical_tag: str,
-    identity_suffix: str = "",
 ) -> str:
+    block_start, block_end = _frontmatter_list_property_span(frontmatter, "tags")
+    block = frontmatter[block_start:block_end]
     matches = []
-    for match in re.finditer(r"^  -[ \t]+(#?\S+)[ \t]*$", frontmatter, re.MULTILINE):
+    for match in re.finditer(r"^  -[ \t]+(#?\S+)[ \t]*$", block, re.MULTILINE):
         value = match.group(1).removeprefix("#")
         if value in candidate_tags:
             matches.append(match)
-    if not matches and identity_suffix:
-        matches = [
-            match
-            for match in re.finditer(
-                r"^  -[ \t]+(#?\S+)[ \t]*$",
-                frontmatter,
-                re.MULTILINE,
-            )
-            if match.group(1).removeprefix("#").endswith(f"-{identity_suffix}")
-        ]
     if not matches:
-        return frontmatter
+        raise ValueError("current report is missing a recognized generated tag identity")
     if len(matches) != 1:
         raise ValueError("current report has ambiguous generated tag identity")
     match = matches[0]
-    return frontmatter[:match.start()] + f"  - {canonical_tag}" + frontmatter[match.end():]
+    absolute_start = block_start + match.start()
+    absolute_end = block_start + match.end()
+    return (
+        frontmatter[:absolute_start]
+        + f"  - {canonical_tag}"
+        + frontmatter[absolute_end:]
+    )
+
+
+def _frontmatter_list_property_span(frontmatter: str, field: str) -> tuple[int, int]:
+    matches = list(
+        re.finditer(
+            rf"^{re.escape(field)}:[ \t]*$",
+            frontmatter,
+            re.MULTILINE,
+        )
+    )
+    if len(matches) != 1:
+        raise ValueError(f"current report must contain exactly one {field} list")
+    start = matches[0].end()
+    end_match = re.search(
+        r"^(?:[A-Za-z_][A-Za-z0-9_-]*:|---[ \t]*$)",
+        frontmatter[start:],
+        re.MULTILINE,
+    )
+    end = start + end_match.start() if end_match else len(frontmatter)
+    return start, end
 
 
 def _repair_generated_dataview_query(
@@ -600,7 +671,6 @@ def _repair_current_journal_tags(content: str) -> str:
         frontmatter,
         {tag},
         tag,
-        identity_suffix=f"v{values['papertrack_volume']}-i{values['papertrack_issue']}",
     )
     body = _repair_generated_dataview_query(body, {f"#{tag}"}, f"#{tag}")
     return frontmatter + body
@@ -688,12 +758,91 @@ def _remove_legacy_frontmatter(content: str) -> str:
     return "\n".join(new_lines).rstrip() + "\n"
 
 
+def _legacy_frontmatter_content(content: str) -> str:
+    lines = content.splitlines()
+    if not lines:
+        return ""
+    idx = 0
+    if lines[0].startswith("# "):
+        idx = 1
+        while idx < len(lines) and not lines[idx].strip():
+            idx += 1
+    if idx >= len(lines) or lines[idx].strip() != "---":
+        return ""
+    end = idx + 1
+    while end < len(lines) and lines[end].strip() != "---":
+        end += 1
+    if end >= len(lines):
+        return ""
+    return "\n".join(lines[idx + 1:end])
+
+
+def _merge_legacy_frontmatter(
+    legacy_frontmatter: str,
+    generated_fields: list[str],
+    candidate_tags: set[str],
+    canonical_tag: str,
+) -> str:
+    preserved_tags: list[str] = []
+    remaining = legacy_frontmatter
+    tag_headers = list(re.finditer(r"^tags:[ \t]*$", remaining, re.MULTILINE))
+    if len(tag_headers) > 1:
+        raise ValueError("legacy report has ambiguous tags properties")
+    if tag_headers:
+        header = tag_headers[0]
+        block_start = header.end()
+        end_match = re.search(
+            r"^[A-Za-z_][A-Za-z0-9_-]*:",
+            remaining[block_start:],
+            re.MULTILINE,
+        )
+        block_end = block_start + end_match.start() if end_match else len(remaining)
+        generated_count = 0
+        for line in remaining[block_start:block_end].splitlines():
+            item = re.match(r"^  -[ \t]+(#?\S+)[ \t]*$", line)
+            if item and item.group(1).removeprefix("#") in candidate_tags:
+                generated_count += 1
+                continue
+            if line.strip():
+                preserved_tags.append(line)
+        if generated_count > 1:
+            raise ValueError("legacy report has ambiguous generated tag identity")
+        remaining = remaining[:header.start()] + remaining[block_end:]
+
+    preserved_properties = []
+    lines = remaining.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        property_match = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*):", line)
+        if property_match is None:
+            if line.strip():
+                preserved_properties.append(line)
+            index += 1
+            continue
+        end = index + 1
+        while end < len(lines) and not re.match(
+            r"^[A-Za-z_][A-Za-z0-9_-]*:", lines[end]
+        ):
+            end += 1
+        if not property_match.group(1).startswith("papertrack_"):
+            preserved_properties.extend(lines[index:end])
+        index = end
+
+    frontmatter = ["---", *generated_fields, "tags:"]
+    frontmatter.extend(preserved_tags)
+    frontmatter.append(f"  - {canonical_tag}")
+    frontmatter.extend(preserved_properties)
+    frontmatter.extend(["---", ""])
+    return "\n".join(frontmatter)
+
+
 def _has_markdown_images(content: str) -> bool:
-    return bool(re.search(r"(?m)^\s*!\[[^\]\n]*\]\([^\n]*\)\s*$", content))
+    return bool(re.search(_GENERATED_TOC_IMAGE_PATTERN, content))
 
 
 def _remove_markdown_images(content: str) -> str:
-    return re.sub(r"(?m)^\s*!\[[^\]\n]*\]\([^\n]*\)\s*\n?", "", content)
+    return re.sub(_GENERATED_TOC_IMAGE_PATTERN + r"\n?", "", content)
 
 
 def _write_migrated_content(
@@ -706,26 +855,20 @@ def _write_migrated_content(
     status: str,
     allow_preexisting_quality_failure: bool = False,
 ) -> MigrationResult:
-    backup_path = _backup_path(report_path)
-    shutil.copy2(report_path, backup_path)
     try:
-        report_path.write_text(new_content, encoding="utf-8")
-        written = report_path.read_text(encoding="utf-8")
-        valid = validate_report_content(written, source=source)
+        valid = validate_report_content(new_content, source=source)
         if (
             not valid
             and allow_preexisting_quality_failure
             and source == "journal"
             and has_journal_quality_failure(old_content)
-            and _validate_report_structure(written, source=source)
+            and _validate_report_structure(new_content, source=source)
         ):
             valid = True
         if not valid:
             raise ValueError("migrated report failed format validation")
+        _atomic_write_report(report_path, new_content)
     except Exception as exc:
-        report_path.write_text(old_content, encoding="utf-8")
-        if backup_path.exists():
-            backup_path.unlink()
         record_migration_event({
             "path": str(report_path),
             "source": source,
@@ -742,9 +885,6 @@ def _write_migrated_content(
             to_format=to_format,
             message=str(exc),
         )
-
-    if backup_path.exists():
-        backup_path.unlink()
 
     if record_all_attempts():
         record_migration_event({

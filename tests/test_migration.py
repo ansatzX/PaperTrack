@@ -4,6 +4,7 @@ import signal
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -22,6 +23,12 @@ def _current_journal_report(title: str) -> str:
     return f"""---
 papertrack_format: journal-v2
 papertrack_source: journal
+papertrack_provider: aip
+papertrack_journal: jcp
+papertrack_volume: "164"
+papertrack_issue: "16"
+tags:
+  - jcp-v164-i16
 ---
 
 ```dataview
@@ -107,6 +114,63 @@ def test_legacy_journal_migration_removes_toc_image_and_preserves_task(tmp_path)
     assert not report_file.with_suffix(".md.bak").exists()
 
 
+def test_legacy_journal_migration_preserves_user_frontmatter(tmp_path):
+    report_file = tmp_path / "aip" / "jcp" / "164" / "16.md"
+    report_file.parent.mkdir(parents=True)
+    original = _legacy_journal_report().replace(
+        "tags:\n  - #jcp-v164-i16",
+        "tags:\n  - personal\n  - #jcp-v164-i16\naliases:\n  - weekly reading\nrating: 5",
+    )
+    report_file.write_text(original, encoding="utf-8")
+
+    result = migrate_report_file(str(report_file), data_dir=str(tmp_path))
+
+    migrated = report_file.read_text(encoding="utf-8")
+    assert result.status == "migrated"
+    assert "tags:\n  - personal\n  - jcp-v164-i16" in migrated
+    assert "aliases:\n  - weekly reading" in migrated
+    assert "rating: 5" in migrated
+
+
+def test_legacy_arxiv_migration_preserves_user_frontmatter(tmp_path):
+    report_file = tmp_path / "arxiv" / "cs.AI" / "2026" / "07" / "07.md"
+    report_file.parent.mkdir(parents=True)
+    original = """# 2026-07-07 preprint by arxiv_tools
+
+---
+tags:
+  - personal
+  - #cs.AI-2026-07-07
+aliases:
+  - ai reading
+review_status: queued
+---
+
+```dataview
+TASK
+from #cs.AI-2026-07-07
+WHERE completed
+```
+
+## collected
+
+## not collected
+
+### arXiv:2607.00001
+
+- [ ] [arXiv:2607.00001](https://arxiv.org/abs/2607.00001)
+"""
+    report_file.write_text(original, encoding="utf-8")
+
+    result = migrate_report_file(str(report_file), data_dir=str(tmp_path))
+
+    migrated = report_file.read_text(encoding="utf-8")
+    assert result.status == "migrated"
+    assert "tags:\n  - personal\n  - cs-ai-2026-07-07" in migrated
+    assert "aliases:\n  - ai reading" in migrated
+    assert "review_status: queued" in migrated
+
+
 def test_migration_validation_failure_restores_backup(tmp_path, monkeypatch):
     from papertrack import migration
 
@@ -121,6 +185,53 @@ def test_migration_validation_failure_restores_backup(tmp_path, monkeypatch):
 
     assert result.status == "failed"
     assert report_file.read_text(encoding="utf-8") == original
+
+
+def test_migration_atomic_replace_failure_restores_original(tmp_path, monkeypatch):
+    from papertrack import migration
+
+    report_file = tmp_path / "arxiv" / "cs.AI" / "2026" / "07" / "07.md"
+    report_file.parent.mkdir(parents=True)
+    original = """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+papertrack_category: cs.AI
+papertrack_date: "2026-07-07"
+tags:
+  - #cs.AI-2026-07-07
+---
+
+```dataview
+TASK
+from #cs.AI-2026-07-07
+```
+
+## collected
+
+## not collected
+
+### arXiv:2607.00001
+"""
+    report_file.write_text(original, encoding="utf-8")
+    real_replace = migration.os.replace
+    failed_once = False
+
+    def fail_temporary_replacement(source, target):
+        nonlocal failed_once
+        if Path(target) == report_file and str(source).endswith(".tmp") and not failed_once:
+            failed_once = True
+            raise OSError("simulated replacement failure")
+        return real_replace(source, target)
+
+    monkeypatch.setattr(migration.os, "replace", fail_temporary_replacement)
+
+    result = migrate_report_file(str(report_file), data_dir=str(tmp_path))
+
+    assert failed_once is True
+    assert result.status == "failed"
+    assert report_file.read_text(encoding="utf-8") == original
+    assert not report_file.with_suffix(".md.bak").exists()
+    assert list(report_file.parent.glob(f".{report_file.name}.*.tmp")) == []
 
 
 def test_write_report_file_validates_before_touching_filesystem(tmp_path):
@@ -295,6 +406,8 @@ Title:  Test article
 
 ![|700|700x24](https://example.test/toc.gif)
 Authors:  A Author
+
+![personal plot](attachments/result.png)
 """,
         encoding="utf-8",
     )
@@ -305,6 +418,7 @@ Authors:  A Author
     assert result.status == "repaired"
     assert "![|700|700x24]" not in migrated
     assert "Authors:  A Author" in migrated
+    assert "![personal plot](attachments/result.png)" in migrated
     assert not report_file.with_suffix(".md.bak").exists()
 
 
@@ -663,6 +777,105 @@ WHERE completed
     assert validate_report_content(content, source="journal") is False
 
 
+def test_validation_rejects_missing_or_duplicate_generated_identity_fields():
+    missing = """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+tags:
+  - cs-ai-2026-07-07
+---
+
+```dataview
+TASK
+```
+
+## collected
+
+## not collected
+
+### arXiv:2607.00001
+"""
+    duplicate = """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+papertrack_category: cs.AI
+papertrack_category: cs.LG
+papertrack_date: "2026-07-07"
+tags:
+  - cs-ai-2026-07-07
+---
+
+```dataview
+TASK
+```
+
+## collected
+
+## not collected
+
+### arXiv:2607.00001
+"""
+
+    assert validate_report_content(missing, source="arxiv") is False
+    assert validate_report_content(duplicate, source="arxiv") is False
+
+
+def test_validation_does_not_count_alias_as_generated_tag():
+    content = """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+papertrack_category: cs.AI
+papertrack_date: "2026-07-07"
+aliases:
+  - cs-ai-2026-07-07
+tags:
+  - personal
+---
+
+```dataview
+TASK
+```
+
+## collected
+
+## not collected
+
+### arXiv:2607.00001
+"""
+
+    assert validate_report_content(content, source="arxiv") is False
+
+
+def test_current_report_with_missing_identity_is_failed_not_current(tmp_path):
+    report_file = tmp_path / "arxiv" / "cs.AI" / "2026" / "07" / "07.md"
+    report_file.parent.mkdir(parents=True)
+    original = """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+papertrack_date: "2026-07-07"
+tags:
+  - cs-ai-2026-07-07
+---
+
+```dataview
+TASK
+```
+
+## collected
+
+## not collected
+
+### arXiv:2607.00001
+"""
+    report_file.write_text(original, encoding="utf-8")
+
+    result = migrate_report_file(str(report_file), data_dir=str(tmp_path))
+
+    assert result.status == "failed"
+    assert "validation" in result.message
+    assert report_file.read_text(encoding="utf-8") == original
+
+
 def test_current_arxiv_migration_leaves_canonical_identity_unchanged(tmp_path):
     report_file = tmp_path / "arxiv" / "chem-ph" / "2025" / "03" / "01.md"
     report_file.parent.mkdir(parents=True)
@@ -798,7 +1011,7 @@ from #quant-ph-2025-03-01
     assert "from #chem-ph-2025-03-01" in repaired
 
 
-def test_arxiv_identity_migration_repairs_tag_when_frontmatter_matches_path(
+def test_arxiv_identity_migration_fails_when_tag_ownership_is_unknown(
     tmp_path,
 ):
     report_file = tmp_path / "arxiv" / "chem-ph" / "2025" / "03" / "01.md"
@@ -827,8 +1040,81 @@ from #chem-ph-2025-03-01
 
     result = migrate_report_file(str(report_file), data_dir=str(tmp_path))
 
+    assert result.status == "failed"
+    assert "generated tag" in result.message
+    assert report_file.read_text(encoding="utf-8") == original
+
+
+def test_current_arxiv_migration_only_repairs_generated_item_inside_tags(tmp_path):
+    report_file = tmp_path / "arxiv" / "chem-ph" / "2025" / "03" / "01.md"
+    report_file.parent.mkdir(parents=True)
+    original = """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+papertrack_category: quant-ph
+papertrack_date: "2025-03-01"
+aliases:
+  - quant-ph-2025-03-01
+tags:
+  - personal-2025-03-01
+  - #quant-ph-2025-03-01
+---
+
+```dataview
+TASK
+from #quant-ph-2025-03-01
+```
+
+## collected
+
+## not collected
+
+### arXiv:2503.00001
+"""
+    report_file.write_text(original, encoding="utf-8")
+
+    result = migrate_report_file(str(report_file), data_dir=str(tmp_path))
+
+    repaired = report_file.read_text(encoding="utf-8")
     assert result.status == "repaired"
-    assert "  - chem-ph-2025-03-01" in report_file.read_text(encoding="utf-8")
+    assert "aliases:\n  - quant-ph-2025-03-01" in repaired
+    assert "tags:\n  - personal-2025-03-01\n  - chem-ph-2025-03-01" in repaired
+
+
+def test_current_journal_migration_does_not_repair_alias_with_issue_suffix(tmp_path):
+    report_file = tmp_path / "aip" / "jcp" / "164" / "16.md"
+    report_file.parent.mkdir(parents=True)
+    original = """---
+papertrack_format: journal-v2
+papertrack_source: journal
+papertrack_provider: aip
+papertrack_journal: jcp
+papertrack_volume: "164"
+papertrack_issue: "16"
+aliases:
+  - personal-v164-i16
+tags:
+  - personal
+---
+
+```dataview
+TASK
+from #jcp-v164-i16
+```
+
+## collected
+
+## not collected
+
+### 10.1063/example
+"""
+    report_file.write_text(original, encoding="utf-8")
+
+    result = migrate_report_file(str(report_file), data_dir=str(tmp_path))
+
+    assert result.status == "failed"
+    assert "generated tag" in result.message
+    assert report_file.read_text(encoding="utf-8") == original
 
 
 def test_arxiv_identity_migration_selects_generated_dataview_block(tmp_path):
@@ -905,6 +1191,57 @@ from #chem-ph-2025-03-02
         ("failed", str(bad)),
         ("repaired", str(good)),
     ]
+
+
+def test_migrate_reports_isolates_ambiguous_legacy_query_and_continues(tmp_path):
+    bad = tmp_path / "aip" / "jcp" / "164" / "16.md"
+    good = tmp_path / "arxiv" / "chem-ph" / "2025" / "03" / "02.md"
+    bad.parent.mkdir(parents=True)
+    good.parent.mkdir(parents=True)
+    bad_content = _legacy_journal_report().replace(
+        "```dataview\nTASK\nfrom #jcp-v164-i16\n\nWHERE completed\n\n```",
+        """```dataview
+TASK
+from #jcp-v164-i16
+```
+
+```dataview
+TASK
+from #jcp-v164-i16
+```""",
+    )
+    bad.write_text(bad_content, encoding="utf-8")
+    good.write_text(
+        """---
+papertrack_format: arxiv-v2
+papertrack_source: arxiv
+papertrack_category: chem-ph
+papertrack_date: "2025-03-02"
+tags:
+  - #chem-ph-2025-03-02
+---
+
+```dataview
+TASK
+from #chem-ph-2025-03-02
+```
+
+## collected
+
+## not collected
+
+### arXiv:2503.00002
+""",
+        encoding="utf-8",
+    )
+
+    results = migrate_reports(str(tmp_path))
+
+    by_path = {result.path: result for result in results}
+    assert by_path[str(bad)].status == "failed"
+    assert "ambiguous" in by_path[str(bad)].message
+    assert bad.read_text(encoding="utf-8") == bad_content
+    assert by_path[str(good)].status == "repaired"
 
 
 def test_preserve_task_state_keeps_checkbox_and_plugin_suffix():
