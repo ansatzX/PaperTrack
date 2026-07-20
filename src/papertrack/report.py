@@ -13,6 +13,7 @@ from .codex import official_arxiv_category
 from .journal_entry import JournalEntry
 from .journal_fetch import query_journal_issue_full_result
 from .migration import has_journal_quality_failure, preserve_task_state, write_report_file
+from .report_tags import arxiv_report_tag, journal_report_tag
 from .source_policy import SourcePolicy
 from .zotero_query import ZoteroQuery
 
@@ -45,6 +46,7 @@ def _render_report(date_string: str, category: str,
     return tmpl.render(
         date_string=date_string,
         category=category,
+        report_tag=arxiv_report_tag(category, date_string),
         collected_papers=collected_papers,
         not_collected_papers=not_collected_papers,
         new_data=new_data,
@@ -382,6 +384,7 @@ def _render_journal_report(journal_name: str, journal_slug: str,
         issue=issue,
         date=date,
         provider=provider,
+        report_tag=journal_report_tag(journal_slug, volume, issue),
         collected_papers=collected_papers,
         not_collected_papers=not_collected_papers,
         new_data=new_data,

@@ -378,6 +378,10 @@ class TestJournalRendering:
 
         assert report.startswith("---\npapertrack_format: journal-v2")
         assert "papertrack_provider: aip" in report
+        assert "tags:\n  - jcp-v164-i16" in report
+        assert "from #jcp-v164-i16" in report
+        assert "WHERE completed" in report
+        assert "  - #jcp-v164-i16" not in report
         assert "https://example.test/toc.jpg" not in report
 
     def test_filter_journal_to_md_preserves_existing_task_state(self, tmp_path, monkeypatch):
@@ -530,6 +534,46 @@ class TestGenOnedayMarkdown:
         assert "## collected" in result
         assert "## not collected" in result
         assert "Test Title" in result
+
+    def test_computer_science_report_uses_valid_dataview_tag(self):
+        result = _gen_oneday_markdown(
+            "2026-07-07",
+            "cs.AI",
+            {
+                "arXiv:2607.00001": ArxivEntry(
+                    arxiv_id="arXiv:2607.00001",
+                    title="AI paper",
+                    authors=["A Author"],
+                    abstract="Abstract",
+                )
+            },
+            None,
+        )
+
+        assert "papertrack_category: cs.AI" in result
+        assert "tags:\n  - cs-ai-2026-07-07" in result
+        assert "from #cs-ai-2026-07-07" in result
+        assert "WHERE completed" in result
+        assert "#cs.AI-2026-07-07" not in result
+
+    def test_hyphenated_arxiv_category_tag_remains_stable(self):
+        result = _gen_oneday_markdown(
+            "2026-07-07",
+            "quant-ph",
+            {
+                "arXiv:2607.00001": ArxivEntry(
+                    arxiv_id="arXiv:2607.00001",
+                    title="Quantum paper",
+                    authors=["A Author"],
+                    abstract="Abstract",
+                )
+            },
+            None,
+        )
+
+        assert "tags:\n  - quant-ph-2026-07-07" in result
+        assert "from #quant-ph-2026-07-07" in result
+        assert "  - #quant-ph-2026-07-07" not in result
 
     def test_update_section_when_new_papers(self):
         arxiv_dict = {

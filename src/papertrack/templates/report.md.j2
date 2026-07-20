@@ -4,14 +4,14 @@ papertrack_source: arxiv
 papertrack_category: {{ category }}
 papertrack_date: "{{ date_string }}"
 tags:
-  - #{{ category }}-{{ date_string }}
+  - {{ report_tag }}
 ---
 
 # {{ date_string }} preprint by arxiv_tools
 
 ```dataview
 TASK
-from #{{ category }}-{{ date_string }}
+from #{{ report_tag }}
 
 WHERE completed
 
