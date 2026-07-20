@@ -211,8 +211,9 @@ _journals: dict[str, dict[str, str]] | None = None
 def get_journals() -> dict[str, dict[str, str]]:
     global _journals
     if _journals is None:
-        _journals = _load_toml_journals()
-        _validate_journal_tag_uniqueness(_journals)
+        loaded = _load_toml_journals()
+        _validate_journal_tag_uniqueness(loaded)
+        _journals = loaded
     return _journals
 
 

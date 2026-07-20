@@ -80,8 +80,9 @@ def test_journal_config_rejects_colliding_generated_tag_slugs(monkeypatch):
     )
     monkeypatch.setattr(codex, "_journals", None)
 
-    with pytest.raises(ValueError, match="generated report tag collision"):
-        codex.get_journals()
+    for _ in range(2):
+        with pytest.raises(ValueError, match="generated report tag collision"):
+            codex.get_journals()
 
 
 def test_journal_config_rejects_invalid_generated_tag_slug(monkeypatch):

@@ -237,6 +237,56 @@ from #cs.AI-2026-07-07
     assert report_file.read_text(encoding="utf-8") == original
 
 
+def test_legacy_arxiv_without_stable_path_fails_without_identity_candidate(tmp_path):
+    report_file = tmp_path / "misc" / "report.md"
+    report_file.parent.mkdir(parents=True)
+    original = """# 2026-07-07 preprint by arxiv_tools
+
+```dataview
+TASK
+```
+
+## collected
+
+## not collected
+
+### arXiv:2607.00001
+"""
+    report_file.write_text(original, encoding="utf-8")
+
+    result = migrate_report_file(str(report_file), data_dir=str(tmp_path))
+
+    assert result.status == "failed"
+    assert "missing generated identity" in result.message
+    assert report_file.read_text(encoding="utf-8") == original
+
+
+def test_legacy_journal_without_stable_path_fails_without_identity_candidate(
+    tmp_path,
+):
+    report_file = tmp_path / "misc" / "report.md"
+    report_file.parent.mkdir(parents=True)
+    original = """# Journal of Chemical Physics Vol. 164, Iss. 16 — 2026
+
+```dataview
+TASK
+```
+
+## collected
+
+## not collected
+
+### 10.1063/example
+"""
+    report_file.write_text(original, encoding="utf-8")
+
+    result = migrate_report_file(str(report_file), data_dir=str(tmp_path))
+
+    assert result.status == "failed"
+    assert "missing generated identity" in result.message
+    assert report_file.read_text(encoding="utf-8") == original
+
+
 def test_legacy_journal_path_identity_cannot_be_overridden_by_personal_tag(tmp_path):
     report_file = tmp_path / "aip" / "jcp" / "164" / "16.md"
     report_file.parent.mkdir(parents=True)

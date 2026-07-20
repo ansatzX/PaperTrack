@@ -703,8 +703,9 @@ def _journal_metadata(content: str, path: Path, data_dir: str) -> dict[str, str]
             }
         if len(candidates) > 1:
             raise ValueError("legacy journal report has ambiguous generated identity")
-        if len(candidates) == 1:
-            slug, volume, issue = next(iter(candidates))
+        if not candidates:
+            raise ValueError("legacy journal report is missing generated identity")
+        slug, volume, issue = next(iter(candidates))
     if title_match:
         volume = volume or title_match.group(2).strip()
         issue = issue or title_match.group(3).strip()
@@ -736,11 +737,9 @@ def _arxiv_metadata(content: str, path: Path, data_dir: str) -> dict[str, str]:
         }
     if len(candidates) > 1:
         raise ValueError("legacy arXiv report has ambiguous generated identity")
-    if len(candidates) == 1:
-        category, report_date = next(iter(candidates))
-    else:
-        category = ""
-        report_date = title_match.group(1) if title_match else ""
+    if not candidates:
+        raise ValueError("legacy arXiv report is missing generated identity")
+    category, report_date = next(iter(candidates))
     return {
         "category": category or "unknown",
         "date": report_date or "unknown",
