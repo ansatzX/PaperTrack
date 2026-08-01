@@ -274,16 +274,26 @@ explicit volume and issue if you intentionally want to process a partial issue.
 
 APS has two distinct official views, with deliberately different authority:
 
-1. A run first discovers the newest formal issues and compares their
-   `(volume, issue)` pairs and report files with local state. Missing or damaged
-   formal issues are the only units scheduled for rebuilding.
-2. The canonical APS issue page is then fetched. It is the sole authority for
+1. The repair plan first enumerates the formal reports to repair, creates a
+   durable plan, and caches every canonical issue page before any abstract
+   completion begins. An issue cache records its DOI set, article count, and
+   earliest/latest article dates. A failed request remains retryable; a provider
+   circuit skip remains pending because no request was made.
+2. The canonical APS issue page is the sole authority for
    the article set and for DOI, title, authors, volume, issue, page, and date.
    Its historical `summary-container` text is an editorial teaser and is never
    treated as an article abstract.
-3. If those issue cards omit abstracts, PaperTrack consults the journal's
-   official paginated `/{journal}/recent?page=N` pages only to fill empty
-   abstracts of DOI-matched members already obtained from that issue page.
+3. Only when all target issue snapshots are present, one shared reverse-
+   chronological scan of the journal's official paginated
+   `/{journal}/recent?page=N` stream fills empty abstracts by exact normalized
+   DOI match. It starts at page 1, so cached pages are reused across issues;
+   article counts and dates provide a page-range hint only. A recent page never
+   establishes issue membership. Once its oldest date passes an issue's earliest
+   date, unmatched DOI values for that issue are recorded as unresolved.
+4. A final render phase reads only the cached issue and recent data. It writes
+   only issues with complete DOI abstract coverage, preserving the existing
+   Obsidian task state and collection grouping. No browser navigation is allowed
+   in this phase.
 
 Recent results never create an issue, add or remove issue members, infer an
 issue number, or replace issue metadata. For an issue with dated missing
@@ -297,6 +307,16 @@ without network access. If a recent page is blocked, malformed, unavailable, or
 does not contain a matching DOI, the official issue result remains intact and
 the abstract stays visibly unresolved; PaperTrack does not fall back to visiting
 individual article pages.
+
+Run the full repair (or a resumable individual phase) through the single owner:
+
+```bash
+python scripts/repair_all_aps_reports.py \
+  --data-dir /home/ansatz/data/obsidian/1/papertrack_datas \
+  --diagnostics-dir .papertrack_diagnostics \
+  --profile-root .papertrack_browser_profiles \
+  --snapshot-root .papertrack_official_cache --phase all --issue-interval 120
+```
 
 ## CLI Reference
 

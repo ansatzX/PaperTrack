@@ -148,7 +148,7 @@ def test_run_j_sh_configures_exact_production_request_intervals():
     assert "export PAPERTRACK_ACS_ISSUE_INTERVAL=30" in content
     assert "export PAPERTRACK_AIP_ISSUE_INTERVAL=30" in content
     assert "export PAPERTRACK_AIP_ABSTRACT_INTERVAL=10" in content
-    assert "export PAPERTRACK_APS_ISSUE_INTERVAL=30" in content
+    assert "export PAPERTRACK_APS_ISSUE_INTERVAL=120" in content
     assert "CONDA_BIN=/home/ansatz/soft/miniconda3/bin/conda" in content
     assert "CONDA_ENV=arxiv" in content
     assert "DATA_DIR=/home/ansatz/data/obsidian/1/papertrack_datas" in content

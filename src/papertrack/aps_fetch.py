@@ -289,10 +289,12 @@ def _recent_snapshot_is_valid(snapshot, url: str) -> bool:
     )
 
 
-def _recent_page(
+def fetch_aps_recent_page(
     journal_slug: str,
     page: int,
     provider_runtime,
+    *,
+    cache_only: bool = False,
 ) -> tuple[ApsRecentParseResult | None, str]:
     """Load one cached APS recent page, otherwise fetch and cache it."""
     url = _recent_url(journal_slug, page)
@@ -311,6 +313,8 @@ def _recent_page(
             ))
         else:
             return parsed, "snapshot"
+    if cache_only:
+        return None, FETCH_FAILED
 
     fetched = provider_runtime.fetch_recent(RecentRequest(
         canonical_url=url,
@@ -365,7 +369,9 @@ def _fill_missing_abstracts_from_recent(
     page = 1
     last_page_date = ""
     while True:
-        parsed, source = _recent_page(journal_slug, page, provider_runtime)
+        parsed, source = fetch_aps_recent_page(
+            journal_slug, page, provider_runtime
+        )
         if parsed is None:
             outcome = source
             break
@@ -656,6 +662,7 @@ def _query_aps_with_runtime(
     provider_runtime,
     *,
     force_live: bool = False,
+    snapshot_only: bool = False,
 ):
     url = APS_ISSUE_URL.format(
         journal_slug=journal_slug, volume=volume, issue=issue
@@ -739,6 +746,13 @@ def _query_aps_with_runtime(
                         if hasattr(provider_runtime, "stats"):
                             provider_runtime.stats.snapshot_hit += 1
                         return cached
+
+    if snapshot_only:
+        return AdapterResult(
+            entries={}, outcome=FETCH_FAILED, provider="aps", source="journal",
+            message="APS issue snapshot is unavailable or invalid",
+            metadata={"url": url, "official_transport": "snapshot"},
+        )
 
     request = IssueRequest(
         canonical_url=APS_ISSUE_URL.format(
@@ -864,13 +878,13 @@ def _query_aps_with_runtime(
 
 def query_aps_issue_result(journal_slug: str, volume: str, issue: str,
                            journal_name: str = "", provider_runtime=None,
-                           *, force_live: bool = False,
+                           *, force_live: bool = False, snapshot_only: bool = False,
                            ) -> AdapterResult[dict[str, JournalEntry]]:
     """Scrape a specific APS issue page without visiting article pages."""
     if provider_runtime is not None:
         return _query_aps_with_runtime(
             journal_slug, volume, issue, journal_name, provider_runtime,
-            force_live=force_live,
+            force_live=force_live, snapshot_only=snapshot_only,
         )
 
     cache_key = f"{journal_slug}:{volume}:{issue}"

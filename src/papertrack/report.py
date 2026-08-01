@@ -11,6 +11,7 @@ from .arxiv_entry import ArxivEntry
 from .arxiv_index_fetch import query_arxiv_result
 from .codex import official_arxiv_category
 from .journal_entry import JournalEntry
+from .identity import normalize_doi
 from .journal_fetch import query_journal_issue_full_result
 from .migration import has_journal_quality_failure, preserve_task_state, write_report_file
 from .report_tags import arxiv_report_tag, journal_report_tag
@@ -409,7 +410,8 @@ def _classify_journal_papers(entries: dict[str, JournalEntry],
                 collected.append(_render_journal_paper(entry))
             else:
                 not_collected.append(_render_journal_paper(entry))
-        elif existing_collected_dois and doi in existing_collected_dois:
+        elif (existing_collected_dois
+              and normalize_doi(doi) in existing_collected_dois):
             collected.append(_render_journal_paper(entry))
         else:
             not_collected.append(_render_journal_paper(entry))
@@ -508,6 +510,38 @@ def filter_journal_to_md(journal_name: str, journal_slug: str,
         logger.warning("No articles found for %s Vol.%s Iss.%s", journal_name, volume, issue)
         return False
 
+    return write_journal_entries_to_md(
+        journal_name=journal_name,
+        journal_slug=journal_slug,
+        volume=volume,
+        issue=issue,
+        entries=entries,
+        md_folder=md_folder,
+        zotero=zotero,
+        year=year,
+        provider=provider,
+        acs_code=acs_code,
+        existing_collected_dois=existing_collected_dois,
+    )
+
+
+def write_journal_entries_to_md(
+    journal_name: str,
+    journal_slug: str,
+    volume: str,
+    issue: str,
+    entries: dict[str, JournalEntry],
+    md_folder: str,
+    zotero: ZoteroQuery | None = None,
+    year: int | None = None,
+    provider: str = "",
+    acs_code: str = "",
+    existing_collected_dois: set[str] | None = None,
+) -> bool:
+    """Render already-authoritative journal entries without network access."""
+    if not entries:
+        return False
+
     # Infer date from first entry
     first = next(iter(entries.values()))
     date_str = first.date or f"{year or ''}"
@@ -520,6 +554,11 @@ def filter_journal_to_md(journal_name: str, journal_slug: str,
 
     parse_old = parse_journal_report(report_file)
     old_content = _read_existing_report(report_file)
+    # A repair run commonly has no live Zotero connection.  Retain the
+    # existing collection grouping in that case; completed checkbox state is
+    # preserved separately below.
+    if existing_collected_dois is None and old_content:
+        existing_collected_dois = _existing_collected_journal_dois(old_content)
     collected, not_collected = _classify_journal_papers(
         entries,
         zotero,
@@ -541,6 +580,19 @@ def filter_journal_to_md(journal_name: str, journal_slug: str,
 
     write_report_file(report_file, markdown_str, source="journal")
     return True
+
+
+def _existing_collected_journal_dois(content: str) -> set[str]:
+    """Return generated DOI anchors in the durable ``collected`` section."""
+    match = re.search(
+        r"## Collected Papers\s*\n(.*?)(?=\n## |\Z)", content, re.DOTALL
+    )
+    if not match:
+        return set()
+    return {
+        normalize_doi(doi)
+        for doi in re.findall(r"^###\s*(10\.\S+)", match.group(1), re.MULTILINE)
+    }
 
 
 # ── State file helpers ──────────────────────────────────────────────────

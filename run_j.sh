@@ -31,7 +31,9 @@ export PAPERTRACK_CROSSREF_MODE=disabled
 export PAPERTRACK_ACS_ISSUE_INTERVAL=30
 export PAPERTRACK_AIP_ISSUE_INTERVAL=30
 export PAPERTRACK_AIP_ABSTRACT_INTERVAL=10
-export PAPERTRACK_APS_ISSUE_INTERVAL=30
+# APS is deliberately conservative: the repair protocol can cache hundreds of
+# issue pages and must not turn that into a burst against the official site.
+export PAPERTRACK_APS_ISSUE_INTERVAL=120
 
 cd "$PROJECT_DIR"
 

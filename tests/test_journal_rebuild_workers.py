@@ -130,7 +130,7 @@ def test_workers_define_exact_classifications_priorities_and_reasons():
     }
 
 
-@pytest.mark.parametrize("provider", ["acs", "aip", "aps"])
+@pytest.mark.parametrize("provider", ["acs", "aip"])
 def test_worker_main_forwards_only_its_candidates_and_cli_options(
     provider, tmp_path, monkeypatch, capsys
 ):
@@ -183,7 +183,7 @@ def test_worker_main_forwards_only_its_candidates_and_cli_options(
     assert capsys.readouterr().out.startswith(f"{provider}: candidates=")
 
 
-@pytest.mark.parametrize("provider", ["acs", "aip", "aps"])
+@pytest.mark.parametrize("provider", ["acs", "aip"])
 def test_worker_summary_reports_rates_and_structured_runtime_counts(
     provider, tmp_path, monkeypatch, capsys
 ):
@@ -238,6 +238,27 @@ def test_worker_summary_reports_rates_and_structured_runtime_counts(
     assert "endpoint_success=1" in output
     assert "endpoint_failure=0" in output
     assert "unresolved_metadata=0" in output
+
+
+def test_aps_worker_routes_audited_candidates_to_three_phase_owner(
+    tmp_path, monkeypatch
+):
+    worker = _worker("aps")
+    calls = []
+    monkeypatch.setattr(
+        worker, "repair_main", lambda args: calls.append(args) or 0,
+    )
+
+    assert worker.main([
+        "--data-dir", str(tmp_path / "data"),
+        "--diagnostics-dir", str(tmp_path / "diagnostics"),
+        "--profile-root", str(tmp_path / "profiles"),
+        "--snapshot-root", str(tmp_path / "snapshots"),
+        "--dry-run",
+    ]) == 0
+
+    assert "--dry-run" not in calls[0]
+    assert calls[0].count("--candidate") == 9
 
 
 @pytest.mark.parametrize(

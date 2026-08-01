@@ -296,10 +296,7 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
 
     if provider == "aps" and journal_slug:
         try:
-            from .aps_fetch import (
-                enrich_aps_entries_from_recent,
-                query_aps_issue_result,
-            )
+            from .aps_fetch import query_aps_issue_result
             official = query_aps_issue_result(
                 journal_slug,
                 volume,
@@ -308,14 +305,6 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
                 provider_runtime=provider_runtime,
             )
             if official.entries:
-                # APS recent pages are a separate, auxiliary stage.  The
-                # completed issue result retains exclusive ownership of
-                # membership and formal metadata.
-                official.metadata["official_recent_abstract_fill"] = (
-                    enrich_aps_entries_from_recent(
-                        official.entries, journal_slug, provider_runtime
-                    )
-                )
                 return official
             logger.warning("APS scraping returned %s; not using CrossRef for issue membership", official.outcome)
             return official
