@@ -35,7 +35,19 @@ APS_FIXTURE = """
       <p>Guilherme C. Matos, Reinaldo de Melo e Souza, Paulo A. Maia Neto, and François Impens</p>
       <p>Phys. Rev. Lett. <b>127</b>, 270401 (2021) - Published 29 December, 2021</p>
     </section>
-    <section class="summary-container"><p>Official historical issue summary.</p></section>
+    <section class="summary"><p>Official historical issue abstract.</p></section>
+  </div>
+</body></html>
+""".encode("utf-8")
+
+APS_RECENT_FIXTURE = """
+<html><body>
+  <div class="browse-result-card">
+    <section class="headline"><h4 class="title"></h4>
+      <a href="/prl/abstract/10.1103/PhysRevLett.127.270401">Quantum Vacuum Sagnac Effect</a>
+    </section>
+    <div class="summary hidden"><p>Official recent-page abstract.</p></div>
+    <form data-published-date="2021-12-29"></form>
   </div>
 </body></html>
 """.encode("utf-8")
@@ -45,7 +57,9 @@ class Runtime:
     def __init__(self, snapshot_store):
         self.snapshot_store = snapshot_store
         self.fetch_calls = []
+        self.recent_calls = []
         self.results = []
+        self.recent_results = []
         self.stats = ProviderRunStats()
 
     def queue_html(
@@ -76,6 +90,27 @@ class Runtime:
     def fetch_issue(self, request):
         self.fetch_calls.append(request)
         return self.results.pop(0)
+
+    def queue_recent_html(self, html, *, outcome=SUCCESS, status_code=200,
+                          message="", attempt_count=1):
+        if isinstance(html, bytes):
+            html = html.decode("utf-8")
+        self.recent_results.append(
+            OfficialBrowserResult(
+                outcome=outcome,
+                canonical_url="https://journals.aps.org/prl/recent",
+                final_url="https://journals.aps.org/prl/recent",
+                status_code=status_code,
+                html=html,
+                captured=(),
+                message=message,
+                attempt_count=attempt_count,
+            )
+        )
+
+    def fetch_recent(self, request):
+        self.recent_calls.append(request)
+        return self.recent_results.pop(0)
 
 
 @pytest.fixture
@@ -135,7 +170,6 @@ def test_aps_snapshot_rebuild_preserves_official_doi_case(
     result = aps_fetch.query_aps_issue_result(
         "prl", "127", "27", "PRL", runtime
     )
-
     assert "10.1103/PhysRevLett.127.270401" in result.entries
     assert result.metadata["official_transport"] == "snapshot"
     assert runtime.fetch_calls == []
@@ -273,6 +307,69 @@ def test_aps_live_success_commits_validated_snapshot(runtime, snapshot_store):
         and "/articles/" not in call.canonical_url
         for call in runtime.fetch_calls
     )
+
+
+def test_aps_recent_cache_fills_only_missing_issue_member(runtime, snapshot_store):
+    issue_without_abstract = APS_FIXTURE.replace(
+        b"Official historical issue abstract.", b""
+    )
+    runtime.queue_html(issue_without_abstract)
+    runtime.queue_recent_html(APS_RECENT_FIXTURE)
+
+    result = aps_fetch.query_aps_issue_result(
+        "prl", "127", "27", "PRL", runtime
+    )
+    coverage = aps_fetch.enrich_aps_entries_from_recent(
+        result.entries, "prl", runtime
+    )
+
+    entry = result.entries["10.1103/PhysRevLett.127.270401"]
+    assert entry.abstract == "Official recent-page abstract."
+    assert len(runtime.fetch_calls) == 1
+    assert len(runtime.recent_calls) == 1
+    assert runtime.recent_calls[0].canonical_url == (
+        "https://journals.aps.org/prl/recent"
+    )
+    assert coverage == {
+        "filled": 1,
+        "remaining": 0,
+        "pages": 1,
+        "outcome": "success",
+        "issue_search_from_date": "2021-12-29",
+        "recent_last_page_date": "2021-12-29",
+    }
+    recent = snapshot_store.load(
+        SnapshotKey("aps-recent", "prl", "recent", "1")
+    )
+    assert recent is not None
+    assert recent.validation.membership_dois == (
+        "10.1103/physrevlett.127.270401",
+    )
+
+    second_runtime = Runtime(snapshot_store)
+    cached = aps_fetch.query_aps_issue_result(
+        "prl", "127", "27", "PRL", second_runtime
+    )
+    aps_fetch.enrich_aps_entries_from_recent(
+        cached.entries, "prl", second_runtime
+    )
+    assert cached.entries["10.1103/PhysRevLett.127.270401"].abstract == (
+        "Official recent-page abstract."
+    )
+    assert second_runtime.fetch_calls == []
+    assert second_runtime.recent_calls == []
+
+
+def test_aps_issue_teaser_is_not_rendered_as_an_abstract():
+    teaser_only = APS_FIXTURE.replace(
+        b'class="summary"', b'class="summary-container"'
+    )
+
+    parsed = aps_fetch._parse_aps_issue(
+        teaser_only.decode("utf-8"), "prl", "PRL", "127", "27"
+    )
+
+    assert parsed["10.1103/PhysRevLett.127.270401"].abstract == ""
 
 
 def test_aps_absent_snapshot_emits_no_cache_rejection(monkeypatch, runtime):

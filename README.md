@@ -270,6 +270,34 @@ Partial APS issues are skipped in `journal latest` and `journal backfill` so the
 ledger does not mark an unstable issue as processed. Use `journal issue` with an
 explicit volume and issue if you intentionally want to process a partial issue.
 
+#### APS issue membership and recent-page abstract completion
+
+APS has two distinct official views, with deliberately different authority:
+
+1. A run first discovers the newest formal issues and compares their
+   `(volume, issue)` pairs and report files with local state. Missing or damaged
+   formal issues are the only units scheduled for rebuilding.
+2. The canonical APS issue page is then fetched. It is the sole authority for
+   the article set and for DOI, title, authors, volume, issue, page, and date.
+   Its historical `summary-container` text is an editorial teaser and is never
+   treated as an article abstract.
+3. If those issue cards omit abstracts, PaperTrack consults the journal's
+   official paginated `/{journal}/recent?page=N` pages only to fill empty
+   abstracts of DOI-matched members already obtained from that issue page.
+
+Recent results never create an issue, add or remove issue members, infer an
+issue number, or replace issue metadata. For an issue with dated missing
+abstracts, the search begins at recent page 1 and advances in published-time
+descending order only until all target DOIs are found or the page has reached
+the issue's earliest article date. They are fetched in the same persistent APS
+browser context as issue pages, share the 30-second provider-wide navigation
+floor and circuit breaker, and are cached locally under
+`.papertrack_official_cache/aps-recent/`. A valid cached recent page is reused
+without network access. If a recent page is blocked, malformed, unavailable, or
+does not contain a matching DOI, the official issue result remains intact and
+the abstract stays visibly unresolved; PaperTrack does not fall back to visiting
+individual article pages.
+
 ## CLI Reference
 
 ### arXiv refresh

@@ -31,14 +31,17 @@ from .official_snapshot import (
     SnapshotValidation,
     html_snapshot_provenance_rejection,
 )
-from .provider_runtime import IssueRequest
+from .provider_runtime import IssueRequest, RecentRequest
 
 logger = logging.getLogger(__name__)
 
 APS_BASE = "https://journals.aps.org"
 APS_ISSUE_URL = APS_BASE + "/{journal_slug}/issues/{volume}/{issue}"
+APS_RECENT_URL = APS_BASE + "/{journal_slug}/recent"
 APS_ISSUE_SELECTOR = ".browse-result-card.issue"
+APS_RECENT_SELECTOR = ".browse-result-card"
 APS_PARSER_VERSION = "aps-issue-v1"
+APS_RECENT_PARSER_VERSION = "aps-recent-v1"
 APS_FETCH_STRATEGIES = (
     ("curl_cffi", "chrome136"),
     ("requests", "default"),
@@ -58,6 +61,13 @@ class ApsParseResult:
     entries: dict[str, JournalEntry]
     issue_card_count: int
     critical_field_failures: list[dict]
+
+
+@dataclass
+class ApsRecentParseResult:
+    abstracts: dict[str, str]
+    has_next_page: bool
+    oldest_published_date: str = ""
 
 
 def _is_blocked(html: str) -> bool:
@@ -136,7 +146,7 @@ def _parse_aps_issue_result(
         citation = citation_paragraphs[1] if len(citation_paragraphs) > 1 else ""
         volume, pages, year = _parse_citation(citation)
         date = _parse_published_date(citation) or year
-        abstract = _parse_summary(card)
+        abstract = _parse_issue_abstract(card)
 
         entries[doi] = JournalEntry(
             doi=doi,
@@ -197,6 +207,219 @@ def _parse_summary(card) -> str:
         if p.get_text(" ", strip=True)
     ]
     return paragraphs[-1] if paragraphs else ""
+
+
+def _parse_issue_abstract(card) -> str:
+    """Extract only a full APS abstract embedded in an issue card.
+
+    ``summary-container`` on historical APS issue pages contains a short
+    editorial teaser, not the article abstract.  It must not be rendered as an
+    abstract or it prevents the DOI-matched recent-page completion path from
+    running.  Current APS cards, when they expose a real abstract inline, use
+    the same hidden ``.summary`` element as the official recent pages.
+    """
+    summary = card.select_one(".summary")
+    return summary.get_text(" ", strip=True) if summary is not None else ""
+
+
+def _recent_url(journal_slug: str, page: int) -> str:
+    base = APS_RECENT_URL.format(journal_slug=journal_slug)
+    return base if page == 1 else f"{base}?page={page}"
+
+
+def _parse_aps_recent(html: str, page: int) -> ApsRecentParseResult:
+    """Return DOI-keyed abstracts from one official APS recent page.
+
+    Recent content is metadata-only: it has no authority over an issue's
+    membership, title, authors, or formal volume/issue placement.
+    """
+    soup = BeautifulSoup(html, "lxml")
+    abstracts: dict[str, str] = {}
+    published_dates: list[str] = []
+    for card in soup.select(APS_RECENT_SELECTOR):
+        # The current APS React layout leaves ``h4.title`` empty and puts the
+        # article link directly below ``.headline``.  Older APS markup used
+        # ``.title a``.  Support both without accepting PDF/navigation links.
+        title_el = card.select_one(
+            '.title a[href*="/abstract/"], .headline a[href*="/abstract/"]'
+        )
+        if title_el is None:
+            continue
+        match = re.search(
+            r"10\.1103/[^/?#\s]+", title_el.get("href", ""), re.IGNORECASE
+        )
+        if match is None:
+            continue
+        summary = card.select_one(".summary")
+        abstract = (
+            summary.get_text(" ", strip=True) if summary is not None
+            else _parse_summary(card)
+        )
+        if abstract:
+            abstracts[normalize_doi(match.group(0))] = abstract
+        published = card.select_one("[data-published-date]")
+        if published is not None:
+            raw_date = published.get("data-published-date", "")
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_date):
+                published_dates.append(raw_date)
+
+    has_next_page = any(
+        link.get("href", "").endswith(f"?page={page + 1}")
+        for link in soup.select("a[href]")
+    )
+    # APS has used both a numbered paginator and a rel=next link.
+    has_next_page = has_next_page or bool(
+        soup.select_one('a[rel="next"], a.next, li.next a')
+    )
+    return ApsRecentParseResult(
+        abstracts=abstracts,
+        has_next_page=has_next_page,
+        oldest_published_date=min(published_dates, default=""),
+    )
+
+
+def _recent_snapshot_is_valid(snapshot, url: str) -> bool:
+    return (
+        snapshot is not None
+        and snapshot.canonical_url == url
+        and snapshot.final_url == url
+        and snapshot.media_type.partition(";")[0].strip().lower()
+        == "text/html"
+        and snapshot.validation.parser_version == APS_RECENT_PARSER_VERSION
+    )
+
+
+def _recent_page(
+    journal_slug: str,
+    page: int,
+    provider_runtime,
+) -> tuple[ApsRecentParseResult | None, str]:
+    """Load one cached APS recent page, otherwise fetch and cache it."""
+    url = _recent_url(journal_slug, page)
+    key = SnapshotKey("aps-recent", journal_slug, "recent", str(page))
+    load_result = provider_runtime.snapshot_store.load_result(key)
+    snapshot = load_result.snapshot
+    if _recent_snapshot_is_valid(snapshot, url):
+        try:
+            parsed = _parse_aps_recent(
+                snapshot.body_path.read_text(encoding="utf-8"), page
+            )
+        except (OSError, UnicodeError, ValueError) as exc:
+            record_fetch_attempt(_diagnostic_context(
+                journal_slug, "", "", url, "recent_cache_parse", PARSE_FAILED,
+                message=str(exc), cache_snapshot_path=str(snapshot.body_path),
+            ))
+        else:
+            return parsed, "snapshot"
+
+    fetched = provider_runtime.fetch_recent(RecentRequest(
+        canonical_url=url,
+        required_selector=APS_RECENT_SELECTOR,
+        challenge_markers=("Just a moment", "cf-chl", "Access denied", "Cloudflare"),
+    ))
+    if fetched.outcome != SUCCESS:
+        record_fetch_attempt(_diagnostic_context(
+            journal_slug, "", "", url, "recent_page_fetch", fetched.outcome,
+            http_status=fetched.status_code, attempt_count=fetched.attempt_count,
+            message=fetched.message,
+        ))
+        return None, fetched.outcome
+    try:
+        parsed = _parse_aps_recent(fetched.html, page)
+        provider_runtime.snapshot_store.commit(
+            key=key,
+            canonical_url=url,
+            final_url=fetched.final_url,
+            media_type="text/html",
+            body=fetched.html.encode("utf-8"),
+            validation=SnapshotValidation(
+                selector_counts={APS_RECENT_SELECTOR: len(parsed.abstracts)},
+                membership_dois=tuple(sorted(parsed.abstracts)),
+                parser_version=APS_RECENT_PARSER_VERSION,
+            ),
+        )
+    except Exception as exc:
+        record_fetch_attempt(_diagnostic_context(
+            journal_slug, "", "", url, "recent_cache_commit", FETCH_FAILED,
+            message=str(exc),
+        ))
+        return None, FETCH_FAILED
+    return parsed, "live"
+
+
+def _fill_missing_abstracts_from_recent(
+    entries: dict[str, JournalEntry], journal_slug: str, provider_runtime,
+) -> dict[str, int | str]:
+    """Fill only existing issue members from cached official APS recent pages."""
+    missing = {normalize_doi(doi) for doi, entry in entries.items() if not entry.abstract}
+    if not missing or provider_runtime is None:
+        return {"filled": 0, "remaining": len(missing), "pages": 0}
+    by_normalized_doi = {normalize_doi(doi): entry for doi, entry in entries.items()}
+    target_dates = sorted(
+        entry.date for entry in entries.values()
+        if not entry.abstract and re.fullmatch(r"\d{4}-\d{2}-\d{2}", entry.date)
+    )
+    earliest_target_date = target_dates[0] if target_dates else ""
+    filled = pages = 0
+    outcome = "success"
+    page = 1
+    last_page_date = ""
+    while True:
+        parsed, source = _recent_page(journal_slug, page, provider_runtime)
+        if parsed is None:
+            outcome = source
+            break
+        pages += 1
+        last_page_date = parsed.oldest_published_date
+        for doi, abstract in parsed.abstracts.items():
+            if doi in missing:
+                by_normalized_doi[doi].abstract = abstract
+                missing.remove(doi)
+                filled += 1
+        # Recent pages are newest first.  Once a complete page reaches the
+        # earliest dated article in this formal issue, all later pages are too
+        # old to contain the remaining issue DOI(s).  With no reliable issue
+        # date, retain the conservative behavior and continue to the end.
+        passed_issue_window = (
+            bool(earliest_target_date)
+            and bool(parsed.oldest_published_date)
+            and parsed.oldest_published_date <= earliest_target_date
+        )
+        if not missing or not parsed.has_next_page or passed_issue_window:
+            break
+        page += 1
+    record_fetch_attempt(_diagnostic_context(
+        journal_slug, "", "", APS_RECENT_URL.format(journal_slug=journal_slug),
+        "recent_abstract_fill", outcome, filled_abstracts=filled,
+        remaining_abstracts=len(missing), pages_consulted=pages,
+        issue_search_from_date=earliest_target_date,
+        recent_last_page_date=last_page_date,
+    ))
+    return {
+        "filled": filled,
+        "remaining": len(missing),
+        "pages": pages,
+        "outcome": outcome,
+        "issue_search_from_date": earliest_target_date,
+        "recent_last_page_date": last_page_date,
+    }
+
+
+def enrich_aps_entries_from_recent(
+    entries: dict[str, JournalEntry],
+    journal_slug: str,
+    provider_runtime,
+) -> dict[str, int | str]:
+    """Second-stage APS abstract completion for already-authoritative entries.
+
+    Call this only after the formal issue stage has committed its snapshot.
+    It never performs an issue navigation and returns coverage evidence for the
+    caller to attach to its report-generation result.
+    """
+    coverage = _fill_missing_abstracts_from_recent(
+        entries, journal_slug, provider_runtime
+    )
+    return coverage
 
 
 def _membership_dois(entries: dict[str, JournalEntry]) -> tuple[str, ...]:

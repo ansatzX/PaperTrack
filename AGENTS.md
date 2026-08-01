@@ -50,6 +50,14 @@ Journal reports are issue-based. Formal issue pages define the article set.
 - ACS journals use ACS list-of-issues and issue TOC pages as the primary source.
 - AIP journals use AIP issue pages as the primary source, including the official
   issue-page abstract endpoint when needed.
+- APS issue pages exclusively establish formal issue membership. If an APS
+  issue page omits abstracts, the official paginated `/{journal}/recent?page=N`
+  pages may fill abstracts only by exact DOI match for existing issue members.
+  Historical APS `summary-container` text is a teaser rather than an abstract
+  and must remain ineligible for report Abstract fields.
+  Recent pages must be locally cached and share the provider request floor and
+  circuit breaker; they must never add articles, infer issue placement, or
+  trigger individual article-page crawling.
 - CrossRef is a fallback source. For publisher-backed issue workflows, CrossRef
   may fill missing abstracts by DOI, but it must not add articles to an
   official issue, remove official articles, or replace official title/author

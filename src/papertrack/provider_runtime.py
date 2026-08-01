@@ -46,6 +46,20 @@ class IssueRequest:
 
 
 @dataclass(frozen=True)
+class RecentRequest:
+    """A canonical, paginated publisher recent-results page.
+
+    Recent pages are auxiliary metadata sources only.  They never establish
+    formal issue membership, so they intentionally have a separate request
+    type from :class:`IssueRequest`.
+    """
+
+    canonical_url: str
+    required_selector: str
+    challenge_markers: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class CapturedResponse:
     url: str
     status_code: int
@@ -357,6 +371,111 @@ class ProviderRuntime:
         self._record_result(result, diagnostic_html=html)
         return result
 
+    def fetch_recent(self, request: RecentRequest) -> OfficialBrowserResult:
+        """Fetch one APS recent-results page in the existing browser context.
+
+        This deliberately shares the provider-wide navigation floor and
+        circuit breaker with issue pages.  A recent page is never allowed to
+        redirect to a different URL, which prevents a challenge/login page
+        from being cached as metadata.
+        """
+        self._validate_recent_url(request.canonical_url)
+        if self._context is None or self._page is None:
+            raise RuntimeError("provider runtime is not open")
+        self._canonical_origin = None
+        self._capture_origin = None
+        self._capture_patterns = ()
+        self._captured_responses = []
+        self._response_evidence = []
+        self._challenge_indicators = []
+        if self._circuit_open:
+            self.stats.circuit_skipped += 1
+            result = OfficialBrowserResult(
+                outcome=CIRCUIT_OPEN, canonical_url=request.canonical_url,
+                final_url=request.canonical_url, status_code=None, html="",
+                captured=(), message="provider circuit is open after consecutive blocks",
+                attempt_count=0,
+            )
+            self._record_recent_result(result)
+            return result
+
+        self.stats.attempted += 1
+        self._wait_for_issue_interval()
+        status_code = None
+        html = ""
+        final_url = request.canonical_url
+        attempt_count = 1
+        selector_error = ""
+        try:
+            response = self._page.goto(request.canonical_url, wait_until="domcontentloaded")
+            status_code = getattr(response, "status", None)
+            selector_error = self._wait_for_selector(request.required_selector)
+            html, final_url = self._page.content(), self._page.url
+            if final_url != request.canonical_url:
+                result = self._failed_result(
+                    request, final_url, status_code, "",
+                    "recent navigation changed the canonical page location", attempt_count,
+                )
+            elif self._is_challenge(request, html):
+                self._sleep(self.challenge_retry_delay)
+                attempt_count = 2
+                self._wait_for_issue_interval()
+                response = self._page.reload(wait_until="domcontentloaded")
+                status_code = getattr(response, "status", status_code)
+                selector_error = self._wait_for_selector(request.required_selector)
+                html, final_url = self._page.content(), self._page.url
+                if final_url != request.canonical_url:
+                    result = self._failed_result(
+                        request, final_url, status_code, "",
+                        "recent navigation changed the canonical page location", attempt_count,
+                    )
+                elif self._is_challenge(request, html):
+                    result = self._blocked_result(
+                        request, final_url, status_code, html, attempt_count
+                    )
+                elif status_code != 200:
+                    result = self._failed_result(
+                        request, final_url, status_code, "",
+                        f"official recent navigation returned HTTP {status_code}", attempt_count,
+                    )
+                elif selector_error:
+                    result = self._failed_result(
+                        request, final_url, status_code, html, selector_error, attempt_count
+                    )
+                else:
+                    self.consecutive_blocks = 0
+                    result = OfficialBrowserResult(
+                        outcome=SUCCESS, canonical_url=request.canonical_url,
+                        final_url=final_url, status_code=status_code, html=html,
+                        captured=(), attempt_count=attempt_count,
+                    )
+            elif status_code != 200:
+                result = self._failed_result(
+                    request, final_url, status_code, "",
+                    f"official recent navigation returned HTTP {status_code}", attempt_count,
+                )
+            elif selector_error:
+                result = self._failed_result(
+                    request, final_url, status_code, html, selector_error, attempt_count
+                )
+            else:
+                self.consecutive_blocks = 0
+                result = OfficialBrowserResult(
+                    outcome=SUCCESS, canonical_url=request.canonical_url,
+                    final_url=final_url, status_code=status_code, html=html,
+                    captured=(), attempt_count=attempt_count,
+                )
+        except Exception as exc:
+            try:
+                html, final_url = self._page.content(), self._page.url
+            except Exception:
+                pass
+            result = self._failed_result(
+                request, final_url, status_code, html, str(exc), attempt_count
+            )
+        self._record_recent_result(result, diagnostic_html=html)
+        return result
+
     def request_same_origin(
         self,
         url: str,
@@ -551,6 +670,23 @@ class ProviderRuntime:
         if not valid:
             raise ValueError(f"{self.provider} requires an official issue URL")
 
+    def _validate_recent_url(self, url: str) -> None:
+        parsed = urlsplit(url)
+        query = parsed.query
+        valid = (
+            self.provider == "aps"
+            and parsed.scheme == "https"
+            and parsed.hostname == "journals.aps.org"
+            and parsed.port is None
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.fragment
+            and bool(re.fullmatch(r"/[^/]+/recent", parsed.path))
+            and (not query or re.fullmatch(r"page=[1-9][0-9]*", query))
+        )
+        if not valid:
+            raise ValueError("aps requires an official canonical recent URL")
+
     def _is_exact_final_issue_url(
         self, final_url: str, canonical_url: str
     ) -> bool:
@@ -610,6 +746,36 @@ class ProviderRuntime:
         finally:
             if result.outcome != SUCCESS:
                 self._captured_responses = []
+
+    def _record_recent_result(
+        self, result: OfficialBrowserResult, *, diagnostic_html: str = ""
+    ) -> None:
+        journal = urlsplit(result.canonical_url).path.strip("/").split("/", 1)[0]
+        record_fetch_attempt(
+            {
+                "source_role": "authoritative_auxiliary",
+                "source": "journal",
+                "provider": self.provider,
+                "journal": journal,
+                "volume": "",
+                "issue": "",
+                "url": result.canonical_url,
+                "final_url": result.final_url,
+                "stage": "recent_page_browser",
+                "outcome": result.outcome,
+                "http_status": result.status_code,
+                "client": "playwright",
+                "browser_mode": "headed_chrome",
+                "profile_mode": "persistent",
+                "challenge_indicators": list(self._challenge_indicators),
+                "attempt": result.attempt_count,
+                "attempt_count": result.attempt_count,
+                "circuit_state": "open" if self._circuit_open else "closed",
+                "circuit_open": self._circuit_open,
+                "message": result.message,
+            },
+            html=diagnostic_html or result.html or None,
+        )
 
     @staticmethod
     def _validate_interval(name: str, value: float) -> None:

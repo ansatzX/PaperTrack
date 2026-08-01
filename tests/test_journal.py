@@ -328,7 +328,9 @@ def test_parse_aps_issue_extracts_journal_entries():
     assert entry.issue == "1"
     assert entry.pages == "016104"
     assert entry.date == "2026-01-09"
-    assert entry.abstract == "A textbook rule breaks down for high-speed deformations."
+    # APS historical issue ``summary-container`` text is a teaser, not the
+    # paper abstract.  It is completed from DOI-matched APS recent pages.
+    assert entry.abstract == ""
 
 
 def test_parse_aps_issue_supports_legacy_h4_titles():
@@ -386,9 +388,7 @@ def test_parse_aps_historical_issue_fixtures():
     )
 
     assert list(issue_127) == ["10.1103/PhysRevLett.127.270401"]
-    assert issue_127["10.1103/PhysRevLett.127.270401"].abstract == (
-        "Official historical issue summary."
-    )
+    assert issue_127["10.1103/PhysRevLett.127.270401"].abstract == ""
     assert list(issue_129) == ["10.1103/PhysRevLett.129.270402"]
     assert issue_129["10.1103/PhysRevLett.129.270402"].title == (
         "Certified Quantum Measurement"
