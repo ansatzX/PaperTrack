@@ -89,10 +89,12 @@ def _write_state(path: Path, state: dict[str, Any]) -> None:
 
 def _issue_stage(
     candidates: list[tuple[str, str]], state: dict[str, Any], state_path: Path,
-    profile_root: Path, snapshot_root: Path,
+    profile_root: Path, snapshot_root: Path, issue_interval: float,
 ) -> None:
     config = journal_configs["prl"]
-    with ProviderRuntime("aps", profile_root, snapshot_root) as runtime:
+    with ProviderRuntime(
+        "aps", profile_root, snapshot_root, issue_interval=issue_interval,
+    ) as runtime:
         for volume, issue in candidates:
             record = state["issues"][f"{volume}/{issue}"]
             if record["issue"] == "ready":
@@ -116,10 +118,13 @@ def _issue_stage(
 def _render_stage(
     candidates: list[tuple[str, str]], state: dict[str, Any], state_path: Path,
     data_dir: Path, profile_root: Path, snapshot_root: Path,
+    issue_interval: float,
 ) -> None:
     config = journal_configs["prl"]
     output_root = data_dir / "aps"
-    with ProviderRuntime("aps", profile_root, snapshot_root) as runtime:
+    with ProviderRuntime(
+        "aps", profile_root, snapshot_root, issue_interval=issue_interval,
+    ) as runtime:
         for volume, issue in candidates:
             record = state["issues"][f"{volume}/{issue}"]
             if record["issue"] != "ready" or record["render"] == "complete":
@@ -160,13 +165,22 @@ def main() -> int:
     parser.add_argument("--profile-root", required=True, type=Path)
     parser.add_argument("--snapshot-root", required=True, type=Path)
     parser.add_argument("--phase", choices=("all", "issue", "render"), default="all")
+    parser.add_argument(
+        "--issue-interval", type=float, default=120.0,
+        help="minimum seconds between APS navigations (minimum: 30; default: 120)",
+    )
     args = parser.parse_args()
+    if args.issue_interval < 30:
+        parser.error("--issue-interval must be at least 30 seconds")
     candidates = _candidates(args.data_dir)
     state_path = _state_path(args.diagnostics_dir)
     state = _load_state(state_path, candidates)
     _write_state(state_path, state)
     if args.phase in {"all", "issue"}:
-        _issue_stage(candidates, state, state_path, args.profile_root, args.snapshot_root)
+        _issue_stage(
+            candidates, state, state_path, args.profile_root,
+            args.snapshot_root, args.issue_interval,
+        )
     if args.phase == "all":
         state = _load_state(state_path, candidates)
     issue_complete = all(
@@ -176,7 +190,10 @@ def main() -> int:
         LOGGER.warning("APS issue phase incomplete; recent/render phase deferred")
         return 0
     if args.phase in {"all", "render"}:
-        _render_stage(candidates, state, state_path, args.data_dir, args.profile_root, args.snapshot_root)
+        _render_stage(
+            candidates, state, state_path, args.data_dir, args.profile_root,
+            args.snapshot_root, args.issue_interval,
+        )
     print(json.dumps(state, ensure_ascii=False))
     return 0
 
