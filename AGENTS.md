@@ -58,6 +58,18 @@ Journal reports are issue-based. Formal issue pages define the article set.
   Recent pages must be locally cached and share the provider request floor and
   circuit breaker; they must never add articles, infer issue placement, or
   trigger individual article-page crawling.
+  For APS data repair, keep issue and recent access as separate phases:
+  first cache the formal issue memberships, DOI sets, article counts, and
+  publication-date ranges; only then fetch official recent pages in reverse
+  chronological page order. Join the two views solely by exact normalized DOI.
+  Issue date ranges and cumulative per-issue article counts may estimate which
+  recent pages to prioritize, but are scheduling hints rather than membership
+  evidence. A recent page may fill an abstract only for an already cached issue
+  DOI. Process newest issues first; stop a given issue only after all its DOI
+  targets match, or after the recent stream has passed its earliest publication
+  date and remaining DOI targets are explicitly recorded as unresolved. On a
+  provider circuit break, stop the phase and leave unvisited work pending;
+  never manufacture `circuit_open` results for work that made no request.
 - CrossRef is a fallback source. For publisher-backed issue workflows, CrossRef
   may fill missing abstracts by DOI, but it must not add articles to an
   official issue, remove official articles, or replace official title/author

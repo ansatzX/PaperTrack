@@ -18,7 +18,7 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
-from papertrack.adapter_result import SUCCESS
+from papertrack.adapter_result import CIRCUIT_OPEN, SUCCESS
 from papertrack.aps_fetch import query_aps_issue_result
 from papertrack.codex import journal_configs
 from papertrack.journal_rebuild import _existing_collected_dois
@@ -34,9 +34,12 @@ SCHEMA_VERSION = 1
 def _candidates(data_dir: Path) -> list[tuple[str, str]]:
     root = data_dir / "aps" / "prl"
     candidates = []
+    # Recent pages are reverse chronological.  Beginning with the newest
+    # formal issues both validates the source quickly and maximizes the chance
+    # that later recent-page completion can reuse its first cached pages.
     for report in sorted(root.glob("*/*.md"), key=lambda path: (
         int(path.parent.name), int(path.stem)
-    )):
+    ), reverse=True):
         candidates.append((report.parent.name, report.stem))
     return candidates
 
@@ -97,6 +100,14 @@ def _issue_stage(
             result = query_aps_issue_result(
                 "prl", volume, issue, config["name"], runtime,
             )
+            if result.outcome == CIRCUIT_OPEN:
+                # No request occurred.  Preserve this item as pending so a
+                # later healthy browser session can attempt it, and do not
+                # manufacture hundreds of terminal circuit_open outcomes.
+                record["issue"] = "pending"
+                record["issue_message"] = result.message
+                _write_state(state_path, state)
+                break
             record["issue"] = "ready" if result.outcome == SUCCESS else result.outcome
             record["issue_message"] = result.message
             _write_state(state_path, state)
@@ -158,6 +169,12 @@ def main() -> int:
         _issue_stage(candidates, state, state_path, args.profile_root, args.snapshot_root)
     if args.phase == "all":
         state = _load_state(state_path, candidates)
+    issue_complete = all(
+        record["issue"] == "ready" for record in state["issues"].values()
+    )
+    if args.phase == "all" and not issue_complete:
+        LOGGER.warning("APS issue phase incomplete; recent/render phase deferred")
+        return 0
     if args.phase in {"all", "render"}:
         _render_stage(candidates, state, state_path, args.data_dir, args.profile_root, args.snapshot_root)
     print(json.dumps(state, ensure_ascii=False))
