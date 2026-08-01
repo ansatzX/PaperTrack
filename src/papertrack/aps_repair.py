@@ -133,7 +133,6 @@ def cache_issues(
             continue
         result = query_aps_issue_result(
             plan.journal_slug, state.volume, state.issue, journal_name, runtime,
-            snapshot_only=True,
         )
         if result.outcome == CIRCUIT_OPEN:
             state.message = result.message
@@ -162,7 +161,8 @@ def index_recent_abstracts(
     doi_to_issues: dict[str, list[IssueRepairState]] = {}
     for state in plan.issues.values():
         result = query_aps_issue_result(
-            plan.journal_slug, state.volume, state.issue, journal_name, runtime
+            plan.journal_slug, state.volume, state.issue, journal_name, runtime,
+            snapshot_only=True,
         )
         if result.outcome != SUCCESS:
             state.issue_status = ISSUE_RETRYABLE
