@@ -35,6 +35,7 @@ LOGGER = logging.getLogger(__name__)
 
 def _candidates(
     data_dir: Path, journal_slug: str, requested: list[str] | None = None,
+    from_issue: tuple[int, int] | None = None,
 ) -> list[tuple[str, str]]:
     root = data_dir / "aps" / journal_slug
     available = [
@@ -43,15 +44,22 @@ def _candidates(
         if report.parent.name.isdigit() and report.stem.isdigit()
     ]
     if not requested:
-        return available
-    requested_pairs = set()
-    for candidate in requested:
-        try:
-            volume, issue = candidate.split("/", 1)
-        except ValueError as exc:
-            raise ValueError(f"invalid --candidate {candidate!r}; use VOLUME/ISSUE") from exc
-        requested_pairs.add((volume, issue))
-    return sorted(requested_pairs)
+        selected = available
+    else:
+        requested_pairs = set()
+        for candidate in requested:
+            try:
+                volume, issue = candidate.split("/", 1)
+            except ValueError as exc:
+                raise ValueError(f"invalid --candidate {candidate!r}; use VOLUME/ISSUE") from exc
+            requested_pairs.add((volume, issue))
+        selected = sorted(requested_pairs)
+    if from_issue is None:
+        return sorted(selected, key=lambda item: (int(item[0]), int(item[1])))
+    return sorted([
+        candidate for candidate in selected
+        if (int(candidate[0]), int(candidate[1])) >= from_issue
+    ], key=lambda item: (int(item[0]), int(item[1])))
 
 
 def _plan_path(diagnostics_dir: Path, journal_slug: str) -> Path:
@@ -114,6 +122,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--snapshot-root", required=True, type=Path)
     parser.add_argument("--journal", default="prl")
     parser.add_argument("--candidate", action="append", default=[], metavar="VOLUME/ISSUE")
+    parser.add_argument(
+        "--from-issue", metavar="VOLUME/ISSUE",
+        help="include formal reports at or after this volume/issue",
+    )
     parser.add_argument("--phase", choices=("all", "issue", "recent", "render"), default="all")
     parser.add_argument("--issue-interval", type=float, default=120.0)
     args = parser.parse_args(argv)
@@ -132,9 +144,15 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(str(exc))
     config = journal_configs[args.journal]
     try:
-        candidates = _candidates(args.data_dir, args.journal, args.candidate)
+        from_issue = None
+        if args.from_issue:
+            volume, issue = args.from_issue.split("/", 1)
+            from_issue = int(volume), int(issue)
+        candidates = _candidates(
+            args.data_dir, args.journal, args.candidate, from_issue,
+        )
     except ValueError as exc:
-        parser.error(str(exc))
+        parser.error(f"invalid issue selector: {exc}")
     state_path = _plan_path(args.diagnostics_dir, args.journal)
     created = not state_path.exists()
     plan = ApsRepairPlan.load_or_create(state_path, args.journal, candidates)
