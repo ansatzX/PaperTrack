@@ -25,6 +25,7 @@ from papertrack.aps_repair import (
     index_recent_abstracts,
     render_complete_issues,
 )
+from papertrack.browser_session import launch_chrome_for_cdp
 from papertrack.codex import journal_configs
 from papertrack.provider_runtime import ProviderRuntime
 
@@ -105,6 +106,11 @@ def main(argv: list[str] | None = None) -> int:
         "--browser-cdp-url", default="",
         help="attach to an existing Chrome DevTools endpoint instead of launching Chrome",
     )
+    parser.add_argument(
+        "--launch-browser", action="store_true",
+        help="launch an isolated visible Chrome profile and attach through CDP",
+    )
+    parser.add_argument("--chrome-bin", default="/opt/google/chrome/chrome")
     parser.add_argument("--snapshot-root", required=True, type=Path)
     parser.add_argument("--journal", default="prl")
     parser.add_argument("--candidate", action="append", default=[], metavar="VOLUME/ISSUE")
@@ -113,6 +119,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.issue_interval < 30:
         parser.error("--issue-interval must be at least 30 seconds")
+    if args.launch_browser:
+        if args.browser_user_data_dir is None:
+            parser.error("--launch-browser requires --browser-user-data-dir")
+        if not args.browser_cdp_url:
+            args.browser_cdp_url = "http://127.0.0.1:9222"
+        try:
+            launch_chrome_for_cdp(
+                args.chrome_bin, args.browser_user_data_dir, args.browser_cdp_url,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            parser.error(str(exc))
     config = journal_configs[args.journal]
     try:
         candidates = _candidates(args.data_dir, args.journal, args.candidate)

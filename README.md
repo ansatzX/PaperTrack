@@ -318,6 +318,25 @@ python scripts/repair_all_aps_reports.py \
   --snapshot-root .papertrack_official_cache --phase all --issue-interval 120
 ```
 
+For APS sessions protected by a browser challenge, the repair tool can start a
+dedicated visible Chrome profile and attach to it through a loopback-only CDP
+port. The profile is deliberately separate from the user's default Chrome
+profile, which Chrome does not permit for remote debugging:
+
+```bash
+python scripts/repair_all_aps_reports.py \
+  --data-dir /home/ansatz/data/obsidian/1/papertrack_datas \
+  --diagnostics-dir .papertrack_diagnostics \
+  --profile-root .papertrack_browser_profiles \
+  --snapshot-root .papertrack_official_cache \
+  --browser-user-data-dir /home/ansatz/.config/google-chrome-papertrack \
+  --launch-browser --phase issue --candidate 136/23
+```
+
+The first run may require a user to complete the publisher's browser challenge
+in that visible dedicated Chrome window. Later runs reuse that profile; they
+never expose DevTools beyond `127.0.0.1`.
+
 ## CLI Reference
 
 ### arXiv refresh
