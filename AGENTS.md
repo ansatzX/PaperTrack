@@ -70,6 +70,12 @@ Journal reports are issue-based. Formal issue pages define the article set.
   date and remaining DOI targets are explicitly recorded as unresolved. On a
   provider circuit break, stop the phase and leave unvisited work pending;
   never manufacture `circuit_open` results for work that made no request.
+  The established production browser path is an isolated persistent Chrome
+  profile with loopback-only CDP attachment, launched by
+  `run_aps_issue_cache.sh`; do not launch a second browser against that
+  profile or use Chrome's default user-data directory. Cache formal issues
+  first at the 120-second provider floor, then run recent completion, then
+  render. The dedicated profile is durable local runtime state, not source.
 - CrossRef is a fallback source. For publisher-backed issue workflows, CrossRef
   may fill missing abstracts by DOI, but it must not add articles to an
   official issue, remove official articles, or replace official title/author

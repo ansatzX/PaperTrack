@@ -117,6 +117,21 @@ does not run general journal discovery or expand the candidate lists. The
 wrapper waits for all three providers even if one fails and returns nonzero if
 any provider leaves failed or unresolved work.
 
+For APS production repair, use the separate issue-cache runner rather than the
+bounded candidate worker. It starts (or attaches to) an isolated visible Chrome
+profile, uses a 120-second APS request floor, and performs no recent-page or
+Markdown work:
+
+```bash
+./run_aps_issue_cache.sh          # resume all existing PRL reports from 120/1
+./run_aps_issue_cache.sh 127/1    # resume from a later formal issue
+```
+
+When this phase has cached every selected formal issue, run the `recent` and
+then `render` phases through `repair_all_aps_reports.py`. Never run these APS
+phases concurrently: they share one browser profile, one provider floor, and
+one circuit breaker.
+
 The journal wrapper is Linux-specific and requires Linux `/proc` and `prctl`
 child-subreaper support. It also requires `/usr/bin/setsid`, `/usr/bin/python3`,
 and Bash 5.1+ for associative arrays and completion-driven `wait -n -p`. The
@@ -156,9 +171,9 @@ state files record resumable outcomes. These JSON files are runtime state, are
 ignored by Git, and should not be treated as source configuration.
 
 The wrapper exports request intervals of 30 seconds for ACS issue pages, 30
-seconds for AIP issue pages, 10 seconds for AIP abstracts, and 30 seconds for APS
-issue pages. These values match the non-bypassable request floors enforced in
-code; lowering an environment value cannot weaken those floors.
+seconds for AIP issue pages, 10 seconds for AIP abstracts, and 120 seconds for
+APS issue pages. These values match the non-bypassable request floors enforced
+in code; lowering an environment value cannot weaken those floors.
 
 Official publisher issue pages remain authoritative for issue membership and
 publisher metadata. `run_j.sh` exports `PAPERTRACK_CROSSREF_MODE=disabled`; it
