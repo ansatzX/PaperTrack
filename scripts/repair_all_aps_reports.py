@@ -97,6 +97,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--data-dir", required=True, type=Path)
     parser.add_argument("--diagnostics-dir", required=True, type=Path)
     parser.add_argument("--profile-root", required=True, type=Path)
+    parser.add_argument(
+        "--browser-user-data-dir", type=Path,
+        help="existing Chrome user-data directory to reuse; the PaperTrack lock remains under --profile-root",
+    )
+    parser.add_argument(
+        "--browser-cdp-url", default="",
+        help="attach to an existing Chrome DevTools endpoint instead of launching Chrome",
+    )
     parser.add_argument("--snapshot-root", required=True, type=Path)
     parser.add_argument("--journal", default="prl")
     parser.add_argument("--candidate", action="append", default=[], metavar="VOLUME/ISSUE")
@@ -118,7 +126,9 @@ def main(argv: list[str] | None = None) -> int:
     plan.save(state_path)
 
     with ProviderRuntime("aps", args.profile_root, args.snapshot_root,
-                         issue_interval=args.issue_interval) as runtime:
+                         issue_interval=args.issue_interval,
+                         browser_user_data_dir=args.browser_user_data_dir,
+                         browser_cdp_url=args.browser_cdp_url) as runtime:
         if args.phase in {"all", "issue"}:
             cache_issues(plan, config["name"], runtime, state_path)
         if args.phase in {"all", "recent"}:

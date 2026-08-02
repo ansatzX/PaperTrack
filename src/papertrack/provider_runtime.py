@@ -130,6 +130,8 @@ class ProviderRuntime:
         profile_root: str | os.PathLike,
         snapshot_root: str | os.PathLike,
         *,
+        browser_user_data_dir: str | os.PathLike | None = None,
+        browser_cdp_url: str = "",
         playwright_factory: Callable | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
@@ -151,7 +153,17 @@ class ProviderRuntime:
             raise ValueError("max_consecutive_blocks must be positive")
 
         self.provider = provider
+        # ``profile_dir`` is PaperTrack-owned and holds only the exclusive
+        # ownership lock.  An explicitly supplied browser profile may be a
+        # user's normal Chrome data directory and must never be chmod'ed or
+        # used as the lock location.
         self.profile_dir = Path(profile_root) / provider
+        self.browser_user_data_dir = (
+            Path(browser_user_data_dir)
+            if browser_user_data_dir is not None
+            else self.profile_dir
+        )
+        self.browser_cdp_url = browser_cdp_url.rstrip("/")
         self.snapshot_store = OfficialSnapshotStore(snapshot_root)
         self._playwright_factory = playwright_factory or _sync_playwright_factory
         self._clock = clock
@@ -168,6 +180,7 @@ class ProviderRuntime:
         self._playwright_manager = None
         self._playwright = None
         self._context = None
+        self._attached_over_cdp = False
         self._page = None
         self._last_issue_navigation_at: float | None = None
         self._same_origin_request_at: dict[tuple[str, str], float] = {}
@@ -206,12 +219,24 @@ class ProviderRuntime:
                 self._playwright = manager.start()
             else:
                 self._playwright = manager
-            self._context = self._playwright.chromium.launch_persistent_context(
-                user_data_dir=str(self.profile_dir),
-                channel="chrome",
-                headless=False,
-            )
-            self._page = self._context.new_page()
+            if self.browser_cdp_url:
+                browser = self._playwright.chromium.connect_over_cdp(
+                    self.browser_cdp_url
+                )
+                if not browser.contexts:
+                    raise RuntimeError("CDP browser has no usable context")
+                self._context = browser.contexts[0]
+                self._attached_over_cdp = True
+                self._page = next(iter(self._context.pages), None)
+                if self._page is None:
+                    self._page = self._context.new_page()
+            else:
+                self._context = self._playwright.chromium.launch_persistent_context(
+                    user_data_dir=str(self.browser_user_data_dir),
+                    channel="chrome",
+                    headless=False,
+                )
+                self._page = self._context.new_page()
             self._page.on("response", self._capture_response)
         except Exception:
             self.close()
@@ -224,7 +249,7 @@ class ProviderRuntime:
         playwright, self._playwright = self._playwright, None
         self._page = None
         try:
-            if context is not None:
+            if context is not None and not self._attached_over_cdp:
                 context.close()
         finally:
             try:
@@ -233,6 +258,7 @@ class ProviderRuntime:
                 elif playwright is not None and hasattr(playwright, "stop"):
                     playwright.stop()
             finally:
+                self._attached_over_cdp = False
                 self._release_profile()
 
     def fetch_issue(self, request: IssueRequest) -> OfficialBrowserResult:
