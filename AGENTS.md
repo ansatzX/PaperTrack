@@ -45,41 +45,37 @@ after metadata settles".
 
 ### Journals
 
-Journal reports are issue-based. Formal issue pages define the article set.
+Journal reports are issue-based. Formal volume/issue defines the article set.
+Fetching is a three-tier fallback chain; each tier must expose the high-value
+fields the report needs (title, authors, DOI, and the abstract where the source
+provides one). Tiers, in order:
 
-- ACS journals use ACS list-of-issues and issue TOC pages as the primary source.
-- AIP journals use AIP issue pages as the primary source, including the official
-  issue-page abstract endpoint when needed.
-- APS issue pages exclusively establish formal issue membership. If an APS
-  issue page omits abstracts, the official paginated `/{journal}/recent?page=N`
-  pages may fill abstracts only by exact DOI match for existing issue members.
-  Historical APS `summary-container` text is a teaser rather than an abstract
-  and must remain ineligible for report Abstract fields.
-  Recent pages must be locally cached and share the provider request floor and
-  circuit breaker; they must never add articles, infer issue placement, or
-  trigger individual article-page crawling.
-  For APS data repair, keep issue and recent access as separate phases:
-  first cache the formal issue memberships, DOI sets, article counts, and
-  publication-date ranges; only then fetch official recent pages in reverse
-  chronological page order. Join the two views solely by exact normalized DOI.
-  Issue date ranges and cumulative per-issue article counts may estimate which
-  recent pages to prioritize, but are scheduling hints rather than membership
-  evidence. A recent page may fill an abstract only for an already cached issue
-  DOI. Process newest issues first; stop a given issue only after all its DOI
-  targets match, or after the recent stream has passed its earliest publication
-  date and remaining DOI targets are explicitly recorded as unresolved. On a
-  provider circuit break, stop the phase and leave unvisited work pending;
-  never manufacture `circuit_open` results for work that made no request.
-  The established production browser path is an isolated persistent Chrome
-  profile with loopback-only CDP attachment, launched by
-  `run_aps_issue_cache.sh`; do not launch a second browser against that
-  profile or use Chrome's default user-data directory. Cache formal issues
-  first at the 120-second provider floor, then run recent completion, then
-  render. The dedicated profile is durable local runtime state, not source.
-- CrossRef is a fallback source. For publisher-backed issue workflows, CrossRef
-  may fill missing abstracts by DOI, but it must not add articles to an
-  official issue, remove official articles, or replace official title/author
-  metadata.
+1. Official issue page via plain HTTP (no browser automation). ACS list-of-issues
+   and issue TOC pages; AIP issue pages including the official issue-page
+   abstract endpoint; APS issue pages. TLS fingerprinting via curl_cffi is
+   permitted; browser/CDP automation is intentionally never used.
+2. If the official issue page cannot be fetched or yields no articles, use the
+   NCBI PubMed search path. The query must select the formal issue and must
+   request abstracts, e.g.
+   `https://pubmed.ncbi.nlm.nih.gov/?term=<abbrev>[jour] AND <vol>[volume] AND <issue>[issue]&format=abstract&size=200`.
+   Abstracts from the result page must flow into report Abstract fields.
+3. CrossRef is the last resort. It may establish issue membership and supply
+   title/author/abstract only after both official and PubMed paths returned no
+   usable articles for the issue.
+
+Coverage caveat: PubMed and CrossRef are third-party indexes and may be
+incomplete for a given issue (APS titles in particular have partial PubMed
+coverage). Under-reporting a fallback-filled issue is accepted and expected;
+do not fabricate completeness, and do not run expensive completion passes.
+A fallback-filled issue is still recorded as processed, with its source marked
+(`official` / `pubmed` / `crossref`) so a later re-run with a healthy official
+path can repair it. A fallback that returns zero articles is a fetch failure,
+not a successful empty issue.
+
+No browser automation is used anywhere in journal fetching. The earlier APS
+browser/CDP workflow (`run_aps_issue_cache.sh`, browser backends inside
+`provider_runtime`) is retired; runtime caches and browser profiles are local
+artifacts, not part of the fetch path.
 
 If a journal source has strong anti-scraping behavior, prefer explicit retries,
 clear failure visibility, and local preservation of prior valid reports over
@@ -87,9 +83,8 @@ weakening the source boundary.
 
 The economic strategy is to avoid bulk crawling. PaperTrack should prefer one
 official issue-page visit that yields metadata for many articles over visiting
-each article page. When that strategy fails in production, keep detailed failure
-records so developers can improve the issue-level extractor or source adapter
-later, rather than silently falling back to expensive or boundary-weak crawling.
+each article page, and prefer the single PubMed issue query over per-article
+crawling. Keep detailed failure records so extractors can be improved later.
 
 ## State And Migration
 
@@ -117,8 +112,9 @@ src/papertrack/
 ├── acs_fetch.py          # ACS issue TOC scraper
 ├── acs_loi.py            # ACS list-of-issues discovery
 ├── aip_fetch.py          # AIP issue scraper and abstract endpoint
+├── pubmed_fetch.py       # PubMed/NCBI issue search fallback (abstract-exposing)
 ├── crossref_loi.py       # CrossRef issue discovery fallback
-├── journal_fetch.py      # journal source selection and CrossRef fallback
+├── journal_fetch.py      # journal source selection: official -> PubMed -> CrossRef
 ├── journal_entry.py      # JournalEntry dataclass
 ├── zotero_query.py       # Zotero local API and DOI/arXiv URL matching
 ├── codex.py              # TOML config loader
