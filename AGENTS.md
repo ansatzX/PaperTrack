@@ -72,10 +72,14 @@ A fallback-filled issue is still recorded as processed, with its source marked
 path can repair it. A fallback that returns zero articles is a fetch failure,
 not a successful empty issue.
 
-No browser automation is used anywhere in journal fetching. The earlier APS
+No browser automation is used in the live fetch path. The earlier APS
 browser/CDP workflow (`run_aps_issue_cache.sh`, browser backends inside
-`provider_runtime`) is retired; runtime caches and browser profiles are local
-artifacts, not part of the fetch path.
+`provider_runtime`) is retired from journal fetching; runtime caches and
+browser profiles are local artifacts, not part of the fetch path. The only
+remaining consumer of a provider runtime is the offline snapshot-based report
+repair path (`journal_rebuild`), which is a maintenance operation not wired to
+any CLI command and must replay cached local snapshots rather than replace a
+valid prior report with third-party fallback data.
 
 If a journal source has strong anti-scraping behavior, prefer explicit retries,
 clear failure visibility, and local preservation of prior valid reports over

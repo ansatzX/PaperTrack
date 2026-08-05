@@ -146,27 +146,32 @@ name = "Journal of Chemical Theory and Computation"
 issn = "1549-9618"
 slug = "jctc"
 acs_code = "jctcce"
+pubmed_abbrev = "J Chem Theory Comput"
 
 [journals.jcim]
 name = "Journal of Chemical Information and Modeling"
 issn = "1549-9596"
 slug = "jcim"
 acs_code = "jcisd8"
+pubmed_abbrev = "J Chem Inf Model"
 
 [journals.jacs]
 name = "Journal of the American Chemical Society"
 issn = "0002-7863"
 slug = "jacs"
 acs_code = "jacsat"
+pubmed_abbrev = "J Am Chem Soc"
 
 [journals.jcp]
 name = "Journal of Chemical Physics"
 issn = "0021-9606"
 slug = "jcp"
 provider = "aip"
+pubmed_abbrev = "J Chem Phys"
 
 [journals.prl]
 name = "Physical Review Letters"
 issn = "0031-9007"
 slug = "prl"
 provider = "aps"
+pubmed_abbrev = "Phys Rev Lett"

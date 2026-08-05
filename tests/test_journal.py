@@ -683,7 +683,108 @@ def test_official_only_provider_does_not_request_crossref_abstracts(monkeypatch)
     assert entries[official_entry.doi].abstract == ""
 
 
-def test_official_provider_does_not_use_crossref_for_issue_membership(monkeypatch):
+def test_official_failure_falls_back_to_pubmed(monkeypatch):
+    from papertrack import aip_fetch, journal_fetch
+    from papertrack.adapter_result import AdapterResult, SUCCESS
+    from papertrack.journal_entry import JournalEntry
+
+    pubmed_entry = JournalEntry(
+        doi="10.1111/pubmed",
+        title="PubMed article",
+        authors=[],
+        abstract="PubMed abstract",
+    )
+    monkeypatch.setattr(
+        aip_fetch,
+        "query_aip_issue_result",
+        lambda *args, **kwargs: AdapterResult(
+            entries={},
+            outcome="official_empty_suspicious",
+            provider="aip",
+            source="journal",
+        ),
+    )
+    monkeypatch.setattr(
+        journal_fetch,
+        "_pubmed_issue_result",
+        lambda journal_slug, journal_name, volume, issue: AdapterResult(
+            entries={"10.1111/pubmed": pubmed_entry},
+            outcome=SUCCESS,
+            provider="pubmed",
+            source="journal",
+            source_role="third_party_issue",
+        ),
+    )
+
+    result = journal_fetch.query_journal_issue_full_result(
+        "0021-9606",
+        "163",
+        "24",
+        "The Journal of Chemical Physics",
+        2025,
+        provider="aip",
+        journal_slug="jcp",
+    )
+
+    assert result.provider == "pubmed"
+    assert result.entries == {"10.1111/pubmed": pubmed_entry}
+    assert result.metadata["source"] == "pubmed"
+
+
+def test_official_failure_falls_back_to_crossref_last(monkeypatch):
+    from papertrack import aip_fetch, journal_fetch
+    from papertrack.adapter_result import AdapterResult
+    from papertrack.journal_entry import JournalEntry
+
+    crossref_entry = JournalEntry(
+        doi="10.2222/crossref",
+        title="CrossRef article",
+        authors=[],
+        abstract="CrossRef abstract",
+    )
+    monkeypatch.setattr(
+        aip_fetch,
+        "query_aip_issue_result",
+        lambda *args, **kwargs: AdapterResult(
+            entries={},
+            outcome="official_empty_suspicious",
+            provider="aip",
+            source="journal",
+        ),
+    )
+    monkeypatch.setattr(
+        journal_fetch,
+        "_pubmed_issue_result",
+        lambda journal_slug, journal_name, volume, issue: AdapterResult(
+            entries={},
+            outcome="fetch_failed",
+            provider="pubmed",
+            source="journal",
+            source_role="third_party_issue",
+        ),
+    )
+    monkeypatch.setattr(
+        journal_fetch,
+        "_crossref_issue_result",
+        lambda *args, **kwargs: {"10.2222/crossref": crossref_entry},
+    )
+
+    result = journal_fetch.query_journal_issue_full_result(
+        "0021-9606",
+        "163",
+        "24",
+        "The Journal of Chemical Physics",
+        2025,
+        provider="aip",
+        journal_slug="jcp",
+    )
+
+    assert result.provider == "crossref"
+    assert result.entries == {"10.2222/crossref": crossref_entry}
+    assert result.metadata["source"] == "crossref"
+
+
+def test_all_fallbacks_empty_preserves_official_failure(monkeypatch):
     from papertrack import aip_fetch, journal_fetch
     from papertrack.adapter_result import AdapterResult, OFFICIAL_EMPTY_SUSPICIOUS
 
@@ -697,11 +798,18 @@ def test_official_provider_does_not_use_crossref_for_issue_membership(monkeypatc
             source="journal",
         ),
     )
-
-    def fake_crossref_issue(*args, **kwargs):
-        raise AssertionError("CrossRef must not define official issue membership")
-
-    monkeypatch.setattr(journal_fetch, "_fetch_year", fake_crossref_issue)
+    monkeypatch.setattr(
+        journal_fetch,
+        "_pubmed_issue_result",
+        lambda journal_slug, journal_name, volume, issue: AdapterResult(
+            entries={},
+            outcome="fetch_failed",
+            provider="pubmed",
+            source="journal",
+            source_role="third_party_issue",
+        ),
+    )
+    monkeypatch.setattr(journal_fetch, "_crossref_issue_result", lambda *args, **kwargs: {})
 
     result = journal_fetch.query_journal_issue_full_result(
         "0021-9606",
@@ -777,6 +885,8 @@ def test_authoritative_dispatch_passes_identical_provider_runtime(
     )
 
     assert result.ok
+    # The runtime is passed through unchanged: the live CLI path passes None
+    # (plain HTTP), while the snapshot-based rebuild path supplies its own.
     assert seen == [runtime]
 
 
@@ -828,6 +938,23 @@ def test_official_exception_records_complete_failure_context(
         "record_fetch_attempt",
         lambda event, html=None: events.append(event),
     )
+    # Official adapter raised; per the current policy the failure still falls
+    # back to PubMed then CrossRef.  In this unit test both fallbacks are empty,
+    # so the authoritative failure result is preserved untouched.
+    from papertrack.adapter_result import AdapterResult
+
+    monkeypatch.setattr(
+        journal_fetch,
+        "_pubmed_issue_result",
+        lambda journal_slug, journal_name, volume, issue: AdapterResult(
+            entries={},
+            outcome="fetch_failed",
+            provider="pubmed",
+            source="journal",
+            source_role="third_party_issue",
+        ),
+    )
+    monkeypatch.setattr(journal_fetch, "_crossref_issue_result", lambda *args, **kwargs: {})
 
     result = journal_fetch.query_journal_issue_full_result(
         "1234-5678",
@@ -880,6 +1007,9 @@ def test_no_adapter_failure_uses_explicit_unconfigured_issue_url(
         "record_fetch_attempt",
         lambda event, html=None: events.append(event),
     )
+    # The no-adapter path still runs the fallback chain; keep CrossRef mocked
+    # so this unit test never touches the network.
+    monkeypatch.setattr(journal_fetch, "_crossref_issue_result", lambda *args, **kwargs: {})
 
     result = journal_fetch.query_journal_issue_full_result(
         "1234-5678",

@@ -6,7 +6,7 @@ from urllib.parse import urlencode
 from urllib.parse import quote
 import json
 
-from .adapter_result import AdapterResult, FETCH_FAILED
+from .adapter_result import AdapterResult, FETCH_FAILED, SUCCESS
 from .diagnostics import record_fetch_attempt
 from .journal_entry import JournalEntry
 from .source_policy import SourcePolicy
@@ -219,6 +219,115 @@ def _official_fetch_failed(
     )
 
 
+def _pubmed_abbrev(journal_slug: str) -> str:
+    """Return the PubMed journal abbreviation for a journal slug."""
+    if not journal_slug:
+        return ""
+    try:
+        from . import codex
+        for cfg in codex.get_journals().values():
+            if cfg.get("slug") == journal_slug:
+                return str(cfg.get("pubmed_abbrev", "") or "")
+    except Exception:
+        logger.exception("failed to look up PubMed abbreviation for %s", journal_slug)
+    return ""
+
+
+def _pubmed_issue_result(journal_slug: str, journal_name: str, volume: str, issue: str,
+                         ) -> AdapterResult[dict[str, JournalEntry]]:
+    """Query the PubMed issue search path for a volume/issue."""
+    abbrev = _pubmed_abbrev(journal_slug)
+    if not abbrev:
+        return AdapterResult(
+            entries={},
+            outcome=FETCH_FAILED,
+            provider="pubmed",
+            source="journal",
+            source_role="third_party_issue",
+            message="pubmed: no abbreviation configured",
+        )
+    try:
+        from .pubmed_fetch import query_pubmed_issue_result
+        return query_pubmed_issue_result(abbrev, volume, issue, journal_name)
+    except Exception as exc:
+        logger.exception("PubMed fallback failed for %s %s/%s", journal_slug, volume, issue)
+        return AdapterResult(
+            entries={},
+            outcome=FETCH_FAILED,
+            provider="pubmed",
+            source="journal",
+            source_role="third_party_issue",
+            message=f"pubmed: {type(exc).__name__}: {exc}",
+        )
+
+
+def _crossref_issue_result(issn: str, volume: str, issue: str,
+                           journal_name: str = "", year: int | None = None,
+                           ) -> dict[str, JournalEntry]:
+    """Last-resort CrossRef membership: articles matching volume/issue for a year."""
+    if not issn:
+        return {}
+    if year is None:
+        year = time.localtime().tm_year
+    try:
+        articles = _fetch_year(issn, year)
+    except Exception:
+        logger.exception("CrossRef fallback fetch failed for %s %s/%s", issn, volume, issue)
+        return {}
+    entries: dict[str, JournalEntry] = {}
+    for item in articles:
+        if str(item.get("volume", "")) == str(volume) and str(item.get("issue", "")) == str(issue):
+            entry = JournalEntry.from_crossref(item, journal_name)
+            if entry.doi:
+                entries[entry.doi] = entry
+    return entries
+
+
+def _issue_fallback(official: AdapterResult[dict[str, JournalEntry]], *,
+                    provider: str, journal_slug: str, journal_name: str,
+                    issn: str, volume: str, issue: str, year: int | None,
+                    run_fallback: bool,
+                    ) -> AdapterResult[dict[str, JournalEntry]]:
+    """Apply the PubMed -> CrossRef fallback chain after an official failure.
+
+    The chain applies to the live HTTP path only (``run_fallback`` true, i.e.
+    no caller-supplied provider_runtime).  The snapshot-based rebuild path
+    leaves the official failure untouched so it can preserve prior valid
+    reports instead of pulling third-party fallback data.
+    """
+    if official.entries or not run_fallback:
+        return official
+    pubmed = _pubmed_issue_result(journal_slug, journal_name, volume, issue)
+    if pubmed.entries:
+        pubmed.metadata["source"] = "pubmed"
+        pubmed.metadata["fallback_for"] = provider
+        return pubmed
+    crossref_entries = _crossref_issue_result(issn, volume, issue, journal_name, year)
+    if crossref_entries:
+        record_fetch_attempt({
+            "source_role": "third_party_issue",
+            "source": "journal",
+            "provider": "crossref",
+            "journal": journal_slug or journal_name,
+            "volume": volume,
+            "issue": issue,
+            "stage": "issue_membership_fallback",
+            "outcome": SUCCESS,
+            "articles": len(crossref_entries),
+            "fallback_used": ["crossref_issue"],
+        })
+        return AdapterResult(
+            entries=crossref_entries,
+            outcome=SUCCESS,
+            provider="crossref",
+            source="journal",
+            source_role="third_party_issue",
+            message=f"crossref: {len(crossref_entries)} articles for issue",
+            metadata={"source": "crossref", "fallback_for": provider},
+        )
+    return official
+
+
 def query_journal_issue_full_result(issn: str, volume: str, issue: str,
                                     journal_name: str = "", year: int | None = None,
                                     acs_code: str = "", provider: str = "",
@@ -228,9 +337,11 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
                                     ) -> AdapterResult[dict[str, JournalEntry]]:
     """Fetch articles for a journal volume/issue.
 
-    Official journal providers define issue membership and metadata. CrossRef
-    helpers remain available to legacy callers but are not part of authoritative
-    issue dispatch.
+    Source chain (see AGENTS.md): official issue page first, then the PubMed
+    issue search, then CrossRef as last resort.  A caller-supplied
+    provider_runtime is passed through (used by the snapshot-based rebuild
+    path); the live CLI path passes none and runs official adapters over plain
+    HTTP.
     """
     if acs_code:
         try:
@@ -244,23 +355,38 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
             )
             if official.entries:
                 return official
-            logger.warning("ACS scraping returned %s; not using CrossRef for issue membership", official.outcome)
-            return official
+            logger.warning("ACS scraping returned %s; falling back to PubMed/CrossRef", official.outcome)
+            return _issue_fallback(
+                official,
+                provider="acs", journal_slug=journal_slug, journal_name=journal_name,
+                issn=issn, volume=volume, issue=issue, year=year,
+                run_fallback=provider_runtime is None,
+            )
         except ImportError:
-            logger.warning("ACS scraper unavailable; not using CrossRef for issue membership")
-            return _official_fetch_failed(
-                "acs", journal_slug or journal_name or issn, "ACS scraper unavailable",
-                volume=volume, issue=issue,
-                url=_official_issue_url("acs", acs_code, volume, issue),
-                issn=issn, journal_name=journal_name,
+            logger.warning("ACS scraper unavailable; falling back to PubMed/CrossRef")
+            return _issue_fallback(
+                _official_fetch_failed(
+                    "acs", journal_slug or journal_name or issn, "ACS scraper unavailable",
+                    volume=volume, issue=issue,
+                    url=_official_issue_url("acs", acs_code, volume, issue),
+                    issn=issn, journal_name=journal_name,
+                ),
+                provider="acs", journal_slug=journal_slug, journal_name=journal_name,
+                issn=issn, volume=volume, issue=issue, year=year,
+                run_fallback=provider_runtime is None,
             )
         except Exception as exc:
-            logger.exception("ACS scraping failed; not using CrossRef for issue membership")
-            return _official_fetch_failed(
-                "acs", journal_slug or journal_name or issn, str(exc),
-                volume=volume, issue=issue,
-                url=_official_issue_url("acs", acs_code, volume, issue),
-                issn=issn, journal_name=journal_name, exception=exc,
+            logger.exception("ACS scraping failed; falling back to PubMed/CrossRef")
+            return _issue_fallback(
+                _official_fetch_failed(
+                    "acs", journal_slug or journal_name or issn, str(exc),
+                    volume=volume, issue=issue,
+                    url=_official_issue_url("acs", acs_code, volume, issue),
+                    issn=issn, journal_name=journal_name, exception=exc,
+                ),
+                provider="acs", journal_slug=journal_slug, journal_name=journal_name,
+                issn=issn, volume=volume, issue=issue, year=year,
+                run_fallback=provider_runtime is None,
             )
 
     if provider == "aip" and journal_slug:
@@ -275,23 +401,38 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
             )
             if official.entries:
                 return official
-            logger.warning("AIP scraping returned %s; not using CrossRef for issue membership", official.outcome)
-            return official
+            logger.warning("AIP scraping returned %s; falling back to PubMed/CrossRef", official.outcome)
+            return _issue_fallback(
+                official,
+                provider="aip", journal_slug=journal_slug, journal_name=journal_name,
+                issn=issn, volume=volume, issue=issue, year=year,
+                run_fallback=provider_runtime is None,
+            )
         except ImportError:
-            logger.warning("AIP scraper unavailable; not using CrossRef for issue membership")
-            return _official_fetch_failed(
-                "aip", journal_slug or journal_name or issn, "AIP scraper unavailable",
-                volume=volume, issue=issue,
-                url=_official_issue_url("aip", journal_slug, volume, issue),
-                issn=issn, journal_name=journal_name,
+            logger.warning("AIP scraper unavailable; falling back to PubMed/CrossRef")
+            return _issue_fallback(
+                _official_fetch_failed(
+                    "aip", journal_slug or journal_name or issn, "AIP scraper unavailable",
+                    volume=volume, issue=issue,
+                    url=_official_issue_url("aip", journal_slug, volume, issue),
+                    issn=issn, journal_name=journal_name,
+                ),
+                provider="aip", journal_slug=journal_slug, journal_name=journal_name,
+                issn=issn, volume=volume, issue=issue, year=year,
+                run_fallback=provider_runtime is None,
             )
         except Exception as exc:
-            logger.exception("AIP scraping failed; not using CrossRef for issue membership")
-            return _official_fetch_failed(
-                "aip", journal_slug or journal_name or issn, str(exc),
-                volume=volume, issue=issue,
-                url=_official_issue_url("aip", journal_slug, volume, issue),
-                issn=issn, journal_name=journal_name, exception=exc,
+            logger.exception("AIP scraping failed; falling back to PubMed/CrossRef")
+            return _issue_fallback(
+                _official_fetch_failed(
+                    "aip", journal_slug or journal_name or issn, str(exc),
+                    volume=volume, issue=issue,
+                    url=_official_issue_url("aip", journal_slug, volume, issue),
+                    issn=issn, journal_name=journal_name, exception=exc,
+                ),
+                provider="aip", journal_slug=journal_slug, journal_name=journal_name,
+                issn=issn, volume=volume, issue=issue, year=year,
+                run_fallback=provider_runtime is None,
             )
 
     if provider == "aps" and journal_slug:
@@ -306,26 +447,41 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
             )
             if official.entries:
                 return official
-            logger.warning("APS scraping returned %s; not using CrossRef for issue membership", official.outcome)
-            return official
+            logger.warning("APS scraping returned %s; falling back to PubMed/CrossRef", official.outcome)
+            return _issue_fallback(
+                official,
+                provider="aps", journal_slug=journal_slug, journal_name=journal_name,
+                issn=issn, volume=volume, issue=issue, year=year,
+                run_fallback=provider_runtime is None,
+            )
         except ImportError:
-            logger.warning("APS scraper unavailable; not using CrossRef for issue membership")
-            return _official_fetch_failed(
-                "aps", journal_slug or journal_name or issn, "APS scraper unavailable",
-                volume=volume, issue=issue,
-                url=_official_issue_url("aps", journal_slug, volume, issue),
-                issn=issn, journal_name=journal_name,
+            logger.warning("APS scraper unavailable; falling back to PubMed/CrossRef")
+            return _issue_fallback(
+                _official_fetch_failed(
+                    "aps", journal_slug or journal_name or issn, "APS scraper unavailable",
+                    volume=volume, issue=issue,
+                    url=_official_issue_url("aps", journal_slug, volume, issue),
+                    issn=issn, journal_name=journal_name,
+                ),
+                provider="aps", journal_slug=journal_slug, journal_name=journal_name,
+                issn=issn, volume=volume, issue=issue, year=year,
+                run_fallback=provider_runtime is None,
             )
         except Exception as exc:
-            logger.exception("APS scraping failed; not using CrossRef for issue membership")
-            return _official_fetch_failed(
-                "aps", journal_slug or journal_name or issn, str(exc),
-                volume=volume, issue=issue,
-                url=_official_issue_url("aps", journal_slug, volume, issue),
-                issn=issn, journal_name=journal_name, exception=exc,
+            logger.exception("APS scraping failed; falling back to PubMed/CrossRef")
+            return _issue_fallback(
+                _official_fetch_failed(
+                    "aps", journal_slug or journal_name or issn, str(exc),
+                    volume=volume, issue=issue,
+                    url=_official_issue_url("aps", journal_slug, volume, issue),
+                    issn=issn, journal_name=journal_name, exception=exc,
+                ),
+                provider="aps", journal_slug=journal_slug, journal_name=journal_name,
+                issn=issn, volume=volume, issue=issue, year=year,
+                run_fallback=provider_runtime is None,
             )
 
-    return _official_fetch_failed(
+    no_adapter = _official_fetch_failed(
         provider or "journal",
         journal_slug or journal_name or issn,
         "no authoritative issue adapter configured",
@@ -340,6 +496,12 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
         ),
         issn=issn,
         journal_name=journal_name,
+    )
+    return _issue_fallback(
+        no_adapter,
+        provider=provider or "journal", journal_slug=journal_slug, journal_name=journal_name,
+        issn=issn, volume=volume, issue=issue, year=year,
+        run_fallback=provider_runtime is None,
     )
 
 
