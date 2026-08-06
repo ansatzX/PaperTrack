@@ -544,6 +544,25 @@ def _existing_collected_dois(content: str) -> set[str]:
     return set(_ENTRY_HEADING.findall(section.group(1)))
 
 
+_PRL_DOI_PREFIX = "10.1103/physrevlett."
+
+
+def _is_malformed_prl_doi(doi: str) -> bool:
+    """True for PRL DOIs missing the canonical volume/article structure.
+
+    Canonical PRL DOIs are ``10.1103/PhysRevLett.<vol>.<article>`` (any casing;
+    PubMed exposes lowercase) or, from 2025 onward, random codes such as
+    ``10.1103/l8fc-dp36``.  Truncated old-format DOIs such as
+    ``10.1103/physrevlett.129.27`` (missing the 6-digit article number) are
+    malformed and must not reach the ledger.
+    """
+    return doi.lower().startswith(_PRL_DOI_PREFIX) and not re.match(
+        r"^10\.1103/physrevlett\.\d{1,3}\.\d{6}$",
+        doi,
+        re.IGNORECASE,
+    )
+
+
 def _targeted_defect_remains(content: str, reason: str) -> bool:
     entries = _generated_entries(content)
     if reason in _INFORMATIONAL_REASONS:
@@ -553,7 +572,7 @@ def _targeted_defect_remains(content: str, reason: str) -> bool:
     if reason == "raw_mathml":
         return any(_contains_raw_mathml(entry.generated_metadata) for entry in entries)
     if reason == "lowercase_crossref_doi":
-        return any(entry.doi.startswith("10.1103/physrevlett.") for entry in entries)
+        return any(_is_malformed_prl_doi(entry.doi) for entry in entries)
     if reason == "whole_issue_missing_abstracts":
         return not entries or all(not entry.abstract for entry in entries)
     if reason == "ordinary_article_missing_abstract":

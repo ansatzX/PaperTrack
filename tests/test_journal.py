@@ -220,7 +220,7 @@ def test_filter_journal_auto_uses_aps_issue_discovery(monkeypatch, tmp_path):
 
     monkeypatch.setattr(report, "_load_state", lambda md_folder: state)
     monkeypatch.setattr(report, "_save_state", lambda md_folder, new_state: state.update(new_state))
-    monkeypatch.setattr(aps_loi, "discover_issues_aps", lambda journal_slug, from_year=0: [(2026, 136, 1)])
+    monkeypatch.setattr(aps_loi, "discover_issues_aps", lambda journal_slug, from_year=0, max_volumes=None: [(2026, 136, 1)])
     monkeypatch.setattr(
         report,
         "filter_journal_to_md",

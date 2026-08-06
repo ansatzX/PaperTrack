@@ -352,6 +352,127 @@ Title:  Test article
                 source_policy=SourcePolicy.official_only(),
             )
 
+    def test_acs_auto_falls_back_to_crossref_when_loi_fails(self, tmp_path, monkeypatch):
+        from papertrack import acs_loi, crossref_loi, report
+
+        state = {}
+        processed = []
+        monkeypatch.setattr(report, "_load_state", lambda md_folder: state)
+        monkeypatch.setattr(
+            report, "_save_state",
+            lambda md_folder, new_state: state.update(new_state),
+        )
+        monkeypatch.setattr(
+            acs_loi,
+            "discover_issues",
+            lambda acs_code, from_year=0: (_ for _ in ()).throw(
+                RuntimeError("ACS LOI blocked")
+            ),
+        )
+        monkeypatch.setattr(
+            crossref_loi,
+            "discover_issues_crossref",
+            lambda issn, from_year=0: [(2026, 22, 14), (2026, 22, 13)],
+        )
+        monkeypatch.setattr(
+            report,
+            "filter_journal_to_md",
+            lambda **kwargs: processed.append((kwargs["volume"], kwargs["issue"])) or True,
+        )
+
+        filter_journal_auto(
+            journal_name="Journal of Chemical Theory and Computation",
+            journal_slug="jctc",
+            issn="1549-9618",
+            acs_code="jctcce",
+            md_folder=str(tmp_path),
+            provider="acs",
+            backfill=True,
+            source_policy=SourcePolicy.official_only(),
+        )
+
+        # backfill re-sorts newest-first discovery into oldest-first processing.
+        assert processed == [("22", "13"), ("22", "14")]
+        assert state["jctc"]["processed"] == [[22, 13], [22, 14]]
+
+    def test_acs_latest_falls_back_to_crossref_when_latest_fails(self, tmp_path, monkeypatch):
+        from papertrack import acs_loi, crossref_loi, report
+
+        processed = []
+        monkeypatch.setattr(report, "_load_state", lambda md_folder: {})
+        monkeypatch.setattr(report, "_save_state", lambda md_folder, new_state: None)
+        monkeypatch.setattr(
+            acs_loi,
+            "get_latest_issue",
+            lambda acs_code: (_ for _ in ()).throw(RuntimeError("ACS LOI blocked")),
+        )
+        monkeypatch.setattr(
+            crossref_loi,
+            "discover_issues_crossref",
+            lambda issn, from_year=0: [(2026, 22, 14), (2026, 22, 13)],
+        )
+        monkeypatch.setattr(
+            report,
+            "filter_journal_to_md",
+            lambda **kwargs: processed.append((kwargs["volume"], kwargs["issue"])) or True,
+        )
+
+        filter_journal_auto(
+            journal_name="Journal of Chemical Theory and Computation",
+            journal_slug="jctc",
+            issn="1549-9618",
+            acs_code="jctcce",
+            md_folder=str(tmp_path),
+            provider="acs",
+            backfill=False,
+            source_policy=SourcePolicy.official_only(),
+        )
+
+        # latest mode processes only the newest CrossRef-discovered issue.
+        assert processed == [("22", "14")]
+
+    def test_aps_auto_falls_back_to_crossref_when_issue_pages_fail(self, tmp_path, monkeypatch):
+        from papertrack import aps_loi, crossref_loi, report
+
+        state = {}
+        processed = []
+        monkeypatch.setattr(report, "_load_state", lambda md_folder: state)
+        monkeypatch.setattr(
+            report, "_save_state",
+            lambda md_folder, new_state: state.update(new_state),
+        )
+        monkeypatch.setattr(
+            aps_loi,
+            "discover_issues_aps",
+            lambda journal_slug, from_year=0: (_ for _ in ()).throw(
+                RuntimeError("APS issue pages blocked")
+            ),
+        )
+        monkeypatch.setattr(
+            crossref_loi,
+            "discover_issues_crossref",
+            lambda issn, from_year=0: [(2026, 137, 1), (2026, 136, 24)],
+        )
+        monkeypatch.setattr(
+            report,
+            "filter_journal_to_md",
+            lambda **kwargs: processed.append((kwargs["volume"], kwargs["issue"])) or True,
+        )
+
+        filter_journal_auto(
+            journal_name="Physical Review Letters",
+            journal_slug="prl",
+            issn="0031-9007",
+            acs_code="",
+            md_folder=str(tmp_path),
+            provider="aps",
+            backfill=True,
+            source_policy=SourcePolicy.official_only(),
+        )
+
+        assert processed == [("136", "24"), ("137", "1")]
+        assert state["prl"]["processed"] == [[136, 24], [137, 1]]
+
 
 class TestJournalRendering:
     def test_journal_rendering_uses_schema_and_omits_toc_image(self):

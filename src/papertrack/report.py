@@ -619,6 +619,108 @@ def _save_state(md_folder: str, state: dict):
 
 # ── Auto-discover journal pipeline ──────────────────────────────────────
 
+
+def _process_auto_triples(
+    triples,
+    *,
+    backfill,
+    rebuilt_keys,
+    processed,
+    journal_name,
+    journal_slug,
+    issn,
+    acs_code,
+    md_folder,
+    zotero,
+    provider,
+    policy,
+) -> int:
+    """Process (year|None, volume, issue) discovery triples into reports.
+
+    Newest-first input is re-sorted oldest-first for backfill, or truncated to
+    the newest issue for latest mode.  Returns the number of newly written
+    reports.
+    """
+    triples = list(triples)
+    if backfill:
+        triples.reverse()  # oldest-first for backfill
+    else:
+        triples = triples[:1]  # latest only
+    new_count = 0
+    for yr, vol, iss in triples:
+        key = (int(vol), int(iss))
+        if key in rebuilt_keys:
+            continue
+        if key in processed and not _is_missing_or_corrupt_journal_report(
+            md_folder, journal_slug, str(vol), str(iss)
+        ):
+            continue
+        logger.info("New issue: %s Vol %d Iss %d (year %s)", journal_name, vol, iss, yr)
+        try:
+            written = filter_journal_to_md(
+                journal_name=journal_name,
+                journal_slug=journal_slug,
+                volume=str(vol),
+                issue=str(iss),
+                issn=issn,
+                md_folder=md_folder,
+                zotero=zotero,
+                acs_code=acs_code,
+                year=yr,
+                provider=provider,
+                source_policy=policy,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to process %s Vol %d Iss %d; leaving it unprocessed for a later run",
+                journal_name,
+                vol,
+                iss,
+            )
+            continue
+        if written:
+            processed.add(key)
+            new_count += 1
+        if not backfill:
+            break
+    return new_count
+
+
+def _discover_with_crossref_fallback(
+    primary,
+    *,
+    journal_name,
+    issn,
+    from_year,
+    backfill,
+):
+    """Run the official discovery callable, falling back to CrossRef on failure.
+
+    Returns a newest-first list of (year, volume, issue) triples, or None when
+    no issues could be discovered at all.
+    """
+    try:
+        triples = primary()
+        if not triples:
+            raise RuntimeError("official discovery returned no issues")
+        return triples
+    except Exception as exc:
+        logger.warning(
+            "%s official issue discovery failed (%s); falling back to CrossRef",
+            journal_name,
+            exc,
+        )
+        from .crossref_loi import discover_issues_crossref
+
+        triples = discover_issues_crossref(
+            issn, from_year=from_year if backfill else 0
+        )
+        if not triples:
+            logger.warning("No issues discovered for %s via CrossRef", journal_name)
+            return None
+        return triples
+
+
 def filter_journal_auto(journal_name: str, journal_slug: str,
                         issn: str, acs_code: str,
                         md_folder: str, zotero: ZoteroQuery | None = None,
@@ -627,9 +729,10 @@ def filter_journal_auto(journal_name: str, journal_slug: str,
                         source_policy: SourcePolicy | None = None):
     """Auto-discover new issues for a journal and process them.
 
-    For ACS journals (provider="acs"), scrapes the ACS LOI page.
-    For APS journals (provider="aps"), discovers issues via APS issue pages.
-    For AIP/other journals, discovers issues via CrossRef API.
+    Official discovery runs first (ACS LOI pages, APS issue pages, CrossRef
+    for AIP); when official discovery fails, issue discovery falls back to
+    CrossRef.  Article extraction itself follows the AGENTS.md source chain
+    (official issue page -> PubMed -> CrossRef).
 
     State is persisted in .papertrack_state.json in the current working directory.
     Repeated runs only pick up newly published issues.
@@ -662,88 +765,57 @@ def filter_journal_auto(journal_name: str, journal_slug: str,
             new_count += 1
 
     if acs_code:
-        # ── ACS path: scrape LOI page ──
+        # ── ACS path: LOI page, falling back to CrossRef discovery ──
         from .acs_loi import discover_issues, get_latest_issue
 
         if backfill:
-            issues = discover_issues(acs_code, from_year=from_year)
-            if not issues:
-                logger.warning("No issues discovered for %s", journal_name)
-                return
-            issues.reverse()  # oldest-first for backfill
-        else:
-            latest = get_latest_issue(acs_code)
-            if latest is None:
-                logger.warning("Could not determine latest issue for %s", journal_name)
-                return
-            issues = [latest]
-
-        for vol, iss, url in issues:
-            key = (int(vol), int(iss))
-            if key in rebuilt_keys:
-                continue
-            if key in processed and not _is_missing_or_corrupt_journal_report(
-                md_folder, journal_slug, str(vol), str(iss)
-            ):
-                continue
-            logger.info("New issue: %s Vol %d Iss %d", journal_name, vol, iss)
-            written = filter_journal_to_md(
-                journal_name=journal_name,
-                journal_slug=journal_slug,
-                volume=str(vol),
-                issue=str(iss),
-                issn=issn,
-                md_folder=md_folder,
-                zotero=zotero,
-                acs_code=acs_code,
-                provider=provider,
-                source_policy=policy,
+            triples = _discover_with_crossref_fallback(
+                lambda: discover_issues(acs_code, from_year=from_year),
+                journal_name=journal_name, issn=issn,
+                from_year=from_year, backfill=backfill,
             )
-            if written:
-                processed.add(key)
-                new_count += 1
-            if not backfill:
-                break
+        else:
+            def _latest():
+                latest = get_latest_issue(acs_code)
+                return [(None, int(latest[0]), int(latest[1]))] if latest else []
+
+            triples = _discover_with_crossref_fallback(
+                _latest,
+                journal_name=journal_name, issn=issn,
+                from_year=from_year, backfill=backfill,
+            )
+        if triples is None:
+            return
+        new_count += _process_auto_triples(
+            triples,
+            backfill=backfill, rebuilt_keys=rebuilt_keys, processed=processed,
+            journal_name=journal_name, journal_slug=journal_slug, issn=issn,
+            acs_code=acs_code, md_folder=md_folder, zotero=zotero,
+            provider=provider, policy=policy,
+        )
 
     elif provider == "aps":
+        # ── APS path: official issue pages, falling back to CrossRef ──
         from .aps_loi import discover_issues_aps
 
-        triples = discover_issues_aps(journal_slug, from_year=from_year if backfill else 0)
-        if not triples:
-            logger.warning("No issues discovered for %s via APS", journal_name)
+        triples = _discover_with_crossref_fallback(
+            lambda: discover_issues_aps(
+                journal_slug,
+                from_year=from_year if backfill else 0,
+                max_volumes=5,
+            ),
+            journal_name=journal_name, issn=issn,
+            from_year=from_year, backfill=backfill,
+        )
+        if triples is None:
             return
-
-        if backfill:
-            triples.reverse()
-        else:
-            triples = triples[:1]
-
-        for yr, vol, iss in triples:
-            key = (int(vol), int(iss))
-            if key in rebuilt_keys:
-                continue
-            if key in processed and not _is_missing_or_corrupt_journal_report(
-                md_folder, journal_slug, str(vol), str(iss)
-            ):
-                continue
-            logger.info("New APS issue: %s Vol %d Iss %d (year %d)", journal_name, vol, iss, yr)
-            written = filter_journal_to_md(
-                journal_name=journal_name,
-                journal_slug=journal_slug,
-                volume=str(vol),
-                issue=str(iss),
-                issn=issn,
-                md_folder=md_folder,
-                zotero=zotero,
-                year=yr,
-                provider=provider,
-                source_policy=policy,
-            )
-            if written:
-                processed.add(key)
-                new_count += 1
-            if not backfill:
-                break
+        new_count += _process_auto_triples(
+            triples,
+            backfill=backfill, rebuilt_keys=rebuilt_keys, processed=processed,
+            journal_name=journal_name, journal_slug=journal_slug, issn=issn,
+            acs_code=acs_code, md_folder=md_folder, zotero=zotero,
+            provider=provider, policy=policy,
+        )
 
     else:
         # ── CrossRef/AIP path: discover via CrossRef API ──
@@ -758,39 +830,13 @@ def filter_journal_auto(journal_name: str, journal_slug: str,
         if not triples:
             logger.warning("No issues discovered for %s via CrossRef", journal_name)
             return
-
-        if backfill:
-            triples.reverse()  # oldest-first for backfill
-        else:
-            triples = triples[:1]  # latest only
-
-        for yr, vol, iss in triples:
-            key = (int(vol), int(iss))
-            if key in rebuilt_keys:
-                continue
-            if key in processed and not _is_missing_or_corrupt_journal_report(
-                md_folder, journal_slug, str(vol), str(iss)
-            ):
-                continue
-            logger.info("New issue: %s Vol %d Iss %d (year %d)", journal_name, vol, iss, yr)
-            written = filter_journal_to_md(
-                journal_name=journal_name,
-                journal_slug=journal_slug,
-                volume=str(vol),
-                issue=str(iss),
-                issn=issn,
-                md_folder=md_folder,
-                zotero=zotero,
-                acs_code=acs_code,
-                year=yr,
-                provider=provider,
-                source_policy=policy,
-            )
-            if written:
-                processed.add(key)
-                new_count += 1
-            if not backfill:
-                break
+        new_count += _process_auto_triples(
+            triples,
+            backfill=backfill, rebuilt_keys=rebuilt_keys, processed=processed,
+            journal_name=journal_name, journal_slug=journal_slug, issn=issn,
+            acs_code=acs_code, md_folder=md_folder, zotero=zotero,
+            provider=provider, policy=policy,
+        )
 
     journal_state["processed"] = [[v, i] for v, i in sorted(processed)]
     state[journal_slug] = journal_state

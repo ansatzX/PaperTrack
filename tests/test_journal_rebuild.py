@@ -1377,7 +1377,7 @@ def test_success_is_assessed_only_against_generated_entry_fields(tmp_path, monke
         ],
         (
             "lowercase_crossref_doi",
-            (("10.1103/physrevlett.127.000001", "Ordinary article", "Abstract"),),
+            (("10.1103/physrevlett.127.27", "Ordinary article", "Abstract"),),
         ),
         (
             "whole_issue_missing_abstracts",

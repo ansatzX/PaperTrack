@@ -69,7 +69,13 @@ def _doi_from_text(text: str) -> str:
 
 
 def _clean_author(author: str) -> str:
-    """Strip PubMed trailing affiliation numbers from an author name."""
+    """Strip PubMed trailing affiliation numbers and inline MathML from a name.
+
+    PubMed renders Greek-letter author names (e.g. ``epsilon Collaboration``)
+    as inline ``<math>...</math>`` markup; that markup must be reduced to its
+    text content before it can reach the ledger.
+    """
+    author = re.sub(r"<[^>]+>", "", author)
     author = re.sub(r"\s+(?:\d+\s*)+", "", author.strip())
     author = re.sub(r"\s+", " ", author).strip()
     return author

@@ -45,18 +45,22 @@ Title:  {title}
 """
 
 
-def test_aps_official_doi_casing_is_not_crossref_provenance():
+def test_prl_doi_casing_does_not_trigger_quality_failure():
+    # PubMed (an official fallback tier) exposes lowercase PRL DOIs; they are
+    # canonical (DOI matching is case-insensitive) and must not be treated as
+    # quality failures.  Malformed/truncated PRL DOIs are guarded at the
+    # journal_rebuild layer instead.
     official = """### 10.1103/PhysRevLett.127.270401
 
 Title:  Quantum Vacuum Sagnac Effect
 """
-    old_crossref = """### 10.1103/physrevlett.127.270401
+    pubmed_cased = """### 10.1103/physrevlett.127.270401
 
 Title:  Quantum Vacuum Sagnac Effect
 """
 
     assert has_journal_quality_failure(official) is False
-    assert has_journal_quality_failure(old_crossref) is True
+    assert has_journal_quality_failure(pubmed_cased) is False
 
 
 def _legacy_journal_report() -> str:

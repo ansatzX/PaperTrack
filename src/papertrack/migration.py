@@ -422,23 +422,22 @@ def _failed_current_validation(
 
 
 def has_journal_quality_failure(content: str) -> bool:
-    """Detect generated journal reports polluted by known bad metadata sources."""
+    """Detect generated journal reports polluted by known bad metadata sources.
+
+    PRL DOIs (any casing) are deliberately NOT treated as quality failures:
+    the PubMed fallback tier exposes lowercase DOIs like
+    ``10.1103/physrevlett.129.270502``, which are canonical (DOI matching is
+    case-insensitive).  Malformed/truncated PRL DOIs are guarded at the
+    journal_rebuild layer instead.
+    """
     case_insensitive_patterns = (
         r"^###\s*10\.1021/(?:civ|ctv)\d+i\d+[_\w-]*\s*$",
         r"^Title:\s+Issue\s+(?:Editorial\s+Masthead|Publication\s+Information)\s*$",
         r"<(?:mml:)?math\b",
     )
-    if any(
+    return any(
         re.search(pattern, content, re.IGNORECASE | re.MULTILINE)
         for pattern in case_insensitive_patterns
-    ):
-        return True
-    return bool(
-        re.search(
-            r"^###\s*10\.1103/physrevlett\.",
-            content,
-            re.MULTILINE,
-        )
     )
 
 

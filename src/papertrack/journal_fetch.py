@@ -4,6 +4,7 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError
 from urllib.parse import urlencode
 from urllib.parse import quote
+from http.client import IncompleteRead
 import json
 
 from .adapter_result import AdapterResult, FETCH_FAILED, SUCCESS
@@ -36,14 +37,19 @@ def _crossref_title(item: dict) -> str:
 
 
 def _crossref_get(url: str) -> dict:
-    """GET a CrossRef API URL with retries, return parsed JSON."""
+    """GET a CrossRef API URL with retries, return parsed JSON.
+
+    Large per-year responses can drop mid-stream (``IncompleteRead``); those
+    transient failures are retried so a partial year is not silently treated
+    as a complete one.
+    """
     last_exc = None
     for attempt in range(MAX_RETRIES):
         try:
             req = Request(url, headers={"User-Agent": "PaperTrack/0.1 (mailto:ansatzMe@outlook.com)"})
-            with urlopen(req, timeout=30) as resp:
+            with urlopen(req, timeout=60) as resp:
                 return json.loads(resp.read().decode())
-        except (URLError, json.JSONDecodeError) as e:
+        except (URLError, json.JSONDecodeError, IncompleteRead, OSError, TimeoutError) as e:
             last_exc = e
             if attempt < MAX_RETRIES - 1:
                 delay = RETRY_BACKOFF[attempt]

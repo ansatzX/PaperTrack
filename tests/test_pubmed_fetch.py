@@ -78,6 +78,16 @@ def test_clean_author_strips_multiple_trailing_affiliation_numbers():
     assert pubmed_fetch._clean_author("Bob") == "Bob"
 
 
+def test_clean_author_strips_inline_mathml_to_text():
+    raw = 'Xiaofeng Xu; <math xmlns="http://www.w3.org/1998/Math/MathML" display="inline"><mi>ϵ</mi></math> Collaboration'
+    assert pubmed_fetch._clean_author(raw) == "Xiaofeng Xu; ϵ Collaboration"
+
+
+def test_clean_author_strips_mathml_and_affiliation_together():
+    raw = 'Alice <math><mi>α</mi></math> Smith 1 2'
+    assert pubmed_fetch._clean_author(raw) == "Alice α Smith"
+
+
 def test_parse_cit_handles_issue_and_pages():
     parsed = pubmed_fetch._parse_cit("2026 Jul 28;22(14):7025-7042.")
     assert parsed["date"] == "2026-07-28"

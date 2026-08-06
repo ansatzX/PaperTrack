@@ -72,6 +72,21 @@ A fallback-filled issue is still recorded as processed, with its source marked
 path can repair it. A fallback that returns zero articles is a fetch failure,
 not a successful empty issue.
 
+Discovery notes: issue discovery itself also falls back to CrossRef when the
+official discovery path fails (ACS LOI pages blocked, APS volume pages that
+parse to zero issues). APS auto-discovery is capped at a handful of most-recent
+volumes so a slow, empty official crawl does not stall backfill. Article
+extraction always runs the full official -> PubMed -> CrossRef chain regardless
+of how the issue was discovered.
+
+DOI casing is not a provenance signal: PubMed exposes lowercase PRL DOIs such
+as `10.1103/physrevlett.129.270502`, which are canonical (DOI matching is
+case-insensitive). Such reports must pass quality validation. Only malformed/
+truncated PRL DOIs (missing the article number) are defects, and those are
+guarded at the journal_rebuild layer. PubMed author names rendered as inline
+MathML (e.g. Greek-letter collaboration names) are reduced to plain text at
+parse time.
+
 No browser automation is used in the live fetch path. The earlier APS
 browser/CDP workflow (`run_aps_issue_cache.sh`, browser backends inside
 `provider_runtime`) is retired from journal fetching; runtime caches and
