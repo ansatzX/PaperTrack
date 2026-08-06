@@ -452,6 +452,24 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
                 provider_runtime=provider_runtime,
             )
             if official.entries:
+                if any(bool(e.abstract) for e in official.entries.values()):
+                    return official
+                # APS issue TOCs carry titles/authors/DOIs but no abstracts.
+                # When the official TOC provides no abstracts at all, prefer
+                # the PubMed tier (which exposes abstracts) so the reading
+                # ledger keeps its abstract field; if PubMed has no data for
+                # this issue either, the official TOC entries are kept.
+                logger.warning(
+                    "APS official TOC for %s %s/%s provides no abstracts; trying PubMed",
+                    journal_name,
+                    volume,
+                    issue,
+                )
+                pubmed = _pubmed_issue_result(journal_slug, journal_name, volume, issue)
+                if pubmed.entries:
+                    pubmed.metadata["source"] = "pubmed"
+                    pubmed.metadata["fallback_for"] = "aps"
+                    return pubmed
                 return official
             logger.warning("APS scraping returned %s; falling back to PubMed/CrossRef", official.outcome)
             return _issue_fallback(

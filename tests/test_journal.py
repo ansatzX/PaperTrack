@@ -537,6 +537,107 @@ def test_aps_provider_uses_official_source_before_crossref(monkeypatch):
     assert entries == {official_entry.doi: official_entry}
 
 
+def test_aps_official_toc_without_abstracts_falls_back_to_pubmed(monkeypatch):
+    from papertrack import aps_fetch, journal_fetch
+    from papertrack.adapter_result import AdapterResult, SUCCESS
+
+    toc_entry = JournalEntry(
+        doi="10.1103/8k9q-p3zt",
+        title="APS TOC article",
+        authors=["A Author"],
+        abstract="",
+    )
+    pubmed_entry = JournalEntry(
+        doi="10.1103/8k9q-p3zt",
+        title="APS TOC article",
+        authors=["A Author"],
+        abstract="PubMed abstract",
+    )
+
+    monkeypatch.setattr(
+        aps_fetch,
+        "query_aps_issue_result",
+        lambda *args, **kwargs: AdapterResult(
+            entries={toc_entry.doi: toc_entry},
+            outcome=SUCCESS,
+            provider="aps",
+            source="journal",
+        ),
+    )
+    monkeypatch.setattr(
+        journal_fetch,
+        "_pubmed_issue_result",
+        lambda journal_slug, journal_name, volume, issue: AdapterResult(
+            entries={pubmed_entry.doi: pubmed_entry},
+            outcome=SUCCESS,
+            provider="pubmed",
+            source="journal",
+        ),
+    )
+
+    result = journal_fetch.query_journal_issue_full_result(
+        "0031-9007",
+        "137",
+        "5",
+        "Physical Review Letters",
+        2026,
+        provider="aps",
+        journal_slug="prl",
+    )
+
+    # The official APS TOC carries no abstracts; the PubMed tier, which
+    # exposes abstracts, wins so the reading ledger keeps its abstract field.
+    assert result.provider == "pubmed"
+    assert result.entries[pubmed_entry.doi].abstract == "PubMed abstract"
+
+
+def test_aps_official_toc_without_abstracts_keeps_official_when_pubmed_empty(monkeypatch):
+    from papertrack import aps_fetch, journal_fetch
+    from papertrack.adapter_result import AdapterResult, FETCH_FAILED, SUCCESS
+
+    toc_entry = JournalEntry(
+        doi="10.1103/8k9q-p3zt",
+        title="APS TOC article",
+        authors=["A Author"],
+        abstract="",
+    )
+
+    monkeypatch.setattr(
+        aps_fetch,
+        "query_aps_issue_result",
+        lambda *args, **kwargs: AdapterResult(
+            entries={toc_entry.doi: toc_entry},
+            outcome=SUCCESS,
+            provider="aps",
+            source="journal",
+        ),
+    )
+    monkeypatch.setattr(
+        journal_fetch,
+        "_pubmed_issue_result",
+        lambda journal_slug, journal_name, volume, issue: AdapterResult(
+            entries={},
+            outcome=FETCH_FAILED,
+            provider="pubmed",
+            source="journal",
+        ),
+    )
+
+    result = journal_fetch.query_journal_issue_full_result(
+        "0031-9007",
+        "137",
+        "5",
+        "Physical Review Letters",
+        2026,
+        provider="aps",
+        journal_slug="prl",
+    )
+
+    # PubMed has no data for this issue; the official TOC entries are kept.
+    assert result.provider == "aps"
+    assert result.entries[toc_entry.doi].title == "APS TOC article"
+
+
 def test_aip_metadata_mode_does_not_fill_official_abstracts_from_crossref(monkeypatch):
     from papertrack import aip_fetch, journal_fetch
     from papertrack.adapter_result import AdapterResult, SUCCESS
