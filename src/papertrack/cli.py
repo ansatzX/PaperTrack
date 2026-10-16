@@ -120,6 +120,8 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         help="publication year for this issue",
     )
+    journal_issue.add_argument("--browser-snapshot", default="",
+                               help="validated JSON from browser/issue.mjs; official membership plus metadata enrichment")
     journal_issue.set_defaults(handler=_run_journal_issue)
 
     migrate = subparsers.add_parser(
@@ -290,7 +292,7 @@ def _run_journal_backfill(args, zotero: ZoteroQuery | None) -> None:
 
 def _run_journal_issue(args, zotero: ZoteroQuery | None) -> None:
     cfg = _get_journal_cfg(args.journal)
-    filter_journal_to_md(
+    ok = filter_journal_to_md(
         journal_name=cfg["name"],
         journal_slug=cfg["slug"],
         volume=args.volume,
@@ -302,7 +304,11 @@ def _run_journal_issue(args, zotero: ZoteroQuery | None) -> None:
         acs_code=cfg.get("acs_code", ""),
         provider=cfg.get("provider", ""),
         source_policy=args.source_policy,
+        **({"browser_snapshot": args.browser_snapshot} if getattr(args, "browser_snapshot", "") else {}),
     )
+
+    if ok is False:
+        raise RuntimeError("Issue report was not written; see fetch diagnostics")
 
 
 def _run_migrate(args, zotero: ZoteroQuery | None) -> None:

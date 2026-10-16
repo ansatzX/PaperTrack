@@ -1,6 +1,6 @@
 import re
 from html import unescape
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -15,6 +15,9 @@ class JournalEntry:
     pages: str = ""
     date: str = ""
     toc_image_url: str = ""
+
+    field_sources: dict[str, str] = field(default_factory=dict)
+    membership_sources: list[str] = field(default_factory=list)
 
     @property
     def bare_doi(self) -> str:

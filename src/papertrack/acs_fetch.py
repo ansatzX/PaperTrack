@@ -103,6 +103,8 @@ def _is_native_sponsored_card(item) -> bool:
 def _parse_acs_toc_result(html: str, journal_name: str) -> AcsParseResult:
     """Parse ACS TOC page HTML into JournalEntry dict keyed by DOI."""
     soup = BeautifulSoup(html, "lxml")
+    if soup.select(".al-article-items"):
+        return _parse_silverchair_toc(soup, journal_name)
     result: dict[str, JournalEntry] = {}
     missing_fields: list[dict] = []
     critical_field_failures: list[dict] = []
@@ -221,6 +223,40 @@ def _parse_acs_toc_result(html: str, journal_name: str) -> AcsParseResult:
         missing_fields=missing_fields,
         critical_field_failures=critical_field_failures,
     )
+
+
+def _parse_silverchair_toc(soup, journal_name: str) -> AcsParseResult:
+    """ACS migrated to Silverchair in 2026; abstracts may require UI expansion."""
+    entries, missing, critical = {}, [], []
+    cards = soup.select(".al-article-items")
+    count = 0
+    for index, card in enumerate(cards, 1):
+        title_el = card.select_one("h3.item-title a")
+        doi_el = card.select_one(".citation-label a")
+        title = title_el.get_text(" ", strip=True) if title_el else ""
+        doi = re.sub(r"^https?://doi\.org/", "", doi_el.get("href", ""), flags=re.I) if doi_el else ""
+        if JournalEntry.is_non_article(doi, title):
+            continue
+        count += 1
+        if not title or not re.fullmatch(r"10\.1021/\S+", doi):
+            critical.append({"card": index, "field": "title_or_doi"})
+            continue
+        citation = card.select_one(".ww-citation-primary")
+        match = re.search(r"\((\d{4})\)\s*(\d+)\s*\(([^)]+)\)(?::\s*([^\.]+))?",
+                          citation.get_text(" ", strip=True) if citation else "")
+        abstract_el = card.select_one('.abstract-response-placeholder section.abstract:not(.graphicalAbstract)')
+        control = card.select_one('.showAbstractLink')
+        abstract = abstract_el.get_text(" ", strip=True) if abstract_el and control and control.get('data-abstract-type') == 'abstract' else ""
+        entry = JournalEntry(doi=doi, title=title,
+                             authors=[a.get_text(" ", strip=True) for a in card.select('.al-authors-list .wi-fullname')],
+                             abstract=abstract, journal_name=journal_name,
+                             volume=match.group(2) if match else "", issue=match.group(3) if match else "",
+                             pages=(match.group(4) or "").strip() if match else "", date=match.group(1) if match else "")
+        entries[doi] = entry
+        for field in ("authors", "abstract", "volume", "issue", "pages", "date"):
+            if not getattr(entry, field):
+                missing.append({"doi": doi, "field": field})
+    return AcsParseResult(entries, count, 0, missing, critical)
 
 
 def _parse_acs_toc(html: str, journal_name: str) -> dict[str, JournalEntry]:

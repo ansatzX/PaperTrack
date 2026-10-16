@@ -1,5 +1,7 @@
 # PaperTrack
 
+安装步骤与可选功能环境见 [INSTALL.md](INSTALL.md)。
+
 PaperTrack builds Obsidian-friendly Markdown reports for arXiv daily submissions
 and journal issues, then marks papers already present in a local Zotero library.
 
@@ -10,6 +12,22 @@ The current journal workflow is source-conscious:
 - APS journals such as PRL use APS issue pages as the primary source.
 - CrossRef is disabled in the journal-only `run_j.sh` workflow. Formal issue
   membership and metadata come only from official publisher resources.
+
+## Connected-browser capture and complementary metadata
+
+The regular `journal issue` CLI now combines Europe PMC, Crossref and PubMed
+when official fetching fails, and uses exact-DOI matches to fill missing fields
+without expanding a known official issue inventory. OpenAlex and Semantic
+Scholar provide additional abstract enrichment. Third-party coverage is
+provisional, with per-field provenance and failure diagnostics.
+
+For the user's existing browser session, [browser/README.md](browser/README.md)
+describes the executable `captureIssue(tab, request)` module and the
+`journal issue --browser-snapshot capture.json` report path. It opens issue
+pages and expands abstracts in resumable batches. The snapshot option is an
+explicit import, not an unattended browser launcher. ACS's new Silverchair
+markup is supported; full live batch acceptance is recorded separately from
+unit-test results. Legacy `run_j.sh` replay workers below remain separate.
 
 ## Requirements
 
@@ -551,3 +569,10 @@ does not write Markdown unless `--write-report --data-dir PATH` is explicitly
 supplied. It prints one JSON observation, including a concise failure message;
 `blocked` is a legitimate visible outcome and is never converted into an empty
 successful issue.
+
+### Optional isolated journal workflow
+
+For a Crawlee-backed executor with resumable connected-browser capture and optional
+OpenAI/DeepSeek recovery decisions, see [journal-workflow/README.md](journal-workflow/README.md).
+It has its own Node dependencies and entry point; installing or enabling it is not
+required for the existing arXiv or journal CLI. Its browser host must remain connected.

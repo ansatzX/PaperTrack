@@ -1,4 +1,5 @@
 import logging
+from copy import deepcopy
 import time
 from urllib.request import Request, urlopen
 from urllib.error import URLError
@@ -74,6 +75,7 @@ def _fetch_year(issn: str, year: int) -> list[dict]:
     items: list[dict] = []
     cursor = "*"
     seen_cursors: set[str] = set()
+    complete = True
 
     while cursor and cursor not in seen_cursors:
         seen_cursors.add(cursor)
@@ -88,7 +90,10 @@ def _fetch_year(issn: str, year: int) -> list[dict]:
         }
         url = f"{CROSSREF_JOURNAL_WORKS.format(issn=issn)}?{urlencode(params)}"
         data = _crossref_get(url)
-        message = data.get("message", {})
+        if not isinstance(data.get("message"), dict):
+            complete = False
+            break
+        message = data["message"]
         page_items = message.get("items", [])
         if not page_items:
             break
@@ -100,7 +105,8 @@ def _fetch_year(issn: str, year: int) -> list[dict]:
         i for i in items
         if not JournalEntry.is_non_article(i.get("DOI", ""), _crossref_title(i))
     ]
-    _cache[cache_key] = articles
+    if complete:
+        _cache[cache_key] = articles
     logger.info("CrossRef %s %d: %d articles cached", issn, year, len(articles))
     return articles
 
@@ -294,44 +300,83 @@ def _issue_fallback(official: AdapterResult[dict[str, JournalEntry]], *,
                     issn: str, volume: str, issue: str, year: int | None,
                     run_fallback: bool,
                     ) -> AdapterResult[dict[str, JournalEntry]]:
-    """Apply the PubMed -> CrossRef fallback chain after an official failure.
+    """Combine third-party records and enrich official entries by exact DOI.
 
     The chain applies to the live HTTP path only (``run_fallback`` true, i.e.
     no caller-supplied provider_runtime).  The snapshot-based rebuild path
     leaves the official failure untouched so it can preserve prior valid
     reports instead of pulling third-party fallback data.
     """
-    if official.entries or not run_fallback:
+    if not run_fallback:
         return official
-    pubmed = _pubmed_issue_result(journal_slug, journal_name, volume, issue)
-    if pubmed.entries:
-        pubmed.metadata["source"] = "pubmed"
-        pubmed.metadata["fallback_for"] = provider
-        return pubmed
-    crossref_entries = _crossref_issue_result(issn, volume, issue, journal_name, year)
-    if crossref_entries:
-        record_fetch_attempt({
-            "source_role": "third_party_issue",
-            "source": "journal",
-            "provider": "crossref",
-            "journal": journal_slug or journal_name,
-            "volume": volume,
-            "issue": issue,
-            "stage": "issue_membership_fallback",
-            "outcome": SUCCESS,
-            "articles": len(crossref_entries),
-            "fallback_used": ["crossref_issue"],
-        })
-        return AdapterResult(
-            entries=crossref_entries,
-            outcome=SUCCESS,
-            provider="crossref",
-            source="journal",
-            source_role="third_party_issue",
-            message=f"crossref: {len(crossref_entries)} articles for issue",
-            metadata={"source": "crossref", "fallback_for": provider},
-        )
-    return official
+    from .metadata_sources import europe_pmc_issue, merge_entries, stamp, enrich_abstracts
+
+    authoritative = bool(official.entries)
+    entries = deepcopy(official.entries)
+    for entry in entries.values():
+        stamp(entry, "official")
+    # A complete official result needs no third-party calls.
+    unavailable = set(official.metadata.get("abstract_unavailable_dois", []))
+    if authoritative and all((e.abstract or e.doi in unavailable) and e.authors for e in entries.values()):
+        result = deepcopy(official)
+        result.entries = entries
+        return result
+
+    if year is None and authoritative:
+        for entry in entries.values():
+            try:
+                year = int(entry.date.split("-", 1)[0])
+                break
+            except ValueError:
+                continue
+    conflicts = []
+    sources = []
+    # Fail each independent source softly; a malformed response must never
+    # discard an already fetched official inventory.
+    loaders = (
+        ("europe_pmc", lambda: europe_pmc_issue(issn, volume, issue, journal_name)),
+        ("crossref", lambda: _crossref_issue_result(issn, volume, issue, journal_name, year)),
+        ("pubmed", lambda: _pubmed_issue_result(journal_slug, journal_name, volume, issue).entries),
+    )
+    for source, loader in loaders:
+        try:
+            candidates = loader()
+        except Exception as exc:
+            candidates = {}
+            record_fetch_attempt({"source": "journal", "provider": source, "stage": "metadata_parse",
+                                  "outcome": FETCH_FAILED, "exception": type(exc).__name__,
+                                  "journal": journal_slug, "volume": volume, "issue": issue})
+        before = len(entries)
+        conflicts.extend(merge_entries(entries, candidates, source, allow_new=not authoritative,
+                                       volume=volume, issue=issue))
+        if any(source in e.membership_sources for e in entries.values()):
+            sources.append(source)
+        record_fetch_attempt({"source": "journal", "source_role": "third_party_metadata" if authoritative else "third_party_issue",
+                              "provider": source, "journal": journal_slug, "volume": volume, "issue": issue,
+                              "stage": "issue_merge", "outcome": SUCCESS if candidates else FETCH_FAILED,
+                              "articles": len(candidates), "added": len(entries) - before})
+    if not entries:
+        return official
+    try:
+        enrich_abstracts(entries)
+    except Exception as exc:
+        record_fetch_attempt({"source": "journal", "provider": "abstract_enrichment",
+                              "stage": "metadata_parse", "outcome": FETCH_FAILED,
+                              "exception": type(exc).__name__})
+    record_fetch_attempt({"source": "journal", "provider": "metadata_merge", "source_role": "third_party_metadata",
+                          "journal": journal_slug, "volume": volume, "issue": issue, "stage": "merge_summary",
+                          "outcome": SUCCESS, "field_conflicts": conflicts,
+                          "missing_abstract_dois": [e.doi for e in entries.values() if not e.abstract]})
+    metadata = dict(official.metadata) if authoritative else {}
+    metadata.update({"source": "official" if authoritative else (sources[0] if len(sources) == 1 else "third_party"),
+                     "sources": sources, "membership_authoritative": authoritative,
+                     "field_conflicts": conflicts})
+    if not authoritative:
+        metadata["fallback_for"] = provider
+    return AdapterResult(entries=entries, outcome=official.outcome if authoritative else SUCCESS,
+                         provider=official.provider if authoritative else metadata["source"], source="journal",
+                         source_role="authoritative" if authoritative else "third_party_issue",
+                         message=f"{len(entries)} articles; metadata sources: {', '.join(sources)}", metadata=metadata)
 
 
 def query_journal_issue_full_result(issn: str, volume: str, issue: str,
@@ -340,15 +385,26 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
                                     journal_slug: str = "",
                                     source_policy: SourcePolicy | None = None,
                                     provider_runtime=None,
+                                    browser_snapshot: str = "",
                                     ) -> AdapterResult[dict[str, JournalEntry]]:
     """Fetch articles for a journal volume/issue.
 
-    Source chain (see AGENTS.md): official issue page first, then the PubMed
-    issue search, then CrossRef as last resort.  A caller-supplied
-    provider_runtime is passed through (used by the snapshot-based rebuild
-    path); the live CLI path passes none and runs official adapters over plain
-    HTTP.
+    Official issue membership wins. An explicit connected-browser capture
+    replaces HTTP for that issue. Third-party indexes complement missing fields
+    by exact DOI, or combine provisional membership when official access fails.
+    Caller-supplied provider_runtime remains an offline-only replay path.
     """
+    if browser_snapshot:
+        if provider_runtime is not None:
+            raise ValueError("Browser captures cannot be mixed with offline provider replay")
+        from .browser_issue import read_browser_issue
+        official = read_browser_issue(browser_snapshot, provider="acs" if acs_code else provider,
+                                      code=acs_code or journal_slug, volume=volume, issue=issue,
+                                      journal_name=journal_name)
+        return _issue_fallback(official, provider=official.provider, journal_slug=journal_slug,
+                               journal_name=journal_name, issn=issn, volume=volume, issue=issue,
+                               year=year, run_fallback=True)
+
     if acs_code:
         try:
             from .acs_fetch import query_acs_issue_result
@@ -359,9 +415,7 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
                 journal_name,
                 provider_runtime=provider_runtime,
             )
-            if official.entries:
-                return official
-            logger.warning("ACS scraping returned %s; falling back to PubMed/CrossRef", official.outcome)
+            logger.info("ACS issue outcome: %s; checking metadata gaps", official.outcome)
             return _issue_fallback(
                 official,
                 provider="acs", journal_slug=journal_slug, journal_name=journal_name,
@@ -405,9 +459,7 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
                 journal_name,
                 provider_runtime=provider_runtime,
             )
-            if official.entries:
-                return official
-            logger.warning("AIP scraping returned %s; falling back to PubMed/CrossRef", official.outcome)
+            logger.info("AIP issue outcome: %s; checking metadata gaps", official.outcome)
             return _issue_fallback(
                 official,
                 provider="aip", journal_slug=journal_slug, journal_name=journal_name,
@@ -451,27 +503,7 @@ def query_journal_issue_full_result(issn: str, volume: str, issue: str,
                 journal_name,
                 provider_runtime=provider_runtime,
             )
-            if official.entries:
-                if any(bool(e.abstract) for e in official.entries.values()):
-                    return official
-                # APS issue TOCs carry titles/authors/DOIs but no abstracts.
-                # When the official TOC provides no abstracts at all, prefer
-                # the PubMed tier (which exposes abstracts) so the reading
-                # ledger keeps its abstract field; if PubMed has no data for
-                # this issue either, the official TOC entries are kept.
-                logger.warning(
-                    "APS official TOC for %s %s/%s provides no abstracts; trying PubMed",
-                    journal_name,
-                    volume,
-                    issue,
-                )
-                pubmed = _pubmed_issue_result(journal_slug, journal_name, volume, issue)
-                if pubmed.entries:
-                    pubmed.metadata["source"] = "pubmed"
-                    pubmed.metadata["fallback_for"] = "aps"
-                    return pubmed
-                return official
-            logger.warning("APS scraping returned %s; falling back to PubMed/CrossRef", official.outcome)
+            logger.info("APS issue outcome: %s; checking metadata gaps", official.outcome)
             return _issue_fallback(
                 official,
                 provider="aps", journal_slug=journal_slug, journal_name=journal_name,

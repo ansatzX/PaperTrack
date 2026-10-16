@@ -16,3 +16,7 @@ Abstract:
 {%- endfor %}
 
 {% endif %}
+
+{% if entry.field_sources %}
+<!-- papertrack_provenance: {{ {"fields": entry.field_sources, "membership": entry.membership_sources} | tojson }} -->
+{% endif %}

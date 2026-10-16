@@ -474,11 +474,13 @@ def filter_journal_to_md(journal_name: str, journal_slug: str,
                          source_policy: SourcePolicy | None = None,
                          existing_collected_dois: set[str] | None = None,
                          provider_runtime=None,
+                         browser_snapshot: str = "",
                          ) -> bool:
     """Fetch journal articles for a volume/issue and write a Markdown report.
 
     The report goes to {md_folder}/{journal_slug}/{volume}/{issue}.md
     """
+    browser_args = {"browser_snapshot": browser_snapshot} if browser_snapshot else {}
     fetch_result = query_journal_issue_full_result(
         issn=issn,
         volume=volume,
@@ -490,6 +492,7 @@ def filter_journal_to_md(journal_name: str, journal_slug: str,
         journal_slug=journal_slug,
         source_policy=source_policy,
         provider_runtime=provider_runtime,
+        **browser_args,
     )
     if provider_runtime is not None and hasattr(provider_runtime, "stats"):
         provider_runtime.last_source_outcome = fetch_result.outcome
@@ -509,6 +512,20 @@ def filter_journal_to_md(journal_name: str, journal_slug: str,
     if not entries:
         logger.warning("No articles found for %s Vol.%s Iss.%s", journal_name, volume, issue)
         return False
+
+    if fetch_result.source_role == "third_party_issue":
+        report_file = _journal_report_file(md_folder, journal_slug, volume, issue)
+        old_ids = parse_journal_report(report_file) if os.path.exists(report_file) else None
+        current = {normalize_doi(e.doi): e for e in entries.values()}
+        if old_ids and not {normalize_doi(d) for d in old_ids}.issubset(current):
+            logger.warning("Keeping prior report: third-party sources lost existing issue members")
+            return False
+        old_content = _read_existing_report(report_file) or ""
+        for block in re.split(r"(?m)^###\s+", old_content)[1:]:
+            doi = normalize_doi(block.splitlines()[0].strip())
+            if doi in current and "Abstract:" in block and not current[doi].abstract:
+                logger.warning("Keeping prior report: third-party sources lost an existing abstract")
+                return False
 
     return write_journal_entries_to_md(
         journal_name=journal_name,

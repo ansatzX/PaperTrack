@@ -46,38 +46,28 @@ after metadata settles".
 ### Journals
 
 Journal reports are issue-based. Formal volume/issue defines the article set.
-Fetching is a three-tier fallback chain; each tier must expose the high-value
-fields the report needs (title, authors, DOI, and the abstract where the source
-provides one). Tiers, in order:
+Official issue membership is authoritative. Plain HTTP remains the default;
+an explicit connected-browser DOM capture (`journal issue --browser-snapshot`)
+can supply the official inventory and expanded abstracts. `browser/issue.mjs`
+controls an already-connected user-visible browser through its supported tab
+API. ACS/AIP use issue-page Abstract controls; APS uses linked Abstract pages
+in a separate tab. Both operate in resumable bounded batches. Publisher Extract text is accepted in the reading abstract field, including editorials and corrections; retain its original type in provenance.
 
-1. Official issue page via plain HTTP (no browser automation). ACS list-of-issues
-   and issue TOC pages; AIP issue pages including the official issue-page
-   abstract endpoint; APS issue pages. TLS fingerprinting via curl_cffi is
-   permitted; browser/CDP automation is intentionally never used.
-2. If the official issue page cannot be fetched or yields no articles, use the
-   NCBI PubMed search path. The query must select the formal issue and must
-   request abstracts, e.g.
-   `https://pubmed.ncbi.nlm.nih.gov/?term=<abbrev>[jour] AND <vol>[volume] AND <issue>[issue]&format=abstract&size=200`.
-   Abstracts from the result page must flow into report Abstract fields.
-3. CrossRef is the last resort. It may establish issue membership and supply
-   title/author/abstract only after both official and PubMed paths returned no
-   usable articles for the issue.
+Third-party sources cross-complement one another: Europe PMC, Crossref and
+PubMed supply exact-volume/issue records; OpenAlex and Semantic Scholar batch
+lookups fill remaining abstracts by exact DOI. If official entries exist,
+third parties must not add or remove issue members or overwrite nonempty
+official fields. If official access fails, their union is provisional membership,
+not proof of issue completeness. Field and membership sources are retained;
+conflicts and remaining gaps are diagnosed. An empty union is a fetch failure.
 
-Coverage caveat: PubMed and CrossRef are third-party indexes and may be
-incomplete for a given issue (APS titles in particular have partial PubMed
-coverage). Under-reporting a fallback-filled issue is accepted and expected;
-do not fabricate completeness, and do not run expensive completion passes.
-A fallback-filled issue is still recorded as processed, with its source marked
-(`official` / `pubmed` / `crossref`) so a later re-run with a healthy official
-path can repair it. A fallback that returns zero articles is a fetch failure,
-not a successful empty issue.
-
-Discovery notes: issue discovery itself also falls back to CrossRef when the
-official discovery path fails (ACS LOI pages blocked, APS volume pages that
-parse to zero issues). APS auto-discovery is capped at a handful of most-recent
-volumes so a slow, empty official crawl does not stall backfill. Article
-extraction always runs the full official -> PubMed -> CrossRef chain regardless
-of how the issue was discovered.
+A third-party rerun that loses prior report members or abstracts preserves the
+prior report. A later healthy official capture can repair provisional reports.
+Keep network work bounded and failure-visible; no bulk per-paper crawling by default. APS connected-browser capture explicitly
+visits the known issue members' Abstract pages in bounded batches.
+Discovery still supports Crossref fallback when official discovery fails.
+The legacy CROSSREF_MODE flag does not disable this authorized issue-level
+complement pipeline; the offline provider-runtime replay path remains isolated.
 
 DOI casing is not a provenance signal: PubMed exposes lowercase PRL DOIs such
 as `10.1103/physrevlett.129.270502`, which are canonical (DOI matching is
@@ -87,14 +77,10 @@ guarded at the journal_rebuild layer. PubMed author names rendered as inline
 MathML (e.g. Greek-letter collaboration names) are reduced to plain text at
 parse time.
 
-No browser automation is used in the live fetch path. The earlier APS
-browser/CDP workflow (`run_aps_issue_cache.sh`, browser backends inside
-`provider_runtime`) is retired from journal fetching; runtime caches and
-browser profiles are local artifacts, not part of the fetch path. The only
-remaining consumer of a provider runtime is the offline snapshot-based report
-repair path (`journal_rebuild`), which is a maintenance operation not wired to
-any CLI command and must replay cached local snapshots rather than replace a
-valid prior report with third-party fallback data.
+The earlier APS browser/CDP workflow remains retired from automatic journal
+fetching; the explicit connected-browser module is a separate implementation. The new connected-browser collector is explicit and agent-driven;
+it is not an unattended cron browser launcher. `provider_runtime` in
+`journal_rebuild` still replays local snapshots without live metadata calls.
 
 If a journal source has strong anti-scraping behavior, prefer explicit retries,
 clear failure visibility, and local preservation of prior valid reports over
@@ -133,7 +119,7 @@ src/papertrack/
 ├── aip_fetch.py          # AIP issue scraper and abstract endpoint
 ├── pubmed_fetch.py       # PubMed/NCBI issue search fallback (abstract-exposing)
 ├── crossref_loi.py       # CrossRef issue discovery fallback
-├── journal_fetch.py      # journal source selection: official -> PubMed -> CrossRef
+├── journal_fetch.py      # official membership and complementary metadata
 ├── journal_entry.py      # JournalEntry dataclass
 ├── zotero_query.py       # Zotero local API and DOI/arXiv URL matching
 ├── codex.py              # TOML config loader

@@ -494,7 +494,7 @@ def test_aip_provider_uses_official_source_before_crossref(monkeypatch):
         journal_slug="jcp",
     )
 
-    assert entries == {official_entry.doi: official_entry}
+    assert set(entries) == {official_entry.doi}
 
 
 def test_aps_provider_uses_official_source_before_crossref(monkeypatch):
@@ -534,7 +534,7 @@ def test_aps_provider_uses_official_source_before_crossref(monkeypatch):
         journal_slug="prl",
     )
 
-    assert entries == {official_entry.doi: official_entry}
+    assert set(entries) == {official_entry.doi}
 
 
 def test_aps_official_toc_without_abstracts_falls_back_to_pubmed(monkeypatch):
@@ -551,7 +551,7 @@ def test_aps_official_toc_without_abstracts_falls_back_to_pubmed(monkeypatch):
         doi="10.1103/8k9q-p3zt",
         title="APS TOC article",
         authors=["A Author"],
-        abstract="PubMed abstract",
+        abstract="PubMed abstract", volume="137", issue="5",
     )
 
     monkeypatch.setattr(
@@ -585,9 +585,8 @@ def test_aps_official_toc_without_abstracts_falls_back_to_pubmed(monkeypatch):
         journal_slug="prl",
     )
 
-    # The official APS TOC carries no abstracts; the PubMed tier, which
-    # exposes abstracts, wins so the reading ledger keeps its abstract field.
-    assert result.provider == "pubmed"
+    # PubMed fills the abstract without replacing official membership.
+    assert result.provider == "aps"
     assert result.entries[pubmed_entry.doi].abstract == "PubMed abstract"
 
 
@@ -638,7 +637,7 @@ def test_aps_official_toc_without_abstracts_keeps_official_when_pubmed_empty(mon
     assert result.entries[toc_entry.doi].title == "APS TOC article"
 
 
-def test_aip_metadata_mode_does_not_fill_official_abstracts_from_crossref(monkeypatch):
+def test_aip_keeps_official_fields_when_third_party_has_no_matches(monkeypatch):
     from papertrack import aip_fetch, journal_fetch
     from papertrack.adapter_result import AdapterResult, SUCCESS
 
@@ -665,7 +664,7 @@ def test_aip_metadata_mode_does_not_fill_official_abstracts_from_crossref(monkey
     )
 
     def fake_crossref_year(*args, **kwargs):
-        raise AssertionError("authoritative issue dispatch must not call CrossRef")
+        return []
 
     monkeypatch.setattr(journal_fetch, "_fetch_year", fake_crossref_year)
     events = []
@@ -688,10 +687,10 @@ def test_aip_metadata_mode_does_not_fill_official_abstracts_from_crossref(monkey
     assert entries["10.1063/with-abstract"].abstract == "Official abstract"
     assert entries["10.1063/missing-abstract"].title == "Official article missing abstract"
     assert entries["10.1063/missing-abstract"].abstract == ""
-    assert events == []
+    assert all(e["added"] == 0 for e in events if e.get("stage") == "issue_merge")
 
 
-def test_aip_metadata_mode_does_not_infer_crossref_year_from_official_metadata(monkeypatch):
+def test_aip_infers_crossref_year_from_official_metadata(monkeypatch):
     from papertrack import aip_fetch, journal_fetch
     from papertrack.adapter_result import AdapterResult, SUCCESS
 
@@ -738,11 +737,11 @@ def test_aip_metadata_mode_does_not_infer_crossref_year_from_official_metadata(m
         ),
     )
 
-    assert seen_years == []
+    assert seen_years == [2025]
     assert entries["10.1063/missing-abstract"].abstract == ""
 
 
-def test_official_only_provider_does_not_request_crossref_abstracts(monkeypatch):
+def test_legacy_policy_does_not_erase_official_membership_on_metadata_failure(monkeypatch):
     from papertrack import aip_fetch, journal_fetch
     from papertrack.adapter_result import AdapterResult, SUCCESS
 
@@ -780,7 +779,7 @@ def test_official_only_provider_does_not_request_crossref_abstracts(monkeypatch)
         source_policy=SourcePolicy.official_only(),
     )
 
-    assert entries == {official_entry.doi: official_entry}
+    assert set(entries) == {official_entry.doi}
     assert entries[official_entry.doi].abstract == ""
 
 
@@ -793,7 +792,7 @@ def test_official_failure_falls_back_to_pubmed(monkeypatch):
         doi="10.1111/pubmed",
         title="PubMed article",
         authors=[],
-        abstract="PubMed abstract",
+        abstract="PubMed abstract", volume="163", issue="24",
     )
     monkeypatch.setattr(
         aip_fetch,
@@ -828,7 +827,7 @@ def test_official_failure_falls_back_to_pubmed(monkeypatch):
     )
 
     assert result.provider == "pubmed"
-    assert result.entries == {"10.1111/pubmed": pubmed_entry}
+    assert set(result.entries) == {"10.1111/pubmed"}
     assert result.metadata["source"] == "pubmed"
 
 
@@ -841,7 +840,7 @@ def test_official_failure_falls_back_to_crossref_last(monkeypatch):
         doi="10.2222/crossref",
         title="CrossRef article",
         authors=[],
-        abstract="CrossRef abstract",
+        abstract="CrossRef abstract", volume="163", issue="24",
     )
     monkeypatch.setattr(
         aip_fetch,
@@ -881,7 +880,7 @@ def test_official_failure_falls_back_to_crossref_last(monkeypatch):
     )
 
     assert result.provider == "crossref"
-    assert result.entries == {"10.2222/crossref": crossref_entry}
+    assert set(result.entries) == {"10.2222/crossref"}
     assert result.metadata["source"] == "crossref"
 
 
@@ -1068,6 +1067,7 @@ def test_official_exception_records_complete_failure_context(
 
     assert result.outcome == "fetch_failed"
     assert result.entries == {}
+    events = [e for e in events if e.get("stage") != "issue_merge"]
     assert len(events) == 1
     event = events[0]
     assert event["provider"] == provider
@@ -1122,6 +1122,7 @@ def test_no_adapter_failure_uses_explicit_unconfigured_issue_url(
     )
 
     assert result.outcome == "fetch_failed"
+    events = [e for e in events if e.get("stage") != "issue_merge"]
     assert len(events) == 1
     event = events[0]
     assert event["url"] == expected_url
