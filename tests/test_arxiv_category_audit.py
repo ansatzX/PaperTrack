@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from papertrack.adapter_result import AdapterResult, FETCH_FAILED, SUCCESS
-from papertrack.arxiv_entry import ArxivEntry
+from papertrack.arxiv.entry import ArxivEntry
 from scripts import audit_arxiv_category_membership as audit_module
 from scripts.audit_arxiv_category_membership import audit_category_membership
 

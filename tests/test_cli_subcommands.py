@@ -2,8 +2,6 @@ from datetime import date
 
 import pytest
 
-from papertrack.source_policy import CrossrefMode
-
 
 def test_arxiv_refresh_dispatches_rolling_days(monkeypatch, tmp_path):
     from papertrack import cli
@@ -49,114 +47,6 @@ def test_arxiv_refresh_dispatches_rolling_days(monkeypatch, tmp_path):
     assert captured["query_args"] == {"size": "200"}
     assert isinstance(captured["zotero"], FakeZotero)
     assert captured["refresh_existing"] is True
-
-
-def test_journal_issue_passes_official_only_source_policy(monkeypatch, tmp_path):
-    from papertrack import cli
-
-    captured = {}
-    monkeypatch.delenv("PAPERTRACK_CROSSREF_MODE", raising=False)
-    monkeypatch.setattr(cli, "ZoteroQuery", lambda: None)
-    monkeypatch.setattr(
-        cli,
-        "journal_configs",
-        {
-            "jcp": {
-                "name": "Journal of Chemical Physics",
-                "slug": "jcp",
-                "issn": "0021-9606",
-                "provider": "aip",
-            }
-        },
-    )
-    monkeypatch.setattr(
-        cli,
-        "filter_journal_to_md",
-        lambda **kwargs: captured.update(kwargs),
-    )
-    monkeypatch.setattr(
-        "sys.argv",
-        [
-            "papertrack",
-            "journal",
-            "issue",
-            "--journal",
-            "jcp",
-            "--volume",
-            "164",
-            "--issue",
-            "16",
-            "--data-dir",
-            str(tmp_path),
-        ],
-    )
-
-    cli.main()
-
-    assert captured["source_policy"].crossref_mode is CrossrefMode.DISABLED
-
-
-def test_invalid_source_policy_stops_before_journal_handler(monkeypatch, tmp_path):
-    from papertrack import cli
-
-    calls = []
-    monkeypatch.setenv("PAPERTRACK_CROSSREF_MODE", "membership")
-    monkeypatch.setattr(cli, "ZoteroQuery", lambda: None)
-    monkeypatch.setattr(
-        cli,
-        "filter_journal_to_md",
-        lambda **kwargs: calls.append(kwargs),
-    )
-    monkeypatch.setattr(
-        "sys.argv",
-        [
-            "papertrack",
-            "journal",
-            "issue",
-            "--journal",
-            "jcp",
-            "--volume",
-            "164",
-            "--issue",
-            "16",
-            "--data-dir",
-            str(tmp_path),
-        ],
-    )
-
-    with pytest.raises(RuntimeError, match="PAPERTRACK_CROSSREF_MODE"):
-        cli.main()
-
-    assert calls == []
-
-
-def test_metadata_source_policy_reaches_journal_handler(monkeypatch, tmp_path):
-    from papertrack import cli
-
-    captured = {}
-    monkeypatch.setenv("PAPERTRACK_CROSSREF_MODE", "metadata")
-    monkeypatch.setattr(cli, "ZoteroQuery", lambda: None)
-    monkeypatch.setattr(cli, "filter_journal_to_md", lambda **kwargs: captured.update(kwargs))
-    monkeypatch.setattr(
-        "sys.argv",
-        [
-            "papertrack",
-            "journal",
-            "issue",
-            "--journal",
-            "jcp",
-            "--volume",
-            "164",
-            "--issue",
-            "16",
-            "--data-dir",
-            str(tmp_path),
-        ],
-    )
-
-    cli.main()
-
-    assert captured["source_policy"].crossref_mode is CrossrefMode.METADATA
 
 
 def test_arxiv_backfill_month_dispatches_month_days(monkeypatch, tmp_path):
@@ -376,3 +266,36 @@ def test_migrate_dispatches_data_dir(monkeypatch, tmp_path):
     cli.main()
 
     assert captured["data_dir"] == str(tmp_path)
+
+
+def test_migrate_journal_layout_does_not_parse_sources(monkeypatch, tmp_path):
+    from papertrack import cli
+    from papertrack.reports import layout as journal_layout
+
+    captured = {}
+    monkeypatch.setattr(cli, 'ZoteroQuery', lambda: None)
+    def migrate(data_dir, backup_dir):
+        captured.update(data_dir=data_dir, backup_dir=backup_dir)
+        return []
+    monkeypatch.setattr(journal_layout, 'migrate_journal_layout', migrate)
+    monkeypatch.setattr(cli, 'migrate_reports', lambda *args: pytest.fail('unexpected content migration'))
+    monkeypatch.setattr('sys.argv', ['papertrack', 'migrate', '--journal-layout-only',
+                                   '--data-dir', str(tmp_path), '--backup-dir', str(tmp_path.parent / 'backup')])
+    cli.main()
+    assert captured == dict(data_dir=str(tmp_path), backup_dir=str(tmp_path.parent / 'backup'))
+
+
+def test_migrate_provenance_only_does_not_run_source_migration(monkeypatch, tmp_path):
+    from papertrack import cli
+
+    captured = {}
+    monkeypatch.setattr(cli, "ZoteroQuery", lambda: None)
+    def cleanup(data_dir, backup_dir):
+        captured.update(data_dir=data_dir, backup_dir=backup_dir)
+        return []
+    monkeypatch.setattr(cli, 'remove_report_provenance', cleanup)
+    monkeypatch.setattr(cli, 'migrate_reports', lambda *args: pytest.fail('unexpected source migration'))
+    monkeypatch.setattr('sys.argv', ['papertrack', 'migrate', '--remove-provenance-only',
+                                   '--data-dir', str(tmp_path), '--backup-dir', str(tmp_path / 'backup')])
+    cli.main()
+    assert captured == dict(data_dir=str(tmp_path), backup_dir=str(tmp_path / 'backup'))

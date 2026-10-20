@@ -14,24 +14,11 @@ dependencies = [
     'feedparser',
     'jinja2>=3.0',
     'tomli>=1.0; python_version < "3.11"',
-    'curl_cffi>=0.7',
     'requests>=2.20',
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=7.0.1",
-    "playwright>=1.40",
-]
-http-fallbacks = [
-    "cloudscraper>=1.2.71",
-    "primp>=1.3.1",
-    "tls-client>=1.0.1",
-    "pyreqwest-impersonate>=0.5.5",
-]
-browser = [
-    "playwright>=1.40",
-]
+dev = ["pytest>=7.0.1"]
 
 [project.scripts]
 papertrack = "papertrack.cli:main"
@@ -40,8 +27,12 @@ papertrack = "papertrack.cli:main"
 Homepage = "https://github.com/ansatzX/PaperTrack"
 
 [tool.setuptools]
-packages = ["papertrack"]
 package-dir = {"" = "src"}
 
 [tool.setuptools.package-data]
-papertrack = ["templates/*.j2", "categories.toml"]
+papertrack = ["reports/templates/*.j2", "categories.toml", "browser/*.mjs"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["papertrack", "papertrack.*"]
+namespaces = false

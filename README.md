@@ -1,578 +1,361 @@
 # PaperTrack
 
-安装步骤与可选功能环境见 [INSTALL.md](INSTALL.md)。
+PaperTrack maintains a continuous reading ledger in Obsidian-friendly Markdown,
+with exact DOI/arXiv matching against a local Zotero library and preserved reading
+checkboxes. arXiv uses submitted-date day buckets; journals use formal volume/issue.
 
-PaperTrack builds Obsidian-friendly Markdown reports for arXiv daily submissions
-and journal issues, then marks papers already present in a local Zotero library.
+## arXiv
 
-The current journal workflow is source-conscious:
-
-- ACS journals such as JCTC use ACS issue pages as the primary source.
-- AIP journals such as JCP use AIP issue pages as the primary source.
-- APS journals such as PRL use APS issue pages as the primary source.
-- CrossRef is disabled in the journal-only `run_j.sh` workflow. Formal issue
-  membership and metadata come only from official publisher resources.
-
-## Connected-browser capture and complementary metadata
-
-The regular `journal issue` CLI now combines Europe PMC, Crossref and PubMed
-when official fetching fails, and uses exact-DOI matches to fill missing fields
-without expanding a known official issue inventory. OpenAlex and Semantic
-Scholar provide additional abstract enrichment. Third-party coverage is
-provisional, with per-field provenance and failure diagnostics.
-
-For the user's existing browser session, [browser/README.md](browser/README.md)
-describes the executable `captureIssue(tab, request)` module and the
-`journal issue --browser-snapshot capture.json` report path. It opens issue
-pages and expands abstracts in resumable batches. The snapshot option is an
-explicit import, not an unattended browser launcher. ACS's new Silverchair
-markup is supported; full live batch acceptance is recorded separately from
-unit-test results. Legacy `run_j.sh` replay workers below remain separate.
-
-## Requirements
-
-- Python 3.10+
-- Zotero desktop, optional but recommended
-- Obsidian with the Dataview plugin, if you want the generated task queries
-
-Install locally:
+The mature arXiv path remains conventional Python: advanced-search pages expose
+metadata and expanded abstracts in one request. Re-query fixed submitted dates
+to repair delayed metadata; do not replace this with recent feeds.
 
 ```bash
-pip install -e ".[dev]"
+python main.py arxiv refresh --category chem-ph,quant-ph,cs.AI,cs.LG --refresh-days 30 --data-dir /path/to/reports
+python main.py arxiv backfill --category quant-ph --month 2026-09 --data-dir /path/to/reports
 ```
 
-The project depends on `curl_cffi` for publisher pages, plus `pyzotero`,
-`beautifulsoup4`, `lxml`, `feedparser`, `jinja2`, and `requests`.
-
-The unattended official runtime also needs Playwright, Google Chrome, and Xvfb:
+`run.sh` takes no arguments. One fixed `conda run` starts a Bash script with two
+background pipelines: arXiv CLI commands and the journal-only daily `refresh`.
+Journal/Codex calls remain serial. arXiv categories also share one sequential
+request stream with a 10-second delay. Empty categories backfill from 2026-01-01;
+existing categories refresh the last 30 days. The script waits for both pipelines
+and returns a nonzero exit if either fails; a lock prevents overlapping script runs.
+To run an individual task, call the package directly:
 
 ```bash
-pip install -e ".[dev,browser]"
-playwright install chrome
+python main.py journal issue --journal jcim --volume 66 --issue 12 --year 2026 --run-agent
+python main.py journal refresh --journal jcim  # reconcile issues since 2026-01-01, fetching cache gaps only
+python main.py journal latest --journal jcim  # prints a discovery task only
 ```
 
-## Quick Start
+Output goes to `/home/ansatz/data/obsidian/1/papertrack_datas`; edit the fixed
+command in the script to change deployment paths. The daily command uses a systemd user scope
+(8 GiB memory, two CPUs, no swap, 256 tasks, 24-hour ceiling). Existing Chrome is
+outside these limits. Journal agents retain their own 660-second default deadline.
+Daily runs log to `.papertrack_diagnostics/daily.log`, use a nonblocking lock to
+avoid overlap, and continue other sources after a failure while returning nonzero.
+Cron's user-bus environment is set explicitly; a working user bus and authorized
+browser connection are still required. Browser challenges can require a handoff.
+Python owns source iteration, locking, logging and failure status; the shell
+script only supplies the deployment command and resource limits.
 
-arXiv reports:
+`journal refresh` first discovers dated formal issues from `--from-date` (default
+2026-01-01) through `--to-date` (default today). It follows official archive year/
+volume links, reusing today's saved archive pages and fetching only missing/stale
+archive pages. "Today" uses the host's local calendar date; UTC run timestamps
+are converted before comparison. Python then validates every issue's capture and HTML evidence.
+Valid caches are imported locally; only missing or invalid captures launch an
+issue agent. Existing Markdown alone is not a cache. Unsupported archive layouts,
+undated issues and inventory gaps fail visibly instead of producing empty success.
+Each archive/issue call is bounded; browser calls are serial inside the journal
+pipeline. This checks observed archive coverage, not independent publisher completeness.
+Plans and per-issue outcomes live under `.papertrack-runs/*-sync-*/plan.json`.
+Daily `refresh` uses that discovery history to fetch only newly observed issues.
+Known issues with missing or invalid caches remain `repair_required` (nonzero
+exit), without automatic repeat collection. Use explicit `journal refresh` for
+date-range gap repair; valid caches can still regenerate Markdown locally.
+Separate `.papertrack_diagnostics/journals.log` and `arxiv.log` track the two
+pipelines; `daily.log` retains the combined run and failure status.
+
+## Journals: agent access, fixed collection
+
+The external agent owns browser access and challenge handling in the user's
+session. After the formal issue is readable, repository code owns every DOM
+selector, Abstract/Extract interaction, metadata extraction and checkpoint write.
+The agent must not generate a parser or reconstruct JSON from its own prose.
+
+Run a bounded Codex collection and publish only after Python acceptance:
 
 ```bash
-python main.py arxiv refresh \
-  --category chem-ph,quant-ph \
-  --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
+papertrack journal issue --journal jcim --volume 66 --issue 12 --year 2026 \
+  --run-agent --data-dir /path/to/reports
 ```
 
-Latest journal issue:
+This launches the installed `codex exec` with `gpt-6-luna`, a workspace-write
+sandbox rooted in a new run directory, and a 660-second process deadline. Codex
+must already be authenticated and have its connected browser tools available.
+No API key or model SDK is added to PaperTrack. Override the model/deadline with
+`--agent-model` / `--agent-timeout` when needed. There is one invocation, with no
+automatic process retry, model fallback or permission escalation.
+On Linux it requires `systemd-run --user --scope`: MemoryHigh=6G, MemoryMax=8G,
+MemorySwapMax=0, CPUQuota=200%, TasksMax=256 and a matching RuntimeMaxSec.
+There is no unbounded fallback if systemd is unavailable. The launcher stops the
+scope on exit, including detached tool descendants. **An already-running user
+Chrome is outside this cgroup**; this does not establish a browser memory limit.
+The task receives the same deadline minus 60 seconds for returning results. A failed
+abstract interaction allows one repeat of the same fixed call per DOI; repeated
+failure still stops and preserves evidence.
+
+Each run keeps `task.txt`, `events.jsonl`, `stderr.log`, `final.txt`, capture JSON,
+rendered HTML and `result.json` under `<data-dir>/.papertrack-runs/`. The agent
+only collects; the parent Python process validates issue identity, inventory and
+abstracts before querying optional Zotero and writing the report. Exit code zero
+alone never authorizes publication. Timeout/failure retains partial evidence and
+existing reports. An explicit `--capture-path` must be a new path; completed
+captures can be imported offline as shown below. Partial captures remain available
+for explicit recovery through the fixed collector; the launcher does not resume
+sessions automatically.
+
+For an explicit partial-issue repair, add `--resume-capture /path/to/capture.json`
+to `journal issue --run-agent` with the same journal, volume and issue. The package
+copies the checkpoint and its HTML evidence into a new run, preserving the original.
+APS abstracts without matching saved article HTML are collected again. ACS/AIP
+Abstract and Extract text is likewise checked against retained issue controls and
+panel HTML. Conflicting text is cleared only in the new checkpoint; conflicting
+panel evidence is retained under a unique previous-evidence filename so the fixed
+collector must capture a fresh panel. The original run remains unchanged. The resumed
+capture must pass the same whole-issue and source-text checks before publication.
+
+For APS Errata, a readable official detail page can prove that no Abstract exists:
+the DOI must match, the page must identify itself as an erratum and contain Article
+Text, and both the Abstract section and its navigation control must be absent.
+The fixed collector retains that HTML and marks the abstract unavailable. Python
+independently checks the same evidence; it never uses the correction body as an
+Abstract. A blank, blocked or incompletely loaded page does not satisfy this rule.
+
+When that verified APS Erratum replaces the legacy pseudo-abstract “This corrects
+the article DOI: …”, the importer can remove that exact teaser. It first saves a
+byte-identical original report under the capture run's `report-backups/` directory
+and preserves reading state. Other existing abstracts retain the normal protection
+against removal; a title or agent assertion alone cannot authorize this repair.
+
+An APS issue explicitly labelled `(partial)` by the publisher is reported as
+`needs_attention` / `publisher_partial_issue`, not an access challenge. Its HTML
+is retained. Python also rejects that source for complete-issue import, even if
+the captured article count agrees with the observed partial directory.
+
+Cached title and author mathematics is parsed by Python too. APS titles use the
+DOI-bound article's complete citation title; ACS/AIP titles use the matching issue
+card's explicit formula markup. Explicit author accents are composed as Unicode.
+Publisher private-use characters with retained text are preserved verbatim in
+Markdown, including numeric character entities. They do not block issue import;
+the importer does not guess a standard symbol or require the publisher's font.
+For CSS-only MathJax glyphs, retained MathML is required; empty glyphs without that
+source fail visibly instead of disappearing from the report.
+
+For Abstract/Extract content, a formula whose layout cannot be parsed is kept as
+its existing nonempty source text. No missing symbol is guessed. Normal formulas
+still render as TeX; the package logs each literal fallback with its DOI and HTML
+evidence path. Empty formulas, loading/error messages, missing abstracts and
+source identity or text mismatches still fail. This fixed policy also applies
+when reusing caches; titles and authors retain their strict rendering rules.
+
+These run directories are also the persistent webpage cache. Keep their original
+Abstract/Extract types, issue HTML, archive HTML (`capture.json.archive.html`) and
+failed access/parser HTML (`capture.json.access.html`) for offline extractor
+repairs. `result.json` lists available artifacts. Partial and failed attempts are
+retained and never treated as published reports; there is no automatic cache
+expiration. Old static-backend caches and private browser profiles are retired.
+
+To print the access-and-handoff task for manual execution instead, omit `--run-agent`:
 
 ```bash
-python main.py journal latest \
-  --journal jcp \
-  --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
+python main.py journal issue --journal jcim --volume 66 --issue 12 --year 2026 \
+  --capture-path .work/cache/jcim-66-12.json --data-dir /path/to/reports
 ```
 
-In official-only mode, AIP `latest`/`backfill` cannot discover volume/issue
-pairs without a third-party index. Use the explicit `journal issue` command
-shown below. The repository-provided `run_j.sh` is the official-only production
-journal rebuild path over an audited list of formal issues.
+This prints instructions; it does not itself launch a model or browser. For the
+current Codex trial, explicitly use `gpt-6-luna` on both launch and resume. The
+agent needs a supported connected browser-client tab and a runtime able to import
+local JS modules. No model SDK is required by the fixed collector.
 
-Backfill journal issues:
+The installed `papertrack/browser/cua.mjs` is the Codex handoff adapter, running
+inside the SAME `cua_repl` as browser access. It binds the documented DOM tab and
+calls the packaged `collect.mjs`. Repository `browser/*.mjs` entrypoints forward
+to this implementation; there is one collector, also included in the wheel.
+Do not import it in a separate `node_repl` and assume browser variables are shared.
+The latter module is the fixed collection entrypoint. It probes access without
+navigating or solving challenges, calls the ACS/AIP or APS collector in bounded
+batches, and atomically saves a checkpoint. Panel IDs come from `aria-controls`,
+not inferred control-ID strings. A new tab can resume the same checkpoint; prior
+members and nonempty text cannot regress. Optional rendered HTML is saved beside
+the JSON to diagnose parsers locally. Parsing uses the authenticated browser DOM,
+without a second publisher HTTP fetch. HTML exports occur on the first batch,
+errors and completion, rather than repeatedly serializing the entire page for
+every partial batch. One collector call is permitted per browser-tool invocation.
+The agent must not name browser sessions, create tab groups or mark tabs as
+deliverables. The adapter closes its task tabs on completion; the agent must
+also close task tabs before returning on failure and report unconfirmed cleanup.
+
+Statuses separate `needs_access`, `partial`, `needs_attention`,
+`needs_extractor_update`, `wrong_issue` and `complete`. The agent may repair access
+and repeat the module call. On a readable page with parser failures, preserve
+artifacts and report the defect for a code/test change; do not improvise selectors.
+Details and supported browser API are in [browser/README.md](browser/README.md).
+
+Import only a completed capture:
 
 ```bash
-python main.py journal backfill \
-  --journal jcp \
-  --from-year 2018 \
-  --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
+python main.py journal issue --journal jcim --volume 66 --issue 12 --year 2026 \
+  --browser-snapshot .work/cache/jcim-66-12.json --data-dir /path/to/reports
 ```
 
-Explicit issue:
+Import makes no publisher or metadata API calls; Zotero's optional local API
+still supplies collection matching. The `papertrack-browser-issue-v1` schema and
+old captures remain supported. New fixed captures identify
+`capture_method: "fixed_browser"` and their collector version. Expanded Abstract
+and Extract both populate the reading field with their original type retained.
+Failed/unloaded controls remain gaps, not unavailable abstracts.
+For issue members without a reading control, an observed same-journal
+`latest-articles` link activates the fixed recent-page collector. It collects
+Abstracts only for exact issue DOIs, follows observed `rel=next` links within the
+same bounded invocation, and saves `.recent.json` plus `.recent-pages/` HTML and
+panel evidence. Python validates those sources and fills only the Abstract;
+issue membership, titles and authors remain authoritative. Exhausted pages with
+unmatched DOIs fail visibly. This supports the observed Silverchair URL/DOM
+contract; APS still uses its existing DOI-specific abstract-page path.
 
-```bash
-python main.py journal issue \
-  --journal jcp \
-  --volume 164 \
-  --issue 16 \
-  --year 2026 \
-  --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
-```
+Validation rejects wrong issue identities, duplicate DOIs, inconsistent counts,
+unresolved abstracts/errors and replacement data that loses prior members or
+abstracts. It preserves anchor spelling, supported task edits and collection
+state. A consistent observed inventory is not independent proof of publisher
+coverage; live acceptance remains issue/provider-specific.
 
-Migrate existing generated reports to the current Markdown schema:
+Supported configurations: `jcim`, `jctc`, `jacs`, `jcp`, `prl`, in
+`src/papertrack/categories.toml`.
 
-```bash
-python main.py migrate \
-  --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
-```
+`journal latest` and `journal backfill --from-year YYYY` now print discovery tasks
+for the agent. They no longer discover or fetch issues themselves, and do not
+update the legacy cwd `.papertrack_state.json`. Existing state is retained for
+historical reference and missing-report discovery by `repair`.
 
-Collect damaged reports and decide whether to refetch authoritative sources:
+The previous `run_j.sh`, APS cache runner, publisher HTTP clients, automatic
+browser/CDP runtimes and third-party network enrichment chain have been removed.
+Their implementation and earlier acceptance records are recoverable from commit
+`8804413`. Existing production reports, snapshots, profiles, diagnostics and cron
+configuration have not been migrated or deleted. Any external schedule pointing
+at a removed script must be retired before it is used again.
 
-```bash
-python main.py repair \
-  --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
-```
+The optional [journal worker](experiments/journal-workflow/README.md) remains available as an
+older queue prototype. The new handoff uses the fixed browser module directly;
+it is independent of the Python `--run-agent` launcher. Claude launching is not implemented; `journal refresh` is the
+automatic date-range reconciliation entrypoint.
 
-Both production wrappers use the local conda environment:
-
-```bash
-/home/ansatz/soft/miniconda3/bin/conda run -n arxiv python main.py ...
-```
-
-## Scheduled Production Wrappers
-
-arXiv and journal work have separate entry points and should use separate cron
-invocations. For example:
-
-```cron
-0 1 * * * /home/ansatz/data/code/arxiv_reading/run.sh
-0 4 * * 0 /home/ansatz/data/code/arxiv_reading/run_j.sh
-```
-
-`run.sh` is arXiv-only. It refreshes the existing `chem-ph`, `quant-ph`,
-`cs.AI`, and `cs.LG` ledgers over the rolling 30-day window, or backfills a new
-empty category from 2026-01-01. It retains the arXiv 10-second request delay and
-30/60/120-second rate-limit backoff.
-
-`run_j.sh` concurrently starts the ACS, AIP, and APS candidate workers. It is a
-bounded repair run over exactly 43 audited issues: 2 ACS, 32 AIP, and 9 APS. It
-does not run general journal discovery or expand the candidate lists. The
-wrapper waits for all three providers even if one fails and returns nonzero if
-any provider leaves failed or unresolved work.
-
-For APS production repair, use the separate issue-cache runner rather than the
-bounded candidate worker. It starts (or attaches to) an isolated visible Chrome
-profile, uses a 120-second APS request floor, and performs no recent-page or
-Markdown work:
-
-```bash
-./run_aps_issue_cache.sh          # resume all existing PRL reports from 120/1
-./run_aps_issue_cache.sh 127/1    # resume from a later formal issue
-```
-
-When this phase has cached every selected formal issue, run the `recent` and
-then `render` phases through `repair_all_aps_reports.py`. Never run these APS
-phases concurrently: they share one browser profile, one provider floor, and
-one circuit breaker.
-
-The journal wrapper is Linux-specific and requires Linux `/proc` and `prctl`
-child-subreaper support. It also requires `/usr/bin/setsid`, `/usr/bin/python3`,
-and Bash 5.1+ for associative arrays and completion-driven `wait -n -p`. The
-deployed Python must expose `os.pidfd_open` and `signal.pidfd_send_signal`.
-The wrapper checks those APIs before creating launch state or starting a
-provider. Each supervisor also requires a verified startup acknowledgement and
-arms a parent-death signal; if the wrapper cannot safely command or acknowledge
-it, the supervisor boundedly terminates and reaps its own provider descendants.
-
-With no arguments, a journal run resumes each provider's durable progress and
-skips already resolved candidates. The only accepted optional arguments are
-passed identically to all three workers:
-
-```bash
-./run_j.sh --retry-unresolved  # retry records currently marked unresolved
-./run_j.sh --reset-progress    # discard provider progress and assess all candidates
-./run_j.sh --dry-run           # inspect the ordered work without publisher requests
-```
-
-The flags can be combined. Unknown arguments are rejected rather than forwarded
-to the worker commands.
-
-Journal rebuild runtime files live under ignored, machine-local directories.
-Browser profiles persist in `.papertrack_browser_profiles/`, validated official
-snapshots persist in `.papertrack_official_cache/`, and progress and failure
-evidence live in `.papertrack_diagnostics/`:
+## Reports and local maintenance
 
 ```text
-journal_rebuild_manifest.json
-journal_rebuild_acs_state.json
-journal_rebuild_aip_state.json
-journal_rebuild_aps_state.json
+reports/
+├── arxiv/quant-ph/2026/10/14.md
+├── acs/jcim/66/12.md
+├── aip/jcp/164/16.md
+└── aps/prl/136/1.md
 ```
-
-The shared manifest records only the approved candidates, while the provider
-state files record resumable outcomes. These JSON files are runtime state, are
-ignored by Git, and should not be treated as source configuration.
-
-The wrapper exports request intervals of 30 seconds for ACS issue pages, 30
-seconds for AIP issue pages, 10 seconds for AIP abstracts, and 120 seconds for
-APS issue pages. These values match the non-bypassable request floors enforced
-in code; lowering an environment value cannot weaken those floors.
-
-Official publisher issue pages remain authoritative for issue membership and
-publisher metadata. `run_j.sh` exports `PAPERTRACK_CROSSREF_MODE=disabled`; it
-does not make CrossRef requests. A blocked fetch, parse failure, or unresolved
-repair produces a visible nonzero result and preserves the prior valid Markdown
-instead of replacing it with empty or partial output.
-
-## Output Layout
-
-`--data-dir` is the root. PaperTrack separates sources under that root:
-
-```text
-papertrack_datas/
-├── arxiv/
-│   ├── chem-ph/2026/04/01.md
-│   └── quant-ph/2026/04/01.md
-├── acs/
-│   └── jctc/22/8.md
-├── aip/
-│   └── jcp/164/16.md
-└── aps/
-    └── prl/136/1.md
-```
-
-Journal output is always:
-
-```text
-{data_dir}/{provider}/{journal_slug}/{volume}/{issue}.md
-```
-
-## Journal Source Policy
-
-`PAPERTRACK_CROSSREF_MODE` has two accepted values in the general CLI:
-
-- unset or `disabled`: official publisher pages only; this is the development
-  default and makes no CrossRef requests;
-- `metadata`: permit CrossRef issue discovery for AIP and exact-DOI abstract
-  completion only after an official issue fetch succeeds.
-
-Any other value is an error. CrossRef cannot add or remove issue members, or
-replace official DOI, title, author, volume, issue, page, or date metadata.
-The production journal wrapper explicitly exports
-`PAPERTRACK_CROSSREF_MODE=disabled`; `run.sh` remains arXiv-only and does not
-configure CrossRef.
-
-### JCTC / ACS
-
-JCTC is configured as an ACS journal:
-
-```toml
-[journals.jctc]
-name = "Journal of Chemical Theory and Computation"
-issn = "1549-9618"
-slug = "jctc"
-acs_code = "jctcce"
-```
-
-Auto-discovery uses ACS list-of-issues pages. Article metadata comes from the
-ACS issue TOC page.
-
-### JCP / AIP
-
-JCP is configured as an AIP journal:
-
-```toml
-[journals.jcp]
-name = "Journal of Chemical Physics"
-issn = "0021-9606"
-slug = "jcp"
-provider = "aip"
-```
-
-For each issue, PaperTrack:
-
-1. Navigates the canonical AIP issue page in the publisher worker's single
-   persistent Chrome context, for example
-   `https://pubs.aip.org/aip/jcp/issue/164/16`.
-2. Extracts the official issue article list, DOI, title, authors, page, year,
-   and `data-articleid`.
-3. Requests required abstracts through the official same-origin issue handler
-   in that same browser context:
-   `https://pubs.aip.org/Handlers/ArticleAbstractHandler.ashx`.
-4. On a challenge, keeps that context and profile, waits once, and reloads the
-   canonical issue page according to the bounded provider runtime policy.
-5. Validates the complete issue result before committing its official snapshot.
-
-PaperTrack does not visit each AIP article page. The production journal wrapper
-does not use CrossRef.
-
-### PRL / APS
-
-PRL is configured as an APS journal:
-
-```toml
-[journals.prl]
-name = "Physical Review Letters"
-issn = "0031-9007"
-slug = "prl"
-provider = "aps"
-```
-
-Auto-discovery uses APS list-of-issues pages such as
-`https://journals.aps.org/prl/issues` and volume pages such as
-`https://journals.aps.org/prl/issues/136#v136`. Article membership and issue
-metadata come from official issue pages such as
-`https://journals.aps.org/prl/issues/136/1`.
-
-Partial APS issues are skipped in `journal latest` and `journal backfill` so the
-ledger does not mark an unstable issue as processed. Use `journal issue` with an
-explicit volume and issue if you intentionally want to process a partial issue.
-
-#### APS issue membership and recent-page abstract completion
-
-APS has two distinct official views, with deliberately different authority:
-
-1. The repair plan first enumerates the formal reports to repair, creates a
-   durable plan, and caches every canonical issue page before any abstract
-   completion begins. An issue cache records its DOI set, article count, and
-   earliest/latest article dates. A failed request remains retryable; a provider
-   circuit skip remains pending because no request was made.
-2. The canonical APS issue page is the sole authority for
-   the article set and for DOI, title, authors, volume, issue, page, and date.
-   Its historical `summary-container` text is an editorial teaser and is never
-   treated as an article abstract.
-3. Only when all target issue snapshots are present, one shared reverse-
-   chronological scan of the journal's official paginated
-   `/{journal}/recent?page=N` stream fills empty abstracts by exact normalized
-   DOI match. It starts at page 1, so cached pages are reused across issues;
-   article counts and dates provide a page-range hint only. A recent page never
-   establishes issue membership. Once its oldest date passes an issue's earliest
-   date, unmatched DOI values for that issue are recorded as unresolved.
-4. A final render phase reads only the cached issue and recent data. It writes
-   only issues with complete DOI abstract coverage, preserving the existing
-   Obsidian task state and collection grouping. No browser navigation is allowed
-   in this phase.
-
-Recent results never create an issue, add or remove issue members, infer an
-issue number, or replace issue metadata. For an issue with dated missing
-abstracts, the search begins at recent page 1 and advances in published-time
-descending order only until all target DOIs are found or the page has reached
-the issue's earliest article date. They are fetched in the same persistent APS
-browser context as issue pages, share the 30-second provider-wide navigation
-floor and circuit breaker, and are cached locally under
-`.papertrack_official_cache/aps-recent/`. A valid cached recent page is reused
-without network access. If a recent page is blocked, malformed, unavailable, or
-does not contain a matching DOI, the official issue result remains intact and
-the abstract stays visibly unresolved; PaperTrack does not fall back to visiting
-individual article pages.
-
-Run the full repair (or a resumable individual phase) through the single owner:
 
 ```bash
-python scripts/repair_all_aps_reports.py \
-  --data-dir /home/ansatz/data/obsidian/1/papertrack_datas \
-  --diagnostics-dir .papertrack_diagnostics \
-  --profile-root .papertrack_browser_profiles \
-  --snapshot-root .papertrack_official_cache --phase all --issue-interval 120
+python main.py migrate --data-dir /path/to/reports
+python main.py repair --data-dir /path/to/reports --no-fetch
 ```
 
-For APS sessions protected by a browser challenge, the repair tool can start a
-dedicated visible Chrome profile and attach to it through a loopback-only CDP
-port. The profile is deliberately separate from the user's default Chrome
-profile, which Chrome does not permit for remote debugging:
+Migration is local and retains reading state. Repair still supports arXiv
+refetching; damaged journal reports are deferred with an agent-task command.
+Internal source provenance stays in capture JSON and HTML evidence, rather than
+being repeated in the reading Markdown. To remove old generated provenance
+comments without changing any other report text or consulting captures, run:
 
 ```bash
-python scripts/repair_all_aps_reports.py \
-  --data-dir /home/ansatz/data/obsidian/1/papertrack_datas \
-  --diagnostics-dir .papertrack_diagnostics \
-  --profile-root .papertrack_browser_profiles \
-  --snapshot-root .papertrack_official_cache \
-  --browser-user-data-dir /home/ansatz/.config/google-chrome-papertrack \
-  --launch-browser --phase issue --candidate 136/23
+python main.py migrate --remove-provenance-only --data-dir /path/to/reports --backup-dir /path/to/project/.work/backups/provenance
 ```
 
-The first run may require a user to complete the publisher's browser challenge
-in that visible dedicated Chrome window. Later runs reuse that profile; they
-never expose DevTools beyond `127.0.0.1`.
+This operation skips hidden cache directories and saves each changed report's
+original bytes under the backup directory before writing.
 
-## CLI Reference
+Zotero is optional; enable its local API in desktop settings when using it.
+Matching uses exact identifiers, not fuzzy titles.
 
-### arXiv refresh
+ACS/AIP capture imports require the collector's rendered HTML sidecar at
+`<capture-path>.html`, including manual `--browser-snapshot` imports. Before
+rendering Markdown, Python verifies article DOI, reading control/panel and source
+type against this HTML, and compares Abstract text with the official non-graphical
+abstract section. Extract is accepted only when the issue card offers no Abstract.
+Whitespace and mathematical Unicode font differences are normalized for comparison
+only. Missing evidence or conflicting text fails without overwriting the report.
 
-```bash
-python main.py arxiv refresh --category quant-ph --refresh-days 30
-```
-
-Refreshes every day from local today minus `--refresh-days` through local today.
-Use `--anchor-date YYYY-MM-DD` for reproducible reruns.
-
-### arXiv backfill
-
-```bash
-python main.py arxiv backfill --category quant-ph --month 2026-04
-python main.py arxiv backfill --category quant-ph --from-date 2026-04-01 --to-date 2026-04-30
-```
-
-Backfill is explicit historical processing. It replaces the old `--time`
-sentinel behavior.
-
-### journal latest
-
-```bash
-python main.py journal latest --journal jcp
-```
-
-### journal backfill
-
-```bash
-python main.py journal backfill --journal jcp --from-year 2018
-```
-
-### journal issue
-
-```bash
-python main.py journal issue --journal jcp --volume 164 --issue 16 --year 2026
-```
-
-### migrate
-
-```bash
-python main.py migrate --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
-```
-
-Runs a local-only Markdown schema migration. It removes obsolete generated
-content such as old TOC image lines, adds PaperTrack format metadata, preserves
-supported Obsidian task edits, and writes through a `.bak` validation protocol.
-
-### repair
-
-```bash
-python main.py repair --data-dir /home/ansatz/data/obsidian/1/papertrack_datas
-python main.py repair --data-dir /home/ansatz/data/obsidian/1/papertrack_datas --yes
-python main.py repair --data-dir /home/ansatz/data/obsidian/1/papertrack_datas --no-fetch
-```
-
-Collects corrupt or missing generated reports first, then asks before fetching
-authoritative sources. Outcomes are recorded as `fixed`, `unresolved`, or
-`deferred` in the diagnostics repair ledger.
-
-## State And Rebuilds
-
-`journal latest` and `journal backfill` store processed `(volume, issue)` pairs in
-`.papertrack_state.json` in the current working directory.
-
-On every `journal latest` or `journal backfill` run, PaperTrack checks
-previously processed issue files by relative path:
-
-```text
-{journal_slug}/{volume}/{issue}.md
-```
-
-If a processed file is missing or the generated report structure is damaged,
-that issue is rebuilt even if it is not the latest issue.
-
-The format check intentionally ignores Obsidian task edits. Marking a paper as
-complete, changing task state, or editing the Dataview task block does not count
-as corruption. The required skeleton is:
-
-- `## collected`
-- `## not collected`
-- at least one `### ...` paper entry
-
-arXiv production refresh uses a rolling calendar window. By default it queries
-every day from local today minus 30 days through local today. This keeps recent
-day buckets converged as arXiv category assignments, external DOIs, and journal
-references settle. Historical processing uses explicit `arxiv backfill` months
-or date ranges.
-
-## Zotero Matching
-
-Zotero is optional. If Zotero is unavailable, all papers are rendered under
-`not collected`.
-
-For arXiv entries, matching uses three layers:
-
-1. arXiv DOI, such as `10.48550/arXiv.2502.07673`
-2. External publisher DOI from arXiv metadata
-3. arXiv ID extracted from a Zotero URL
-
-For journal entries, matching uses the publisher DOI.
-
-Enable Zotero local API:
-
-```text
-Zotero -> Settings -> Advanced -> Miscellaneous
--> Allow other applications on this computer to communicate with Zotero
-```
-
-## Configuration
-
-Configuration lives in:
-
-```text
-src/papertrack/categories.toml
-```
-
-Add arXiv categories under `[arxiv.<key>]`.
-
-Add ACS journals with `acs_code`:
-
-```toml
-[journals.example_acs]
-name = "Example ACS Journal"
-issn = "0000-0000"
-slug = "example"
-acs_code = "abcd"
-```
-
-Add AIP-style journals with `provider = "aip"`:
-
-```toml
-[journals.example_aip]
-name = "Example AIP Journal"
-issn = "0000-0000"
-slug = "example"
-provider = "aip"
-```
-
-Add APS-style journals with `provider = "aps"`:
-
-```toml
-[journals.example_aps]
-name = "Example APS Journal"
-issn = "0000-0000"
-slug = "example"
-provider = "aps"
-```
+APS captures additionally retain each visited abstract page in
+`<capture-path>.articles/<sha256-of-lowercase-doi>.html`. Python verifies the DOI
+and `abstract-section-content` text against these files before import. Keep this
+directory with the capture; older APS captures without detail HTML need a fresh
+collection before reimport. Existing reports are preserved.
 
 ## Development
 
-Run tests:
+### Repository layout
+
+The daily Python `refresh` command migrates existing reports for each configured
+journal before collection. It preserves paper text, reading checkboxes and paths,
+including legacy `volume/issue/report.md`, while updating the generated schema
+and removing old TOC image lines. Migration errors are logged and make the daily
+run fail even if a later source fetch succeeds. Format migration does not certify
+the historical abstract source; that still requires publisher evidence.
+
+Before migration, daily refresh can upgrade an older ACS/AIP Extract capture
+that exactly matches the former paragraph-only selector when retained official
+HTML contains additional `div.block-child-p` paragraphs. The package copies the
+capture and its evidence to a new run directory, records the original hashes,
+and validates the entire repaired capture before using the normal report
+importer. Original evidence remains unchanged. These records use
+`kind=cached_extract_repair` and `agent_invoked=false`; they are not browser
+calls. Nonempty but unsupported reading formulas use the literal source policy
+above; unrelated text conflicts remain failures.
+The importer must succeed before the repaired run is recorded as complete;
+an interrupted import can resume from its validated local cache.
+
+Presentation migration also restores source-backed mathematical title formatting
+when the current title exactly matches the old captured or rendered title.
+User-modified titles are preserved. Repairing an existing report's presentation
+does not certify issue completeness or add a future, in-progress issue to the
+daily date-range inventory.
+
+An official `In Progress` or `partial` marker bound to the current issue is a
+completeness failure even when every currently visible article was captured.
+The collector retains failure evidence and does not replace a prior checkpoint;
+Python also rejects these sources during import and presentation migration.
+Markers for other issues in the navigation menu do not trigger this check.
+
+All journal reports use `volume/issue.md`, for example `acs/jctc/22/1.md`.
+The importer never maintains a second `volume/issue/report.md`. Retire an old
+layout locally, without fetching or regenerating paper metadata:
 
 ```bash
+python main.py migrate --journal-layout-only --data-dir /path/to/reports --backup-dir /path/to/project/.work/backups/journal-layout
+```
+
+The migration backs up both originals, preserves completed tasks from either
+copy, and removes the old `report.md` and its empty directory. A lone old report
+moves byte-for-byte. Duplicate files may differ only in generated presentation
+or task completion; conflicting notes, anchors or article text leave both files
+untouched and fail visibly. Other assets in the old directory remain in place.
+The importer requires this migration before updating an issue with both layouts.
+
+```text
+run.sh                   Fixed daily deployment command
+main.py                  Python CLI entrypoint
+src/papertrack/
+  cli.py, config.py      Commands and configuration
+  arxiv/                 arXiv fetch and entry model
+  journals/              Issue discovery, agent, capture validation and cache
+  reports/               Rendering, templates, reading state and migrations
+  browser/               Installed fixed JavaScript collector
+tests/                   Python tests and fixtures
+browser/                 Compatibility entrypoints and JavaScript tests
+scripts/                 Local maintenance tools
+docs/                    Documentation index, historical plans and experiments
+experiments/             Optional older prototypes
+```
+
+See [the documentation map](docs/README.md). Generated reports and raw browser
+captures live under the configured data directory; `.papertrack-runs/` retains
+successful, partial and failed agent evidence. Local diagnostics and historical
+`.papertrack_state.json` remain separate from source code.
+
+See [INSTALL.md](INSTALL.md) for installation and optional browser components.
+
+```bash
+pip install -e '.[dev]'
 pytest -q
+node --test browser/*.test.mjs
+cd experiments/journal-workflow && npm test
 ```
 
-Direct journal development commands intentionally leave
-`PAPERTRACK_CROSSREF_MODE` unset. For AIP, test a known formal issue explicitly:
-
-```bash
-python main.py journal issue --journal jcp --volume 164 --issue 16 --year 2026
-```
-
-Run syntax checks:
-
-```bash
-python -m compileall -q src tests
-```
-
-Current verification commands used during development:
-
-```bash
-/home/ansatz/soft/miniconda3/bin/conda run -n arxiv pytest -q
-/home/ansatz/soft/miniconda3/bin/conda run -n arxiv python -m compileall -q src tests
-```
-
-For a deliberately bounded live check of exactly one formal issue:
-
-```bash
-/home/ansatz/soft/miniconda3/bin/conda run -n arxiv \
-  python scripts/verify_official_issue_runtime.py \
-  --provider acs --journal jcim --volume 66 --issue 12 \
-  --profile-root .papertrack_browser_profiles \
-  --snapshot-root .papertrack_official_cache \
-  --diagnostics-dir .papertrack_diagnostics
-```
-
-The verifier deliberately bypasses a valid cached snapshot for this single
-check so it performs one canonical live issue fetch; it never deletes or
-damages the prior snapshot, and a blocked or failed live check leaves it
-available to production. Production `run_j.sh` remains snapshot-first. The
-verifier contacts only the canonical official issue resource (plus AIP's
-required same-origin official abstract endpoint). It never uses CrossRef and
-does not write Markdown unless `--write-report --data-dir PATH` is explicitly
-supplied. It prints one JSON observation, including a concise failure message;
-`blocked` is a legitimate visible outcome and is never converted into an empty
-successful issue.
-
-### Optional isolated journal workflow
-
-For a Crawlee-backed executor with resumable connected-browser capture and optional
-OpenAI/DeepSeek recovery decisions, see [journal-workflow/README.md](journal-workflow/README.md).
-It has its own Node dependencies and entry point; installing or enabling it is not
-required for the existing arXiv or journal CLI. Its browser host must remain connected.
+Tests mock network and Zotero. Live publisher access and an agent's end-to-end
+collection require separate acceptance in a review output directory.

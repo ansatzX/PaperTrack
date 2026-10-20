@@ -1,85 +1,132 @@
-# Connected-browser issue capture
+# Agent access → fixed browser collector
 
-`issue.mjs` uses a supplied browser-client tab to open a formal issue page,
-click its Abstract buttons, and extract the displayed title, DOI, authors,
-citation and abstract. It does not read browser profiles/cookies or visit
-PDF/full-text links. Browser connection and any interactive login stay with
-the caller. A new empty automated browser is not equivalent to the browser
-session where the user can access the publisher.
+The agent establishes access to the official issue in a supported browser session.
+Fixed repository code then expands abstracts, parses the rendered DOM and saves
+structured data. It never launches a browser, reads profiles/cookies, calls an LLM,
+solves challenges or refetches the publisher through HTTP.
 
-The collector supports the observed Silverchair ACS/AIP layouts and APS issue
-pages. ACS/AIP expand abstracts in the issue page; APS keeps the issue tab open
-and visits only its linked Abstract pages in a second tab. APS issue summaries
-are never treated as abstracts. Live samples and counts are in
-[VALIDATION.md](VALIDATION.md); this is not a promise of universal access.
+## Keep the integration small
 
-## Run from an agent's supported browser session
+Use the existing Codex browser tool and one public handoff:
+`collectCuaIssueBatch(...)`. Keep browser access with the agent, deterministic
+DOM collection and checkpoints in these modules, and validation/report state in
+Python. Do not add a custom browser MCP server, Python browser transport, model
+SDK or autonomous retry service to this path. The older `experiments/journal-workflow/`
+prototype is optional and is not required by this handoff.
 
-First establish the browser and read its documentation through the installed
-Chrome/browser skill. Reuse the chosen tab and supported browser API. Then:
+Reliability means bounded batches, resumable atomic checkpoints, explicit
+failures and preservation of prior reports. A readable page with a changed layout
+requires a collector fix and regression fixture; repeating or expanding the
+agent prompt must not replace the fixed parser.
+
+The implementation ships in `src/papertrack/browser/` as Python package data.
+The modules in this repository directory forward to that implementation for
+existing callers and tests. `papertrack journal issue --run-agent` invokes Codex
+and supplies the installed absolute module path; it adds no browser transport.
+Task tabs must not be grouped/named or marked as deliverables. The CUA adapter
+closes the supplied task-owned issue/Abstract tabs when collection completes;
+the agent must also clean up on failure and report tab IDs if that is impossible.
+
+## Handoff
+
+In Codex, use **the same `cua_repl` runtime** for access, module imports and
+collection. `node_repl` is a different process and does not inherit browser handles.
+After selecting a browser through the documented CUA API, retain its `browserId`
+and the real task-owned `tab`. Pass the actual `cua` runtime and reuse that tab;
+the adapter can also resolve it through `cua.getTab(tabId, {browser: browserId})`.
+Never construct mock runtime or tab objects. The legacy `agent.browsers` interface
+remains supported; neither interface opens another browser transport.
+
+After the agent has opened the official issue and resolved access, run in cua_repl:
 
 ```js
-var { captureIssue } = await import('/absolute/path/arxiv_reading/browser/issue.mjs');
-var fs = await import('node:fs/promises');
-var request = {url:'https://pubs.acs.org/toc/jcisd8/66/12', volume:'66', issue:'12'};
-var capture = await captureIssue(tab, request);
-await fs.writeFile('/tmp/jcim-66-12.json', JSON.stringify(capture, null, 2));
+var collector = await import('/absolute/repo/browser/cua.mjs');
+var request = {url:'https://pubs.acs.org/jcisd8/issue/66/12',volume:'66',issue:'12'};
+var result = await collector.collectCuaIssueBatch(cua, browser.browserId, tab.id, request, {
+  tab, checkpointPath:'/absolute/repo/.work/cache/jcim-66-12.json', maxInteractions:4, saveHtml:true,
+});
+nodeRepl.write(result);
 ```
 
-Each call attempts at most four still-missing Abstract controls and has a
-30-second batch budget (an in-flight click/abstract wait can extend this).
-While `remaining_abstracts > 0` and the prior call made progress, call again
-with `{navigate:false, previous:capture}` and save the new capture. Each expanded panel is read then closed so it cannot cover the next control.
-Already captured abstracts are retained in the passed capture; do not reload between batches. Inspect interaction errors instead
-of endlessly retrying. The caller finalizes/releases its tabs when finished.
-An interrupted connection produces an error, never an invented empty issue.
+Local ES-module imports and Node filesystem APIs must be available in cua_repl.
+The API is not a plain Node browser launcher. A missing runtime capability is a
+visible failure, not permission to replace the parser with model-generated code.
+For another compatible browser host, `collect.mjs` also exposes
+`collectIssueBatch(domTab, request, options)` for an existing tab with
+`goto`, `playwright.evaluate` and locator `click/getAttribute` methods.
 
-This is an actual browser interaction module for an agent-controlled session,
-not a standalone Node CLI or a cron browser process. `--browser-snapshot` below
-imports its output; that flag alone does not start/control Chrome.
+Only repeat while progress increases, with the same checkpoint path. Each call
+checks access and current membership, loads saved text, attempts at most four
+controls by default (allowed budget 1–8), closes floating panels, and atomically
+replaces the checkpoint. The collector has a 30-second batch deadline, with an
+in-flight wait allowed to extend it. The caller owns one tab/checkpoint at a time;
+do not run concurrent collectors against the same checkpoint.
 
-For APS supply a second browser-owned tab:
+For APS provide `abstractTabId` to the CUA adapter (or `abstractTab` to the lower-level
+collector), a separate task-owned tab for linked Abstract pages. The official issue controls membership; summaries are not abstracts. No
+PDF/full-text links are followed. If an Abstract page is challenged, the failed
+visit remains in errors for the agent's access recovery. Other articles retain
+progress. ACS/AIP use issue-page controls and require no second tab.
 
-```js
-var abstractTab = await browser.tabs.new();
-var capture = await captureIssue(issueTab,
-  {url:'https://journals.aps.org/prl/issues/136/1', volume:'136', issue:'1'},
-  {abstractTab});
-// Resume with {navigate:false, abstractTab, previous:capture} and save each batch.
-```
+## Status and ownership
 
-APS deduplicates highlighted papers by DOI. It validates the visited page's DOI
-before accepting its abstract and preserves rendered MathJax text. It does not
-click PDF or full-text links; the publisher may itself render article text below
-the Abstract section, which this collector does not extract.
+| Status | Next owner/action |
+|---|---|
+| `needs_access` | Agent handles navigation/challenge or requests human handoff. No checkpoint overwritten. |
+| `partial` | Agent repeats the same fixed module call while captured increases. |
+| `needs_attention` | Inspect the stage. Access/interaction failures allow one repeat of the same fixed call per failed DOI; repeated failure stops. Readable-page extraction defects require a code/test fix. |
+| `needs_extractor_update` | Preserve HTML and fix repository extraction code; no runtime parser invention. |
+| `wrong_issue` | Agent opens the requested journal/issue. |
+| `complete` | Python validates and renders. This is observed-inventory consistency, not an independent completeness oracle. |
 
-## Generate the existing PaperTrack report
+`access.mjs` performs a read-only readiness probe. `dom.mjs` contains the fixed
+Silverchair ACS/AIP parser. `issue.mjs` and `aps_issue.mjs` own deterministic
+interaction. Silverchair panels are located by the actual `aria-controls`
+attribute: opaque control IDs must never be transformed into guessed panel IDs.
+
+Errors carry the DOI and interaction stage; historical errors are retained.
+Malformed or changed checkpoints are rejected. New tabs and reordered inventories
+can resume captured DOI text. Already captured abstracts are not revisited.
+
+`saveHtml:true` writes `<checkpoint>.html` on the first batch, errors and completion from the rendered issue DOM for local
+parser diagnosis. `html.mjs` reads 32,000-character chunks and checks their lengths
+and the total size, avoiding the browser API's observed large-string truncation.
+Failed exports preserve previous HTML. It may contain institution-specific page text; keep it in the
+private task/cache directory. It does not export cookies or a browser profile.
+If access is blocked later, the previous valid checkpoint and HTML survive.
+
+## Import
 
 ```bash
 python main.py journal issue --journal jcim --volume 66 --issue 12 --year 2026 \
-  --browser-snapshot /tmp/jcim-66-12.json --data-dir /tmp/papertrack-browser-review
+  --browser-snapshot /tmp/jcim-66-12.json --data-dir /tmp/papertrack-review
 ```
 
-Python rejects wrong publisher URLs, wrong issue headings/citations, duplicate
-DOIs, missing card identities and inconsistent card counts. It then preserves
-this official member set and fills missing fields through the third-party
-pipeline. Missing abstracts remain explicit; publisher Extracts fill the same reading abstract field, with their original type retained in provenance.
-The Markdown retains checkbox and collection state through the existing writer.
-Do not promote a fixture-based test or a single successful abstract into a
-claim that the full live issue was captured.
+The fixed collector produces the existing capture schema with
+`capture_method:"fixed_browser"` and `collector:"papertrack-browser-v2"`.
+Python validates requested issue identity, DOI inventory and all available
+Abstract/Extract fields before writing. Publisher Extracts keep their source type;
+missing controls have an observed unavailable reason. Prior report members,
+abstracts, anchors and reading state are preserved.
 
-## Complementary sources
+`issue.mjs` also retains the lower-level `captureIssue(tab,request,options)` API
+for the older worker. New tasks should use `collectIssueBatch`, which adds access
+checking and disk checkpoints and always sets `navigate:false`. Browser access
+belongs to the agent, not the deterministic collector.
 
-Europe PMC → Crossref → PubMed fill empty fields, preserving chosen values and
-recording disagreements. When official access fails they contribute a normalized
-DOI union, restricted to exact volume/issue. OpenAlex and Semantic Scholar only
-enrich abstracts for existing DOIs in batches of 50. Empty/error responses are
-not successful empty issues. OpenAlex snippets below 40 words are rejected as a
-conservative fragment filter; this may also reject unusually short real abstracts.
-Optional `OPENALEX_API_KEY` and `SEMANTIC_SCHOLAR_API_KEY` are read at runtime and
-never written into snapshots or logs. No key is required to attempt either API.
+## Verification
 
-API references: [Europe PMC](https://europepmc.org/RestfulWebService),
-[OpenAlex authentication and batch limits](https://help.openalex.org/api/authentication/),
-[Semantic Scholar Graph API](https://api.semanticscholar.org/api-docs/graph),
-[Crossref REST API](https://www.crossref.org/documentation/retrieve-metadata/rest-api/).
+```bash
+node --test browser/*.test.mjs
+pytest -q
+```
+
+See VALIDATION.md for dated live evidence. Tests do not establish current
+publisher access or universal layout compatibility.
+
+Python derives report reading text from the retained HTML after source validation.
+`reports/reading.py` preserves native superscripts/subscripts, supported MathML and
+rendered MathJax structures using explicit text notation (`10^{13.9}`, `M_{500c}`,
+`(a)/(b)`, `√(x)`). Raw captures remain unchanged. Unsupported math structures
+raise an error rather than silently flattening them; cached HTML supports local
+parser regression checks without additional publisher traffic.

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from papertrack.migration import (
+from papertrack.reports.migration import (
     CURRENT_JOURNAL_FORMAT,
     classify_report_file,
     has_journal_quality_failure,
@@ -49,7 +49,7 @@ def test_prl_doi_casing_does_not_trigger_quality_failure():
     # PubMed (an official fallback tier) exposes lowercase PRL DOIs; they are
     # canonical (DOI matching is case-insensitive) and must not be treated as
     # quality failures.  Malformed/truncated PRL DOIs are guarded at the
-    # journal_rebuild layer instead.
+    # capture validation layer instead.
     official = """### 10.1103/PhysRevLett.127.270401
 
 Title:  Quantum Vacuum Sagnac Effect
@@ -100,8 +100,9 @@ Abstract:
 """
 
 
-def test_legacy_journal_migration_removes_toc_image_and_preserves_task(tmp_path):
-    report_file = tmp_path / "aip" / "jcp" / "164" / "16.md"
+@pytest.mark.parametrize('relative', ['aip/jcp/164/16.md', 'aip/jcp/164/16/report.md'])
+def test_legacy_journal_migration_removes_toc_image_and_preserves_task(tmp_path, relative):
+    report_file = tmp_path / relative
     report_file.parent.mkdir(parents=True)
     report_file.write_text(_legacy_journal_report(), encoding="utf-8")
 
@@ -309,7 +310,7 @@ def test_legacy_journal_path_identity_cannot_be_overridden_by_personal_tag(tmp_p
 
 
 def test_migration_validation_failure_restores_backup(tmp_path, monkeypatch):
-    from papertrack import migration
+    from papertrack.reports import migration
 
     report_file = tmp_path / "aip" / "jcp" / "164" / "16.md"
     report_file.parent.mkdir(parents=True)
@@ -325,7 +326,7 @@ def test_migration_validation_failure_restores_backup(tmp_path, monkeypatch):
 
 
 def test_migration_atomic_replace_failure_restores_original(tmp_path, monkeypatch):
-    from papertrack import migration
+    from papertrack.reports import migration
 
     report_file = tmp_path / "arxiv" / "cs.AI" / "2026" / "07" / "07.md"
     report_file.parent.mkdir(parents=True)
@@ -372,7 +373,7 @@ from #cs.AI-2026-07-07
 
 
 def test_write_report_file_validates_before_touching_filesystem(tmp_path):
-    from papertrack import migration
+    from papertrack.reports import migration
 
     report_file = tmp_path / "missing-parent" / "report.md"
 
@@ -400,7 +401,7 @@ def test_write_report_file_sigterm_leaves_complete_report_and_backup(
         import sys
         from pathlib import Path
 
-        from papertrack import migration
+        from papertrack.reports import migration
 
         report_path = Path(sys.argv[1])
         content_path = Path(sys.argv[2])
@@ -611,7 +612,7 @@ Abstract:
         "from #quant-ph-2025-03-01", "from #chem-ph-2025-03-01"
     )
     assert result.status == "repaired"
-    assert repaired == expected
+    assert repaired == expected.replace("Abstract:\n> [!quote]", "> [!quote]")
     assert "- [x] [arXiv:2503.00001]" in repaired
     assert "literal text quant-ph-2025-03-01" in repaired
     assert not report_file.with_suffix(".md.bak").exists()

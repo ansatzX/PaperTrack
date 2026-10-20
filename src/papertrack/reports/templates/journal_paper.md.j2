@@ -1,0 +1,18 @@
+### {{ entry.doi }}
+
+Links:
+
+- [ ] [{{ entry.doi }}]({{ entry.doi_url }})
+
+Title:  {{ entry.title }}
+
+Authors:  {% for author in entry.authors %}{{ author }}{% if not loop.last %}, {% endif -%}{% endfor %}
+
+{% if entry.abstract -%}
+{% set reading_label = 'Extract（原文摘录）' if entry.field_sources.get('abstract') == 'official_browser_extract' else 'Abstract' -%}
+> [!quote]- {{ reading_label }}
+{% for line in (entry.abstract | abstract_markdown).split('\n') -%}
+> {{ line }}
+{% endfor -%}
+
+{% endif -%}

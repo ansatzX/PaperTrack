@@ -12,8 +12,8 @@ import sys
 from typing import Callable
 
 from papertrack.adapter_result import AdapterResult
-from papertrack.arxiv_index_fetch import query_arxiv_result
-from papertrack.codex import get_query_args, official_arxiv_category
+from papertrack.arxiv.fetch import query_arxiv_result
+from papertrack.config import get_query_args, official_arxiv_category
 
 
 _ARXIV_HEADING = re.compile(r"^###\s*(arXiv:\S+)", re.MULTILINE)

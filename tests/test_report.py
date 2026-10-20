@@ -2,20 +2,17 @@
 from bs4 import BeautifulSoup
 import pytest
 
-from papertrack.arxiv_entry import ArxivEntry
-from papertrack.arxiv_index_fetch import _parse_arxiv_page, _parse_arxiv_result
-from papertrack.journal_entry import JournalEntry
-from papertrack.report import (
+from papertrack.arxiv.entry import ArxivEntry
+from papertrack.arxiv.fetch import _parse_arxiv_page, _parse_arxiv_result
+from papertrack.journals.entry import JournalEntry
+from papertrack.reports.render import (
     parse_old_report,
     _gen_oneday_markdown,
     _render_journal_paper,
     _render_journal_report,
     parse_journal_report,
     _is_missing_or_corrupt_journal_report,
-    filter_journal_to_md,
-    filter_journal_auto,
 )
-from papertrack.source_policy import SourcePolicy
 from papertrack.zotero_query import ZoteroQuery
 
 
@@ -190,289 +187,6 @@ Title:  Raw <mml:math></mml:math> title
 
         assert _is_missing_or_corrupt_journal_report(str(tmp_path), "prl", "127", "27") is True
 
-    def test_auto_rebuilds_processed_issue_when_file_missing(self, tmp_path, monkeypatch):
-        from papertrack import crossref_loi, report
-
-        state = {"jcp": {"processed": [[164, 16]]}}
-        rebuilt = []
-
-        monkeypatch.setattr(report, "_load_state", lambda md_folder: state)
-        monkeypatch.setattr(report, "_save_state", lambda md_folder, new_state: state.update(new_state))
-        monkeypatch.setattr(crossref_loi, "discover_issues_crossref", lambda issn, from_year=0: [(2026, 164, 16)])
-        monkeypatch.setattr(
-            report,
-            "filter_journal_to_md",
-            lambda **kwargs: rebuilt.append((kwargs["volume"], kwargs["issue"])),
-        )
-
-        filter_journal_auto(
-            journal_name="Journal of Chemical Physics",
-            journal_slug="jcp",
-            issn="0021-9606",
-            acs_code="",
-            md_folder=str(tmp_path),
-            provider="aip",
-            source_policy=SourcePolicy.from_environment(
-                {"PAPERTRACK_CROSSREF_MODE": "metadata"}
-            ),
-        )
-
-        assert rebuilt == [("164", "16")]
-
-    def test_auto_rebuilds_missing_older_processed_issue_in_normal_mode(self, tmp_path, monkeypatch):
-        from papertrack import crossref_loi, report
-
-        valid_latest = tmp_path / "jcp" / "164" / "16.md"
-        valid_latest.parent.mkdir(parents=True)
-        valid_latest.write_text(
-            """# Journal of Chemical Physics Vol. 164, Iss. 16 — 2026
-
-## collected
-
-## not collected
-
-### 10.1063/latest
-
-Title:  Latest article
-""",
-            encoding="utf-8",
-        )
-        rebuilt = []
-
-        monkeypatch.setattr(report, "_load_state", lambda md_folder: {"jcp": {"processed": [[163, 24], [164, 16]]}})
-        monkeypatch.setattr(report, "_save_state", lambda md_folder, new_state: None)
-        monkeypatch.setattr(crossref_loi, "discover_issues_crossref", lambda issn, from_year=0: [(2026, 164, 16)])
-        monkeypatch.setattr(
-            report,
-            "filter_journal_to_md",
-            lambda **kwargs: rebuilt.append((kwargs["volume"], kwargs["issue"])),
-        )
-
-        filter_journal_auto(
-            journal_name="Journal of Chemical Physics",
-            journal_slug="jcp",
-            issn="0021-9606",
-            acs_code="",
-            md_folder=str(tmp_path),
-            provider="aip",
-            source_policy=SourcePolicy.from_environment(
-                {"PAPERTRACK_CROSSREF_MODE": "metadata"}
-            ),
-        )
-
-        assert rebuilt == [("163", "24")]
-
-    def test_auto_skips_processed_issue_when_file_is_valid(self, tmp_path, monkeypatch):
-        from papertrack import crossref_loi, report
-
-        report_file = tmp_path / "jcp" / "164" / "16.md"
-        report_file.parent.mkdir(parents=True)
-        report_file.write_text(
-            """# Journal of Chemical Physics Vol. 164, Iss. 16 — 2026
-
-## collected
-
-## not collected
-
-### 10.1063/example
-
-Title:  Test article
-""",
-            encoding="utf-8",
-        )
-        rebuilt = []
-
-        monkeypatch.setattr(report, "_load_state", lambda md_folder: {"jcp": {"processed": [[164, 16]]}})
-        monkeypatch.setattr(report, "_save_state", lambda md_folder, new_state: None)
-        monkeypatch.setattr(crossref_loi, "discover_issues_crossref", lambda issn, from_year=0: [(2026, 164, 16)])
-        monkeypatch.setattr(
-            report,
-            "filter_journal_to_md",
-            lambda **kwargs: rebuilt.append((kwargs["volume"], kwargs["issue"])),
-        )
-
-        filter_journal_auto(
-            journal_name="Journal of Chemical Physics",
-            journal_slug="jcp",
-            issn="0021-9606",
-            acs_code="",
-            md_folder=str(tmp_path),
-            provider="aip",
-            source_policy=SourcePolicy.from_environment(
-                {"PAPERTRACK_CROSSREF_MODE": "metadata"}
-            ),
-        )
-
-        assert rebuilt == []
-
-    def test_auto_does_not_mark_new_issue_processed_when_report_write_fails(self, tmp_path, monkeypatch):
-        from papertrack import crossref_loi, report
-
-        state = {}
-
-        monkeypatch.setattr(report, "_load_state", lambda md_folder: state)
-        monkeypatch.setattr(report, "_save_state", lambda md_folder, new_state: state.update(new_state))
-        monkeypatch.setattr(crossref_loi, "discover_issues_crossref", lambda issn, from_year=0: [(2026, 164, 16)])
-        monkeypatch.setattr(report, "filter_journal_to_md", lambda **kwargs: False)
-
-        filter_journal_auto(
-            journal_name="Journal of Chemical Physics",
-            journal_slug="jcp",
-            issn="0021-9606",
-            acs_code="",
-            md_folder=str(tmp_path),
-            provider="aip",
-            source_policy=SourcePolicy.from_environment(
-                {"PAPERTRACK_CROSSREF_MODE": "metadata"}
-            ),
-        )
-
-        assert state == {"jcp": {"processed": []}}
-
-    def test_aip_auto_official_only_requires_explicit_issue(self, tmp_path, monkeypatch):
-        from papertrack import crossref_loi, report
-
-        monkeypatch.setattr(report, "_load_state", lambda md_folder: {})
-        monkeypatch.setattr(
-            crossref_loi,
-            "discover_issues_crossref",
-            lambda *args, **kwargs: (_ for _ in ()).throw(
-                AssertionError("official-only mode must not call CrossRef discovery")
-            ),
-        )
-
-        with pytest.raises(RuntimeError, match=r"journal issue.*--volume.*--issue"):
-            filter_journal_auto(
-                journal_name="Journal of Chemical Physics",
-                journal_slug="jcp",
-                issn="0021-9606",
-                acs_code="",
-                md_folder=str(tmp_path),
-                provider="aip",
-                source_policy=SourcePolicy.official_only(),
-            )
-
-    def test_acs_auto_falls_back_to_crossref_when_loi_fails(self, tmp_path, monkeypatch):
-        from papertrack import acs_loi, crossref_loi, report
-
-        state = {}
-        processed = []
-        monkeypatch.setattr(report, "_load_state", lambda md_folder: state)
-        monkeypatch.setattr(
-            report, "_save_state",
-            lambda md_folder, new_state: state.update(new_state),
-        )
-        monkeypatch.setattr(
-            acs_loi,
-            "discover_issues",
-            lambda acs_code, from_year=0: (_ for _ in ()).throw(
-                RuntimeError("ACS LOI blocked")
-            ),
-        )
-        monkeypatch.setattr(
-            crossref_loi,
-            "discover_issues_crossref",
-            lambda issn, from_year=0: [(2026, 22, 14), (2026, 22, 13)],
-        )
-        monkeypatch.setattr(
-            report,
-            "filter_journal_to_md",
-            lambda **kwargs: processed.append((kwargs["volume"], kwargs["issue"])) or True,
-        )
-
-        filter_journal_auto(
-            journal_name="Journal of Chemical Theory and Computation",
-            journal_slug="jctc",
-            issn="1549-9618",
-            acs_code="jctcce",
-            md_folder=str(tmp_path),
-            provider="acs",
-            backfill=True,
-            source_policy=SourcePolicy.official_only(),
-        )
-
-        # backfill re-sorts newest-first discovery into oldest-first processing.
-        assert processed == [("22", "13"), ("22", "14")]
-        assert state["jctc"]["processed"] == [[22, 13], [22, 14]]
-
-    def test_acs_latest_falls_back_to_crossref_when_latest_fails(self, tmp_path, monkeypatch):
-        from papertrack import acs_loi, crossref_loi, report
-
-        processed = []
-        monkeypatch.setattr(report, "_load_state", lambda md_folder: {})
-        monkeypatch.setattr(report, "_save_state", lambda md_folder, new_state: None)
-        monkeypatch.setattr(
-            acs_loi,
-            "get_latest_issue",
-            lambda acs_code: (_ for _ in ()).throw(RuntimeError("ACS LOI blocked")),
-        )
-        monkeypatch.setattr(
-            crossref_loi,
-            "discover_issues_crossref",
-            lambda issn, from_year=0: [(2026, 22, 14), (2026, 22, 13)],
-        )
-        monkeypatch.setattr(
-            report,
-            "filter_journal_to_md",
-            lambda **kwargs: processed.append((kwargs["volume"], kwargs["issue"])) or True,
-        )
-
-        filter_journal_auto(
-            journal_name="Journal of Chemical Theory and Computation",
-            journal_slug="jctc",
-            issn="1549-9618",
-            acs_code="jctcce",
-            md_folder=str(tmp_path),
-            provider="acs",
-            backfill=False,
-            source_policy=SourcePolicy.official_only(),
-        )
-
-        # latest mode processes only the newest CrossRef-discovered issue.
-        assert processed == [("22", "14")]
-
-    def test_aps_auto_falls_back_to_crossref_when_issue_pages_fail(self, tmp_path, monkeypatch):
-        from papertrack import aps_loi, crossref_loi, report
-
-        state = {}
-        processed = []
-        monkeypatch.setattr(report, "_load_state", lambda md_folder: state)
-        monkeypatch.setattr(
-            report, "_save_state",
-            lambda md_folder, new_state: state.update(new_state),
-        )
-        monkeypatch.setattr(
-            aps_loi,
-            "discover_issues_aps",
-            lambda journal_slug, from_year=0: (_ for _ in ()).throw(
-                RuntimeError("APS issue pages blocked")
-            ),
-        )
-        monkeypatch.setattr(
-            crossref_loi,
-            "discover_issues_crossref",
-            lambda issn, from_year=0: [(2026, 137, 1), (2026, 136, 24)],
-        )
-        monkeypatch.setattr(
-            report,
-            "filter_journal_to_md",
-            lambda **kwargs: processed.append((kwargs["volume"], kwargs["issue"])) or True,
-        )
-
-        filter_journal_auto(
-            journal_name="Physical Review Letters",
-            journal_slug="prl",
-            issn="0031-9007",
-            acs_code="",
-            md_folder=str(tmp_path),
-            provider="aps",
-            backfill=True,
-            source_policy=SourcePolicy.official_only(),
-        )
-
-        assert processed == [("136", "24"), ("137", "1")]
-        assert state["prl"]["processed"] == [[136, 24], [137, 1]]
-
 
 class TestJournalRendering:
     def test_journal_rendering_uses_schema_and_omits_toc_image(self):
@@ -504,129 +218,6 @@ class TestJournalRendering:
         assert "WHERE completed" in report
         assert "  - #jcp-v164-i16" not in report
         assert "https://example.test/toc.jpg" not in report
-
-    def test_filter_journal_to_md_preserves_existing_task_state(self, tmp_path, monkeypatch):
-        from papertrack import report
-        from papertrack.adapter_result import AdapterResult, SUCCESS
-
-        report_file = tmp_path / "jcp" / "164" / "16.md"
-        report_file.parent.mkdir(parents=True)
-        report_file.write_text(
-            """# Journal of Chemical Physics Vol. 164, Iss. 16 — 2026
-
-## collected
-
-## not collected
-
-### 10.1063/example
-
-Links:
-
-- [x] [10.1063/example](https://doi.org/10.1063/example) ✅ 2026-06-09
-
-Title:  Old title
-""",
-            encoding="utf-8",
-        )
-        entry = JournalEntry(
-            doi="10.1063/example",
-            title="Updated title",
-            authors=["A Author"],
-            abstract="Abstract text",
-            date="2026",
-        )
-        monkeypatch.setattr(
-            report,
-            "query_journal_issue_full_result",
-            lambda *args, **kwargs: AdapterResult(
-                entries={entry.doi: entry},
-                outcome=SUCCESS,
-                provider="aip",
-                source="journal",
-            ),
-        )
-
-        filter_journal_to_md(
-            journal_name="Journal of Chemical Physics",
-            journal_slug="jcp",
-            volume="164",
-            issue="16",
-            issn="0021-9606",
-            md_folder=str(tmp_path),
-            provider="aip",
-        )
-
-        rendered = report_file.read_text(encoding="utf-8")
-        assert "- [x] [10.1063/example](https://doi.org/10.1063/example) ✅ 2026-06-09" in rendered
-        assert "Updated title" in rendered
-        assert not report_file.with_suffix(".md.bak").exists()
-
-    def test_filter_journal_to_md_passes_identical_provider_runtime(
-        self, tmp_path, monkeypatch
-    ):
-        from papertrack import report
-        from papertrack.adapter_result import AdapterResult, FETCH_FAILED
-
-        runtime = object()
-        seen = []
-        monkeypatch.setattr(
-            report,
-            "query_journal_issue_full_result",
-            lambda *args, **kwargs: seen.append(kwargs["provider_runtime"])
-            or AdapterResult(
-                entries={},
-                outcome=FETCH_FAILED,
-                provider="aip",
-                source="journal",
-            ),
-        )
-
-        assert not filter_journal_to_md(
-            journal_name="Journal of Chemical Physics",
-            journal_slug="jcp",
-            volume="164",
-            issue="16",
-            issn="0021-9606",
-            md_folder=str(tmp_path),
-            provider="aip",
-            provider_runtime=runtime,
-        )
-        assert seen == [runtime]
-
-    def test_filter_journal_to_md_infers_acs_provider_for_schema(self, tmp_path, monkeypatch):
-        from papertrack import report
-        from papertrack.adapter_result import AdapterResult, SUCCESS
-
-        entry = JournalEntry(
-            doi="10.1021/example",
-            title="ACS article",
-            authors=["A Author"],
-            abstract="Abstract text",
-            date="2026",
-        )
-        monkeypatch.setattr(
-            report,
-            "query_journal_issue_full_result",
-            lambda *args, **kwargs: AdapterResult(
-                entries={entry.doi: entry},
-                outcome=SUCCESS,
-                provider="acs",
-                source="journal",
-            ),
-        )
-
-        filter_journal_to_md(
-            journal_name="Journal of Chemical Theory and Computation",
-            journal_slug="jctc",
-            volume="22",
-            issue="8",
-            issn="1549-9618",
-            md_folder=str(tmp_path),
-            acs_code="jctcce",
-        )
-
-        rendered = (tmp_path / "jctc" / "22" / "8.md").read_text(encoding="utf-8")
-        assert "papertrack_provider: acs" in rendered
 
 
 class TestGenOnedayMarkdown:
@@ -968,9 +559,9 @@ from datetime import date
 
 
 def test_filter_arxiv_days_to_md_processes_exact_days(tmp_path, monkeypatch):
-    from papertrack import report
+    from papertrack.reports import render as report
     from papertrack.adapter_result import AdapterResult, SUCCESS
-    from papertrack.arxiv_entry import ArxivEntry
+    from papertrack.arxiv.entry import ArxivEntry
 
     calls = []
 
@@ -1004,9 +595,9 @@ def test_filter_arxiv_days_to_md_processes_exact_days(tmp_path, monkeypatch):
 
 
 def test_filter_arxiv_days_to_md_skips_existing_written_day(tmp_path, monkeypatch):
-    from papertrack import report
+    from papertrack.reports import render as report
     from papertrack.adapter_result import AdapterResult, SUCCESS
-    from papertrack.arxiv_entry import ArxivEntry
+    from papertrack.arxiv.entry import ArxivEntry
 
     existing = tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "08.md"
     existing.parent.mkdir(parents=True)
@@ -1062,9 +653,9 @@ Title:  Existing paper
 def test_filter_arxiv_days_to_md_refreshes_existing_day_and_preserves_task_state(
     tmp_path, monkeypatch
 ):
-    from papertrack import report
+    from papertrack.reports import render as report
     from papertrack.adapter_result import AdapterResult, SUCCESS
-    from papertrack.arxiv_entry import ArxivEntry
+    from papertrack.arxiv.entry import ArxivEntry
 
     existing = tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "08.md"
     existing.parent.mkdir(parents=True)
@@ -1144,7 +735,7 @@ Abstract:
 def test_refresh_fetch_failure_preserves_existing_report_byte_for_byte(
     tmp_path, monkeypatch
 ):
-    from papertrack import report
+    from papertrack.reports import render as report
     from papertrack.adapter_result import AdapterResult, FETCH_FAILED
 
     existing = tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "08.md"
@@ -1191,9 +782,9 @@ from #quant-ph-2026-06-08
 def test_refresh_does_not_replace_report_when_official_result_loses_old_paper(
     tmp_path, monkeypatch
 ):
-    from papertrack import report
+    from papertrack.reports import render as report
     from papertrack.adapter_result import AdapterResult, SUCCESS
-    from papertrack.arxiv_entry import ArxivEntry
+    from papertrack.arxiv.entry import ArxivEntry
 
     existing = tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "08.md"
     existing.parent.mkdir(parents=True)
@@ -1250,9 +841,9 @@ TASK
 def test_refresh_preserves_collected_section_when_zotero_is_unavailable(
     tmp_path, monkeypatch
 ):
-    from papertrack import report
+    from papertrack.reports import render as report
     from papertrack.adapter_result import AdapterResult, SUCCESS
-    from papertrack.arxiv_entry import ArxivEntry
+    from papertrack.arxiv.entry import ArxivEntry
 
     existing = tmp_path / "arxiv" / "quant-ph" / "2026" / "06" / "08.md"
     existing.parent.mkdir(parents=True)
@@ -1313,9 +904,9 @@ Title:  Old title
 def test_refresh_preserves_collected_when_zotero_index_fetch_failed(
     tmp_path, monkeypatch
 ):
-    from papertrack import report
+    from papertrack.reports import render as report
     from papertrack.adapter_result import AdapterResult, SUCCESS
-    from papertrack.arxiv_entry import ArxivEntry
+    from papertrack.arxiv.entry import ArxivEntry
     from papertrack.identity import MatchResult
 
     class UnavailableZotero:
@@ -1398,7 +989,7 @@ def test_parse_arxiv_page_rejects_partial_entry_parse():
 
 
 def test_parse_arxiv_page_records_the_missing_metadata_field(monkeypatch):
-    from papertrack import arxiv_index_fetch
+    from papertrack.arxiv import fetch as arxiv_index_fetch
 
     attempts = []
     monkeypatch.setattr(
@@ -1423,7 +1014,7 @@ def test_parse_arxiv_page_records_the_missing_metadata_field(monkeypatch):
 
 
 def test_filter_arxiv_days_to_md_skips_empty_days(tmp_path, monkeypatch):
-    from papertrack import report
+    from papertrack.reports import render as report
     from papertrack.adapter_result import AdapterResult, SUCCESS
 
     monkeypatch.setattr(
@@ -1450,7 +1041,7 @@ def test_filter_arxiv_days_to_md_skips_empty_days(tmp_path, monkeypatch):
 
 def test_filter_arxiv_days_to_md_stops_on_rate_limit(tmp_path, monkeypatch):
     import pytest
-    from papertrack import report
+    from papertrack.reports import render as report
     from papertrack.adapter_result import AdapterResult, RATE_LIMITED
 
     calls = []

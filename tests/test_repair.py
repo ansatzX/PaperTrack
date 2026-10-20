@@ -1,7 +1,6 @@
 import json
 
-from papertrack.repair import RepairCandidate, collect_repair_candidates, repair_reports
-from papertrack.source_policy import CrossrefMode, SourcePolicy
+from papertrack.reports.repair import RepairCandidate, collect_repair_candidates, repair_reports
 
 
 def _valid_journal_report() -> str:
@@ -84,89 +83,6 @@ def test_repair_reports_no_fetch_records_deferred(tmp_path):
     assert events[0]["fetch_attempted"] is False
 
 
-def test_repair_reports_fetches_and_records_fixed_journal(tmp_path, monkeypatch):
-    from papertrack import repair, report
-
-    monkeypatch.setattr(
-        repair,
-        "journal_configs",
-        {
-            "jcp": {
-                "name": "Journal of Chemical Physics",
-                "slug": "jcp",
-                "issn": "0021-9606",
-                "provider": "aip",
-            }
-        },
-    )
-    candidate = RepairCandidate(
-        path=str(tmp_path / "data" / "aip" / "jcp" / "164" / "16.md"),
-        source="journal",
-        reason="corrupt",
-        provider="aip",
-        journal_slug="jcp",
-        volume="164",
-        issue="16",
-    )
-
-    captured = {}
-
-    def fake_filter_journal_to_md(**kwargs):
-        captured.update(kwargs)
-        target = tmp_path / "data" / "aip" / "jcp" / "164" / "16.md"
-        target.parent.mkdir(parents=True)
-        target.write_text(_valid_journal_report(), encoding="utf-8")
-
-    monkeypatch.setattr(report, "filter_journal_to_md", fake_filter_journal_to_md)
-
-    results = repair_reports(
-        str(tmp_path / "data"),
-        [candidate],
-        assume_yes=True,
-        source_policy=SourcePolicy.official_only(),
-    )
-
-    assert results[0].outcome == "fixed"
-    assert captured["source_policy"].crossref_mode is CrossrefMode.DISABLED
-    events = _events(tmp_path / "diagnostics" / "repairs.jsonl")
-    assert events[0]["outcome"] == "fixed"
-    assert events[0]["fetch_attempted"] is True
-
-
-def test_repair_reports_records_unresolved_when_fetch_does_not_fix(tmp_path, monkeypatch):
-    from papertrack import repair, report
-
-    monkeypatch.setattr(
-        repair,
-        "journal_configs",
-        {
-            "jcp": {
-                "name": "Journal of Chemical Physics",
-                "slug": "jcp",
-                "issn": "0021-9606",
-                "provider": "aip",
-            }
-        },
-    )
-    monkeypatch.setattr(report, "filter_journal_to_md", lambda **kwargs: None)
-    candidate = RepairCandidate(
-        path=str(tmp_path / "data" / "aip" / "jcp" / "164" / "16.md"),
-        source="journal",
-        reason="missing",
-        provider="aip",
-        journal_slug="jcp",
-        volume="164",
-        issue="16",
-    )
-
-    results = repair_reports(str(tmp_path / "data"), [candidate], assume_yes=True)
-
-    assert results[0].outcome == "unresolved"
-    events = _events(tmp_path / "diagnostics" / "repairs.jsonl")
-    assert events[0]["outcome"] == "unresolved"
-    assert events[0]["fetch_attempted"] is True
-
-
 def test_repair_dispatches_no_fetch(monkeypatch, tmp_path):
     from papertrack import cli
 
@@ -190,14 +106,12 @@ def test_repair_dispatches_no_fetch(monkeypatch, tmp_path):
         zotero,
         assume_yes,
         no_fetch,
-        source_policy,
     ):
         captured.update({
             "data_dir": data_dir,
             "candidates": candidates,
             "assume_yes": assume_yes,
             "no_fetch": no_fetch,
-            "source_policy": source_policy,
         })
         return []
 
@@ -220,5 +134,4 @@ def test_repair_dispatches_no_fetch(monkeypatch, tmp_path):
         "candidates": [candidate],
         "assume_yes": False,
         "no_fetch": True,
-        "source_policy": SourcePolicy.official_only(),
     }

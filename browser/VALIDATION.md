@@ -1,3 +1,39 @@
+# Fixed handoff acceptance — 2026-10-16
+
+- Fresh JCIM66/12 capture with Codex CLI gpt-6-luna. Agent handled access and called
+  the checked-in collector; tool-call review found no inline querySelector/HTML
+  parsing code or model-generated capture JSON in the successful collection round.
+- Fixed `papertrack-browser-v2` capture:43 official records,39 Abstracts,2 Extracts,
+  2 mastheads without controls;41/41 populated reading fields,remaining=0,errors=[].
+  Progress advanced4,8,12,16,20,24,28,32,36,40,41 across bounded module calls.
+- Actual Python CLI import produced41 entries. Independent Python validation
+  accepted the capture and generated report. Production reports/state were not written.
+- Initial handoff exposed separate node_repl/cua_repl environments. Fixed `cua.mjs`
+  adapter uses the documented agent.browsers API in the SAME cua_repl as access.
+- A direct full-HTML result was silently capped near200KB. Fixed `html.mjs` exports
+  bounded chunks instead. Its live export saved538416 bytes; independent BeautifulSoup
+  parsing found43 matching DOI records and41 controls referencing real panels.
+  This source snapshot was refreshed without recollecting abstracts; it is latest
+  issue-inventory evidence, not a claim every saved abstract is in that refreshed HTML.
+- Tests:193 Python,14 browser Node,13 optional worker Node passed. Tests cover
+  challenge/readiness gating,no checkpoint loss on blocked access,fresh-tab resume,
+  inventory drift,opaque control/panel IDs,interaction failure recovery and capped HTML.
+
+Evidence:/tmp/papertrack-fixed-collector-jcim-66-12/{capture.json,capture.json.html,
+verification.json,verify.py,events2.jsonl};report:reports/acs/jcim/66/12.md under that root.
+The capture phase preceded the final HTML export refactor; DOM/interaction logic
+was unchanged by that refactor,and the new exporter was independently live-tested.
+
+Boundary: single ACS issue acceptance. New AIP/APS handoff not live-tested here;
+no manual CAPTCHA interaction demonstrated. Agent invocation is still external,
+not a newly installed unattended scheduler. Source changes remain uncommitted.
+
+---
+
+> Historical acceptance before the 2026-10-16 migration. Legacy network paths
+> mentioned below are now archived in commit 8804413; this is not fresh acceptance
+> of the external-agent task interface.
+
 # Browser issue capture — verified 2026-09-11
 
 The connected Chrome module completed three real publisher issues and the
@@ -89,3 +125,16 @@ re-fetching the 39 existing abstracts. Capture remaining=0, errors=[]. Original
 abstract_type=extract is preserved; imported field provenance is
 `official_browser_extract`. Mapping’s publisher snippet ends in an ellipsis,
 which is preserved. The correction includes the displayed corrected caption range.
+# 2026-10-16 package-owned agent invocation
+
+`python -m papertrack journal issue --journal jcim --volume 66 --issue 12
+--year 2026 --run-agent --data-dir /tmp/papertrack-package-agent-acceptance`
+completed through one `gpt-6-luna` process. The child called the packaged fixed
+collector 11 times; the parent accepted the capture and generated 41 reading
+entries (39 Abstracts, 2 Extracts; 2 mastheads excluded), with no collection errors.
+The independently saved 664995-byte HTML has the same 43 DOI inventory and 41
+real panel targets. Verification script and evidence are under that output root.
+Automatic security verification cleared; this does not demonstrate manual CAPTCHA
+solving or AIP/APS access. Current checks: 206 Python, 14 browser and 13 optional
+worker tests; clean wheel installed-path verification. Later metadata/logging
+changes are covered by subprocess tests, not another live run.

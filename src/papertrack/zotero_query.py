@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 from pyzotero import zotero as zotero_lib
 
-from .identity import (
+from papertrack.identity import (
     Identity,
     MatchResult,
     WorkIdentitySet,
@@ -14,8 +14,8 @@ from .identity import (
 )
 
 if TYPE_CHECKING:
-    from .arxiv_entry import ArxivEntry
-    from .journal_entry import JournalEntry
+    from papertrack.arxiv.entry import ArxivEntry
+    from papertrack.journals.entry import JournalEntry
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,7 @@ class ZoteroQuery:
                 self._doi_index[normalize_doi(doi)] = key
             url = data.get("url", "")
             if url:
-                from .arxiv_entry import ArxivEntry
+                from papertrack.arxiv.entry import ArxivEntry
                 bare_id = ArxivEntry.bare_id_from_url(url)
                 if bare_id:
                     self._url_arxiv_index[bare_id] = key
@@ -90,8 +90,8 @@ class ZoteroQuery:
 
     def match_entry(self, entry: "ArxivEntry | JournalEntry") -> MatchResult:
         """Match a source entry against Zotero by exact work identities."""
-        from .arxiv_entry import ArxivEntry
-        from .journal_entry import JournalEntry
+        from papertrack.arxiv.entry import ArxivEntry
+        from papertrack.journals.entry import JournalEntry
 
         if isinstance(entry, ArxivEntry):
             identity_set = identities_for_arxiv_entry(entry)
@@ -145,7 +145,7 @@ class ZoteroQuery:
 
     @staticmethod
     def _bare_arxiv_id(value: str) -> str:
-        from .arxiv_entry import ArxivEntry
+        from papertrack.arxiv.entry import ArxivEntry
         return ArxivEntry.bare_id_from_url(value) or value.replace("arXiv:", "").strip()
 
     def match_doi(self, doi: str, kind: str = "publisher_doi") -> MatchResult:

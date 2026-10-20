@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .arxiv_entry import ArxivEntry
-    from .journal_entry import JournalEntry
+    from papertrack.arxiv.entry import ArxivEntry
+    from papertrack.journals.entry import JournalEntry
 
 
 @dataclass(frozen=True)

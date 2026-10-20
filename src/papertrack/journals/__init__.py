@@ -1,0 +1,1 @@
+"""PaperTrack journals functionality."""

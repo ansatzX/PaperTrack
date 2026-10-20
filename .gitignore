@@ -13,12 +13,17 @@ data/
 *.swp
 *.swo
 *~
-docs/
+docs/*
+!docs/README.md
+!docs/legacy/
 .claude/
 .pytest_cache
 # Local runtime fetch and rebuild diagnostics
 .papertrack_diagnostics/
 .papertrack_state.json
 .worktrees/
+.work/
 .papertrack_browser_profiles/
 .papertrack_official_cache/
+.papertrack-runs/
+.state-machine/

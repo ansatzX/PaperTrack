@@ -1,4 +1,4 @@
-from papertrack.arxiv_entry import ArxivEntry
+from papertrack.arxiv.entry import ArxivEntry
 from papertrack.identity import (
     EvidenceHint,
     Identity,
@@ -7,7 +7,7 @@ from papertrack.identity import (
     identities_for_arxiv_entry,
     identities_for_journal_entry,
 )
-from papertrack.journal_entry import JournalEntry
+from papertrack.journals.entry import JournalEntry
 
 
 def test_arxiv_entry_identity_set_contains_exact_identities_and_hints():

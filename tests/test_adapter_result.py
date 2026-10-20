@@ -1,99 +1,12 @@
 from papertrack.adapter_result import (
-    BLOCKED,
-    FETCH_FAILED,
-    OFFICIAL_EMPTY_SUSPICIOUS,
     PARSE_FAILED,
     RATE_LIMITED,
     SUCCESS,
 )
 
 
-def test_aip_issue_result_distinguishes_fetch_failure(monkeypatch):
-    from papertrack import aip_fetch
-    from papertrack.http_fetch import HttpFetchResult
-
-    aip_fetch._cache.clear()
-    monkeypatch.setattr(
-        aip_fetch,
-        "_fetch_issue_http",
-        lambda *args, **kwargs: HttpFetchResult(outcome=FETCH_FAILED),
-    )
-
-    result = aip_fetch.query_aip_issue_result("jcp", "164", "16", "Journal of Chemical Physics")
-
-    assert result.outcome == FETCH_FAILED
-    assert result.entries == {}
-    assert result.provider == "aip"
-
-
-def test_acs_issue_result_distinguishes_suspicious_empty_parse(monkeypatch):
-    from papertrack import acs_fetch
-
-    acs_fetch._cache.clear()
-
-    monkeypatch.setattr(
-        acs_fetch,
-        "_fetch_html",
-        lambda *args, **kwargs: ("<html><main>No issue items</main></html>", "", 200),
-    )
-
-    result = acs_fetch.query_acs_issue_result("jctcce", "22", "8", "JCTC")
-
-    assert result.outcome == OFFICIAL_EMPTY_SUSPICIOUS
-    assert result.entries == {}
-    assert result.provider == "acs"
-
-
-def test_acs_issue_result_distinguishes_cloudflare_block(monkeypatch):
-    from papertrack import acs_fetch
-
-    acs_fetch._cache.clear()
-
-    monkeypatch.setattr(
-        acs_fetch,
-        "_fetch_html",
-        lambda *args, **kwargs: (
-            "<html><head><title>Just a moment...</title></head></html>",
-            BLOCKED,
-            403,
-        ),
-    )
-    result = acs_fetch.query_acs_issue_result("jcisd8", "66", "11", "JCIM")
-
-    assert result.outcome == BLOCKED
-    assert result.entries == {}
-    assert result.provider == "acs"
-
-
-def test_acs_issue_result_rejects_article_card_without_doi(monkeypatch):
-    from papertrack import acs_fetch
-
-    acs_fetch._cache.clear()
-    monkeypatch.setattr(
-        acs_fetch,
-        "_fetch_html",
-        lambda *args, **kwargs: (
-            """
-            <div class="issue-item clearfix">
-              <h3 class="issue-item_title"><a href="/article/no-doi">Article title</a></h3>
-            </div>
-            """,
-            "",
-            200,
-        ),
-    )
-
-    result = acs_fetch.query_acs_issue_result("jcisd8", "66", "12", "JCIM")
-
-    assert result.outcome == PARSE_FAILED
-    assert result.entries == {}
-    assert result.metadata["critical_field_failures"] == [
-        {"card": 1, "field": "doi"}
-    ]
-
-
 def test_arxiv_result_distinguishes_parse_failure(monkeypatch):
-    from papertrack import arxiv_index_fetch
+    from papertrack.arxiv import fetch as arxiv_index_fetch
 
     monkeypatch.setattr(arxiv_index_fetch.feedparser, "parse", lambda url: {})
 
@@ -109,7 +22,7 @@ def test_arxiv_result_distinguishes_parse_failure(monkeypatch):
 
 
 def test_arxiv_result_paginates_when_first_page_is_full(monkeypatch):
-    from papertrack import arxiv_index_fetch
+    from papertrack.arxiv import fetch as arxiv_index_fetch
 
     seen_urls = []
 
@@ -135,7 +48,7 @@ def test_arxiv_result_paginates_when_first_page_is_full(monkeypatch):
 
 
 def test_arxiv_result_parse_failure_on_second_page_is_not_partial_success(monkeypatch):
-    from papertrack import arxiv_index_fetch
+    from papertrack.arxiv import fetch as arxiv_index_fetch
 
     def fake_parse(url):
         if "start=200" in url:
@@ -155,7 +68,7 @@ def test_arxiv_result_parse_failure_on_second_page_is_not_partial_success(monkey
 
 
 def test_arxiv_result_keeps_exact_primary_and_cross_list_members(monkeypatch):
-    from papertrack import arxiv_index_fetch
+    from papertrack.arxiv import fetch as arxiv_index_fetch
 
     summary = "<ol>" + "".join([
         _arxiv_item(1, ["cs.AI", "cs.LG"]),
@@ -183,7 +96,7 @@ def test_arxiv_result_keeps_exact_primary_and_cross_list_members(monkeypatch):
 
 
 def test_arxiv_category_filter_paginates_by_raw_candidate_count(monkeypatch):
-    from papertrack import arxiv_index_fetch
+    from papertrack.arxiv import fetch as arxiv_index_fetch
 
     seen_urls = []
 
@@ -215,7 +128,7 @@ def test_arxiv_category_filter_paginates_by_raw_candidate_count(monkeypatch):
 
 
 def test_arxiv_result_rejects_unrecognized_successful_empty_page(monkeypatch):
-    from papertrack import arxiv_index_fetch
+    from papertrack.arxiv import fetch as arxiv_index_fetch
 
     monkeypatch.setattr(
         arxiv_index_fetch.feedparser,
@@ -234,7 +147,7 @@ def test_arxiv_result_rejects_unrecognized_successful_empty_page(monkeypatch):
 
 
 def test_arxiv_result_accepts_verified_no_results_page(monkeypatch):
-    from papertrack import arxiv_index_fetch
+    from papertrack.arxiv import fetch as arxiv_index_fetch
 
     monkeypatch.setattr(
         arxiv_index_fetch.feedparser,
@@ -253,7 +166,7 @@ def test_arxiv_result_accepts_verified_no_results_page(monkeypatch):
 
 
 def test_arxiv_request_delay_applies_between_paginated_http_requests(monkeypatch):
-    from papertrack import arxiv_index_fetch
+    from papertrack.arxiv import fetch as arxiv_index_fetch
 
     summaries = iter([_arxiv_summary(0, 1), _arxiv_empty_summary()])
     monotonic_values = iter([100.0, 100.0, 102.0, 107.0])
@@ -279,7 +192,7 @@ def test_arxiv_request_delay_applies_between_paginated_http_requests(monkeypatch
 
 
 def test_arxiv_request_delay_applies_before_retry_attempt(monkeypatch):
-    from papertrack import arxiv_index_fetch
+    from papertrack.arxiv import fetch as arxiv_index_fetch
 
     attempts = iter([OSError("temporary failure"), {"feed": {"summary": "unused"}}])
     monotonic_values = iter([100.0, 100.0, 102.0, 107.0])
@@ -303,7 +216,7 @@ def test_arxiv_request_delay_applies_before_retry_attempt(monkeypatch):
 
 
 def test_arxiv_diagnostic_counts_deduplicate_repeated_page_candidates(monkeypatch):
-    from papertrack import arxiv_index_fetch
+    from papertrack.arxiv import fetch as arxiv_index_fetch
 
     summaries = iter([_arxiv_summary(1, 1), _arxiv_summary(1, 1)])
     monkeypatch.setattr(
@@ -328,7 +241,7 @@ def test_arxiv_diagnostic_counts_deduplicate_repeated_page_candidates(monkeypatc
 
 
 def test_arxiv_category_filter_fails_closed_when_subjects_are_missing(monkeypatch):
-    from papertrack import arxiv_index_fetch
+    from papertrack.arxiv import fetch as arxiv_index_fetch
 
     summary = "<ol>" + _arxiv_item(1, []) + "</ol>"
     monkeypatch.setattr(
@@ -350,7 +263,7 @@ def test_arxiv_category_filter_fails_closed_when_subjects_are_missing(monkeypatc
 
 
 def test_arxiv_result_distinguishes_rate_limit(monkeypatch):
-    from papertrack import arxiv_index_fetch
+    from papertrack.arxiv import fetch as arxiv_index_fetch
 
     class RateLimitedResult(dict):
         status = 429

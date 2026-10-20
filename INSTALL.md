@@ -1,265 +1,138 @@
 # 安装与运行
 
-本文覆盖基础 PaperTrack、可选的期刊浏览器工作流、模型接入及旧脚本。
-**只运行 arXiv 时，完成第 1、2 节即可；不需要安装 Node、Chrome 或配置 LLM。**
+基础要求 Python >=3.10。arXiv 和期刊任务生成、本地导入均不需要 LLM SDK、
+Node、Playwright 或项目管理的 Chrome。外部 agent 的浏览器工具由其宿主提供。
 
-当前完整工作流以 Linux 为验证环境。Python 要求 >=3.10，已验证的环境为
-Python 3.10.16；新期刊模块要求 Node >=22。旧 supervisor 依赖 Linux pidfd、
-`/proc`，新报告发布器使用 POSIX `fcntl`，因此不能把整个项目视为已支持
-Windows 原生运行。无需 GPU、模型权重、Docker 或数据库服务。
-
-## 1. 安装基础 Python 项目
-
-先取得包含 `pyproject.toml` 和 `src/papertrack/` 的完整项目源码。
-以下命令从项目根目录执行；示例中的路径需要替换成实际路径。
-
-### 新建隔离环境
-
-先通过系统包管理器或已有 Python 管理工具准备 Python。下面使用已验证的
-Python 3.10；机器上需要存在 `python3.10` 命令。
+## 基础安装
 
 ```bash
 cd /path/to/PaperTrack
-python3.10 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e .
+python -m pip install -e '.[dev]'
 python -m pip check
-python -c 'import papertrack; print(papertrack.__file__)'
 python main.py --help
+pytest -q
 ```
 
-`-e .` 将当前源码安装为可编辑项目，也注册 `papertrack` CLI。移动项目目录后
-需重新安装。运行 `main.py` 仍应处于项目根目录；也可使用已安装的 `papertrack` 命令。
+已有 Conda 环境可以直接安装，无需再创建 venv。本机验证环境：
+`/home/ansatz/soft/miniconda3/bin/conda run -n arxiv pytest -q`。
 
-若已有 Conda 环境，可直接在该环境内安装，**无需同时创建 venv**：
+`uv.lock` 仍是旧项目声明，未与当前 pyproject.toml 同步；不要用于 frozen/locked
+安装。当前用 pip 按 pyproject.toml 安装，不承诺所有依赖的精确版本复现。
+
+## arXiv
 
 ```bash
-conda activate arxiv
-python -m pip install -e .
-python -m pip check
+python main.py arxiv refresh --category quant-ph --data-dir /path/to/reports
 ```
 
-本机已验证的解释器为
-`/home/ansatz/soft/miniconda3/envs/arxiv/bin/python`；这是部署示例，不是其他机器
-必须使用的路径。不要为了新增期刊功能升级或覆盖已稳定运行的 arXiv 环境。
+这会真实联网查询 arXiv。`run.sh` 保留原有日期桶逻辑和本机部署路径；移植时
+核对 Conda、项目与输出路径。不要改动已有环境来满足可选期刊组件。
 
-基础包由 `pyproject.toml` 安装：pyzotero、bs4/BeautifulSoup、lxml、feedparser、
-Jinja2、curl_cffi、requests；Python <3.11 还安装 tomli。
-若所用平台没有依赖包的二进制 wheel，从源码构建可能需要额外编译工具。
-
-**当前 `uv.lock` 与 pyproject.toml 不一致**：它仍记录旧项目名和 Python >=3.6。
-在重新生成并验证之前，不要使用这个旧锁文件执行 frozen/locked 安装。
-上述 pip 命令按当前声明安装，但不是全部 Python 包的精确版本复现方案。
-
-## 2. 基础配置与运行
-
-- 类别和期刊配置：`src/papertrack/categories.toml`。
-- 输出目录：显式传 `--data-dir`。现有 CLI 默认目录是作者机器上的绝对路径。
-- 网络：arXiv 需访问 arxiv.org；期刊需访问相应出版社和所用元数据服务。
-- 输出、缓存、诊断目录必须可写；不要把含阅读勾选的 Markdown 当成临时文件删除。
-
-以下是**真实联网抓取**示例，不是离线安装检查；根据需要选择运行：
+`run.sh` 不接收参数，只写死一条 `conda run` 调用每日 `refresh` 命令。
+循环、日志、锁和失败处理由 Python 包负责。单项任务直接调用包：
 
 ```bash
-# 只处理一个历史日期，输出到独立测试目录。
-python main.py arxiv backfill --category quant-ph \
-  --from-date 2026-09-01 --to-date 2026-09-01 \
-  --data-dir /tmp/papertrack-check
-
-# 普通期刊入口：HTTP 抓取和已实现的第三方补缺。
-python main.py journal issue --journal jcim --volume 66 --issue 12 \
-  --year 2026 --data-dir /tmp/papertrack-check
+python main.py journal issue --journal jcim --volume 66 --issue 12 --year 2026 --run-agent
+python main.py journal refresh --journal jcim  # 检查2026-01-01至今所有正式卷期，只补缺失缓存
+python main.py journal latest --journal jcim  # 只打印发现任务
 ```
 
-`chem-ph`、`quant-ph`、`cs.AI`、`cs.LG` 等按配置使用。arXiv 采用提交日期桶，
-不要用“最新 feed”替代这个流程。出版社能通过浏览器访问，不保证普通 HTTP
-入口也能读取；遇到该情况，可选择第 4 节的已连接浏览器流程。
+输出固定到 `/home/ansatz/data/obsidian/1/papertrack_datas`；
+部署路径直接修改脚本中的 Conda 路径、输出参数和工作目录。
+脚本强制使用 systemd 用户 scope：内存上限 8 GiB、CPU 200%、禁止 swap、
+最多 256 个任务、单条命令最长 24 小时；期刊 Agent 另有默认 660 秒期限，
+默认模型为 `gpt-6-luna`。已有 Chrome 不在此资源限制内。
+脚本用 Conda 的 arxiv 环境，需在启动前保证 `codex`、`systemd-run`
+和 `systemctl` 在 `PATH` 中。`python main.py --help` 查看包命令。
+每日执行日志在 `.papertrack_diagnostics/daily.log`，防重入锁阻止同时运行。
+单个来源失败后继续其他来源，最终返回非零退出码。脚本显式设置用户总线环境；
+仍需已运行的用户总线和可用的授权浏览器连接，无法完成的挑战会明确失败。
 
-### Zotero 与 Obsidian（应用均可选）
+## 期刊 agent 任务
 
-收藏匹配默认使用 Zotero 桌面程序的本地 API：`http://localhost:23119/api`。
-需要匹配时，启动 Zotero 并在其设置中允许本地 API 访问。无需提供 Zotero 云端
-密钥。不可用时仍可生成报告，只是没有可用的收藏匹配结果。
-
-Obsidian 用来阅读生成的 Markdown，不需要在抓取时运行。直接指定其仓库内目录
-作为 `--data-dir` 即可；首次验证建议先使用 `/tmp` 或其他独立目录。
-
-## 3. Python 可选功能与测试
-
-在已激活的 Python 环境、项目根目录执行，按需选择：
+已有 Codex CLI 登录和浏览器工具配置时，可以由包直接调用 Agent：
 
 ```bash
-python -m pip install -e '.[dev]'             # pytest 和 Python Playwright
-python -m pip install -e '.[browser]'         # 仅增加 Python Playwright
-python -m pip install -e '.[http-fallbacks]'   # 额外 HTTP 后端
+papertrack journal issue --journal jcim --volume 66 --issue 12 --year 2026 \
+  --run-agent --data-dir .work/papertrack-review
 ```
 
-HTTP extras 包含 cloudscraper、primp、tls-client、pyreqwest-impersonate，基础
-arXiv 并不要求这些包全装。Python Playwright 用于旧浏览器路径，不等于新工作流
-所需的 Chrome 扩展宿主。旧脚本使用已安装的 Chrome；不要把下载 Playwright
-Chromium 当成所有入口都必须执行的步骤。
+默认 `gpt-6-luna`，进程超时 660 秒，可用 `--agent-model` 和 `--agent-timeout`
+显式调整。只启动一次 Agent 进程，不自动重启、换模型或扩大权限；摘要交互失败可在
+同一次任务内用相同固定模块重试一次，同一 DOI 再失败即停止。任务内期限等于进程
+上限减去 60 秒，留出返回结果的时间。每次运行在输出目录下建立
+独立 `.papertrack-runs/` 子目录，保存任务、事件日志、stderr、最终回复、JSON、HTML
+和验收状态。Agent 只采集，包内 Python 验收后才写报告；退出成功不代表采集成功。
+超时终止 Agent 进程组，保留局部结果和已有报告。运行目录是新建的非 Git 工作区，
+因此使用 `--skip-git-repo-check`，不向 Agent 开放源码仓库作为写入工作区。
 
-```bash
-python -m pytest -q
-```
+Agent 必须通过 `systemd-run --user --scope` 限定资源：内存软上限 6 GiB、硬上限
+8 GiB、禁止 swap、CPU 至多两核、至多 256 个任务，运行时限同步进程期限。
+缺少 systemd 时直接失败，不回退到无限额启动。这个 cgroup 不包含已经运行的用户
+Chrome，不能据此声称 Chrome 也被限制。禁止主动创建/命名标签组及保留任务标签；
+成功时适配器关闭任务标签，失败时 Agent 仍需清理并报告无法确认的标签 ID。
 
-默认回归测试使用模拟网络；真正的出版社访问、浏览器连接和模型 API 必须另行
-验证。旧 `test.ipynb` 含历史 `ArXiv_Tools` 导入，不作为当前安装验收入口。
+JS 模块随 wheel 安装，无需源码仓库或自建浏览器服务。浏览器能力仍由 Codex
+宿主提供；只有普通 Codex CLI、没有已连接浏览器工具时，应报告缺少能力并失败。
+`latest` / `backfill` 目前仍只生成发现任务，未接入自动执行。
+每日 `refresh` 并行运行期刊与 arXiv 两条流程，分别记录日志。期刊流程内部串行：
+先读官网归档，按 `--from-date`（默认2026-01-01）至 `--to-date`（默认今天）列出
+正式卷期，跟随官网年度/卷目录链接。当天目录缓存可复用，过期或缺失目录才调用
+有界 Agent 保存 HTML。Python 检查每一期 capture 和 HTML；完整有效缓存本地
+生成报告，只对首次发现且缺少有效缓存的 issue 启动抓取。没有新 issue 就不启动
+issue 抓取；已知旧期的缓存缺口标为 `repair_required` 并返回失败，留给显式
+`journal refresh` 日期范围修复。已有 Markdown 不代表缓存完整。旧主路径及旧版 `report.md` 仅用于识别已知卷期；未开始采集的计划条目可在下次继续，已启动后中断的期次保留为待显式修复。
+目录日期或布局不能解析时明确失败，不让模型临时编写解析器，不伪造完整覆盖。
+计划与每期结果保存在 `.papertrack-runs/*-sync-*/plan.json`。
 
-## 4. 安装独立的期刊工作流
-
-这部分位于 `journal-workflow/`，不改变基础 Python 入口或依赖。它包含 Crawlee
-队列与重试、断点保存、报告发布，以及可选 agent 恢复判断。
-
-### 4.1 Node 与 npm
-
-先准备 Node >=22 及与之兼容的 npm，再检查当前 PATH 实际选择的版本：
-
-```bash
-node --version
-npm --version
-cd journal-workflow
-npm ci --ignore-scripts
-npm test
-cd ..
-```
-
-依赖由该目录自己的 `package-lock.json` 锁定：`@crawlee/basic`、`@crawlee/core`、
-`proper-lockfile`、官方 `openai` SDK。不要在项目根目录执行 npm 安装。
-
-**本机 PATH 注意事项**：普通 `node` 当前是 20，而 `/usr/bin/node` 是 22。
-npm 的可执行脚本也会从 PATH 找 node。本机可这样确保两者一致：
-
-```bash
-cd journal-workflow
-PATH=/usr/bin:/bin /usr/bin/npm ci --ignore-scripts
-PATH=/usr/bin:/bin /usr/bin/npm test
-cd ..
-```
-
-其他机器应使用其实际的 Node 22+ 安装位置，不必照抄 `/usr/bin`。
-
-### 4.2 浏览器宿主是额外前提
-
-需要准备：
-
-1. 能正常打开目标出版社的 Chrome 和可用图形会话。
-2. 兼容的 agent 浏览器工具宿主、Chrome 扩展及本机通信组件。
-3. 通过该宿主的浏览器技能建立连接，获得 `browser` 和受支持的 tab API。
-
-当前验证使用 agent 环境提供的 browser-client。**它不是本仓库通过 npm ci
-自动安装的独立浏览器服务。** 没有这个宿主时，Python 基础功能仍可用，但不能
-照搬下面的工具内 JS 到普通 Node 终端来控制 Chrome。
-
-现有 driver 与 worker 通过同一文件系统的任务目录交换消息。当前两者应在能
-访问同一目录的环境运行；跨机器部署尚未实现。浏览器登录、重新连接由宿主负责。
-不要复制浏览器凭据，也不要把浏览器连接对象写入任务 JSON。
-
-### 4.3 启动 worker 和连接 driver
-
-从项目根目录，在终端启动 worker；将 Python 路径替换成第 1 节的解释器：
-
-```bash
-node journal-workflow/cli.mjs \
-  --job journal-workflow/example-job.json \
-  --dir /tmp/papertrack-jcim-job \
-  --output /tmp/papertrack-workflow-output \
-  --python /absolute/path/to/python \
-  --agent off
-```
-
-示例任务是 JCIM 66/12。其他任务应修改 journal、正式 issue URL、volume、issue、
-year；当前新入口支持 jcim、jctc、jcp、prl。`--dir` 是该任务的持久状态目录，
-`--output` 是报告根目录，两者可以不同。
-
-然后在**已连接的浏览器工具运行环境**中执行以下 JS。`browser` 必须由宿主先建立；
-导入路径和任务目录必须与实际安装一致：
-
-```js
-var workflow = await import('/absolute/path/to/PaperTrack/journal-workflow/browser-driver.mjs');
-var issueTab = await browser.tabs.new();
-var driver = workflow.createBrowserDriver({tab: issueTab});
-// APS 还需单独的摘要页标签：
-// var abstractTab = await browser.tabs.new();
-// var driver = workflow.createBrowserDriver({tab: issueTab, abstractTab});
-await workflow.serveBrowser('/tmp/papertrack-jcim-job', driver, {durationMs: 25000});
-```
-
-宿主需继续调用 `serveBrowser`，直到 `status.json` 为 `complete` 或
-`needs_attention`。调用分段是为了适配工具时限；队列推进由 worker 决定。
-worker 不是无人值守 Chrome 启动器；若 driver 没有及时连接，命令会超时并
-返回可见失败。完成后由宿主释放任务拥有的标签页。
-
-重连后新建 driver，再用同一任务目录重跑 worker，可继续已保存的文章。
-不要同时运行两个 driver 或两个 worker 写同一任务。已完成任务会复用结果；
-若要重新抓官网变化，使用新任务目录。不要让旧、新报告写入器同时修改同一期输出。
-
-新 renderer 使用官方抓取结果离线生成报告。若要走原有第三方补缺管线，可另行
-使用已有快照（此命令不启动 Chrome，补缺可能联网）：
+需要手动执行时，省略 `--run-agent`：
 
 ```bash
 python main.py journal issue --journal jcim --volume 66 --issue 12 --year 2026 \
-  --browser-snapshot /tmp/papertrack-jcim-job/capture.json \
-  --data-dir /tmp/papertrack-enriched
+  --capture-path .work/cache/jcim-66-12.json --data-dir .work/papertrack-review
 ```
 
-## 5. 可选 LLM 接入
-
-模型 key 由运行 worker 的进程环境提供。SDK 不会自动加载本项目的 `.env`；
-通过自己的环境管理方式注入，勿写入任务 JSON、源码或日志。
-
-| 选择 | 环境变量 | worker 参数 |
-|---|---|---|
-| 不用模型 | 无 | `--agent off` |
-| DeepSeek | `DEEPSEEK_API_KEY` | `--agent deepseek --model deepseek-flash` |
-| OpenAI | `OPENAI_API_KEY` | `--agent openai --model gpt-5.6-luna` |
-
-把第 4 节 worker 命令的 `--agent off` 替换成相应参数即可。正常采集不调用模型；
-只有异常处理才需要 key。缺 key 不破坏正常流程，恢复时会返回 model_unavailable。
-DeepSeek 已实测真实 SDK 调用；OpenAI 路径已做契约测试，仍需用目标账号验证访问。
-
-默认 agent 只看状态和相关 DOM。自动截图升级尚未接入默认 runner，不能把模型
-具有视觉能力当成该流程已经会自动使用截图。
-
-可选第三方元数据变量为 `OPENALEX_API_KEY`、`SEMANTIC_SCHOLAR_API_KEY`。
-它们不是运行 arXiv 的前提；服务拒绝匿名访问时会留下缺口，不保证无 key 全部可用。
-
-## 6. 旧启动脚本和定时运行
-
-`run.sh` 是现有 arXiv 日期桶流程；`run_j.sh`、`run_aps_issue_cache.sh` 属于旧期刊
-执行路径，不是第 4 节新 worker 的别名。
-
-这些脚本包含项目、Conda、输出目录等本机绝对路径，并可能 source 用户的
-`.bashrc`。迁移时先核对这些路径、环境名、类别及回填范围，再手动验收；不要直接
-把未经检查的脚本放进 cron。新工作流目前不随基础安装自动启用定时任务。
-
-旧 `run_j.sh` 还要求 Linux、Bash（支持 wait -n -p）、系统 Python、pidfd、setsid、
-Google Chrome、xvfb-run、Xvfb、xauth 和 Conda arxiv 环境。可做只读预检：
+把标准输出交给具备浏览器工具、可以使用用户授权会话的 Codex、Claude Code
+或其他 agent。此命令只生成任务，不启动任何 agent，不提供浏览器连接。
+agent 负责进入可访问的官方卷期页，然后调用 `browser/collect.mjs` 的固定采集入口。
+解析、展开摘要和 JSON 写入由模块完成；agent 不临时编写选择器。访问阻碍无法解决时
+保留进度并交接。宿主需提供带 playwright.evaluate/locator 的 browser-client tab，
+并允许导入本地 JS 模块；没有这些能力时应明确报错。
+Codex 中连接浏览器和导入模块都在同一个 `cua_repl` 内执行；不要把模块放进另一个
+`node_repl` 后假设浏览器变量可共享。`browser/cua.mjs` 提供固定的公开 API 适配。
 
 ```bash
-command -v google-chrome-stable xvfb-run Xvfb xauth setsid
-/usr/bin/python3 scripts/run_j_worker_supervisor.py check-pidfd
+python main.py journal issue --journal jcim --volume 66 --issue 12 --year 2026 \
+  --browser-snapshot .work/cache/jcim-66-12.json --data-dir .work/papertrack-review
 ```
 
-所需系统包通过所在发行版的包管理器安装；不要把这些 Linux 专用组件作为
-所有用户安装 arXiv 功能的强制前置条件。
+导入只验收本地数据和生成 Markdown，不向出版社或元数据 API 发请求。
+首次真实验收先使用独立输出目录。确认摘要覆盖率、issue 完整性、来源证据和
+阅读状态后，再用于自己的阅读仓库。
 
-## 7. 验收与保留状态
+Zotero 为可选本地服务；需要收藏匹配时启动桌面应用并允许本地 API 访问。
+其不可用时保留已有收藏分组；首次报告默认未收藏。Obsidian 不必在采集时运行。
 
-安装后按启用范围验证：基础 `pip check`、CLI help、Python 测试；新模块再运行
-npm test；最后用独立输出目录验证真实浏览器和所选模型。测试通过不等于出版社
-授予访问权限。
+## 可选的原有浏览器工具
 
-模型真实调用测试是显式操作，会产生 API 请求：
+`src/papertrack/browser/` 是随包安装的固定采集器，仓库 `browser/` 保留转发入口和
+测试；`experiments/journal-workflow/` 是可选的已有队列
+原型。采集器在浏览器工具宿主的 Node 运行时内执行，不是普通终端里的独立浏览器
+服务，也不负责安装外部 agent 的浏览器能力。基础 Python/arXiv 不依赖它们。
+需要使用这些工具时分别阅读目录内 README，Node worker 要求 Node >=22：
 
 ```bash
-cd journal-workflow
-node test/live-model.mjs deepseek /tmp/papertrack-model-check.json
+cd experiments/journal-workflow
+npm ci --ignore-scripts
+npm test
 ```
 
-保留报告及阅读勾选、原 `.papertrack_state.json`、官方快照、新任务目录与备份。
-不要在两个版本间共享正在写入的状态目录。
+worker 仍需宿主提供活跃的浏览器连接，模型只参与有限恢复决策。
+该原型报告发布器依赖 POSIX fcntl；不要把它视为已验收 Windows 原生支持。
 
-详细边界和已完成实测见 [journal-workflow/README.md](journal-workflow/README.md)、
-[journal-workflow/VALIDATION.md](journal-workflow/VALIDATION.md) 和
-[browser/README.md](browser/README.md)。
+旧 `run_j.sh`、APS cache runner、HTTP fallback extras 和 Python 浏览器运行时
+已从当前源码删除，完整实现保存在 Git 提交 `8804413`。本轮没有修改系统 cron；
+若旧部署有相关定时项，应在恢复期刊调度前停用或替换，勿继续调用已删除入口。
+已有报告、阅读勾选、旧处理状态、缓存和浏览器配置保留。
