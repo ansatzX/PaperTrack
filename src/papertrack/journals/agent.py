@@ -21,6 +21,7 @@ import tempfile
 from papertrack.journals.capture import read_browser_issue, validate_reading_controls
 from papertrack.journals.task import issue_task, issue_url, archive_url, archive_page_task
 from papertrack.journals.discovery import validate_latest_capture
+from papertrack.journals.storage import runs_root
 
 logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "gpt-6-luna"
@@ -186,7 +187,7 @@ def run_issue_agent(*, journal: str, cfg: dict, volume: str, issue: str,
     explicit_capture = Path(capture_path).resolve() if capture_path else None
     if explicit_capture and explicit_capture.exists():
         raise ValueError("Capture path already exists; import it with --browser-snapshot or choose a new path")
-    runs = Path(data_dir).resolve() / ".papertrack-runs"
+    runs = runs_root()
     runs.mkdir(parents=True, exist_ok=True)
     run_dir = Path(tempfile.mkdtemp(prefix=f"{journal}-{volume}-{issue}-", dir=runs))
     capture = explicit_capture or run_dir / "capture.json"
@@ -302,8 +303,22 @@ def run_issue_agent(*, journal: str, cfg: dict, volume: str, issue: str,
         raise RuntimeError(f"Journal agent failed: {error}; evidence: {run_dir}") from error
     finally:
         # Stop detached tool descendants as well; never stop the user's Chrome.
+        cleanup = {'status': 'unconfirmed'}
         try:
-            subprocess.run([systemctl, "--user", "stop", unit], stdin=subprocess.DEVNULL,
-                           capture_output=True, timeout=5, check=False)
-        except (OSError, subprocess.TimeoutExpired):
-            logger.warning("Could not confirm resource unit cleanup: %s", unit)
+            stopped = subprocess.run(
+                [systemctl, '--user', 'stop', unit], stdin=subprocess.DEVNULL,
+                capture_output=True, text=True, timeout=5, check=False)
+            cleanup.update(returncode=stopped.returncode, stderr=stopped.stderr[-1000:])
+            if stopped.returncode == 0:
+                cleanup['status'] = 'stopped'
+            else:
+                state = subprocess.run(
+                    [systemctl, '--user', 'show', unit, '--property=LoadState', '--value'],
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5, check=False)
+                if state.stdout.strip() == 'not-found':
+                    cleanup['status'] = 'already_gone'
+        except (OSError, subprocess.TimeoutExpired) as error:
+            cleanup['error'] = str(error)
+        if cleanup['status'] == 'unconfirmed':
+            logger.warning('Could not confirm resource unit cleanup: %s; %s', unit, cleanup)
+        run.save(run.record['status'], resource_cleanup=cleanup)

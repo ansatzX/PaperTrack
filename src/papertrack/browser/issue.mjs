@@ -25,7 +25,7 @@ async function captureSilverchairOrIssue(tab, request, {navigate = true, onProgr
   validateRequest(request);
   const expected = new URL(request.url);
   if (expected.hostname === "journals.aps.org") {
-    return captureApsIssue(tab, request, {abstractTab, navigate, previous, maxInteractions, saveAbstract});
+    return captureApsIssue(tab, request, {abstractTab, navigate, previous, maxInteractions, saveAbstract,readingMissing});
   }
   if (!['pubs.acs.org', 'pubs.aip.org'].includes(expected.hostname)) {
     throw new Error('This collector currently supports Silverchair ACS/AIP issue pages');

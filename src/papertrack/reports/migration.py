@@ -7,6 +7,7 @@ import re
 import shutil
 import tempfile
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from papertrack.diagnostics import record_all_attempts, record_migration_event
@@ -551,14 +552,47 @@ def _migrate_arxiv_legacy(content: str, path: Path, data_dir: str) -> str:
     return frontmatter + body.lstrip()
 
 
+def _arxiv_path_identity(path: Path, data_dir: str) -> dict[str, str] | None:
+    """Recognize supported layouts without confusing years with categories."""
+    parts = _relative_parts(path, data_dir)
+    if not parts or parts[0] != 'arxiv':
+        return None
+    from papertrack.config import get_query_args
+
+    known = get_query_args()
+    body = list(parts[1:])
+    prefix = body.pop(0) if body and body[0] in known else None
+    category = prefix
+    if len(body) == 3 and prefix:
+        year, month, _ = body
+    elif len(body) == 4 and body[2] in known:
+        year, month, category, _ = body
+    elif len(body) == 5 and body[2] in known:
+        year, month, category, day_dir, _ = body
+        if day_dir != path.stem:
+            raise ValueError('arXiv directory day conflicts with filename')
+    elif len(body) == 5 and body[3] in known:
+        year, month, day_dir, category, _ = body
+        if day_dir != path.stem:
+            raise ValueError('arXiv directory day conflicts with filename')
+    else:
+        raise ValueError(f'Unrecognized arXiv report layout: {path}')
+    if prefix and category != prefix:
+        raise ValueError('Conflicting arXiv categories in report path')
+    report_date = f'{year}-{month}-{path.stem}'
+    if not re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}', report_date):
+        raise ValueError(f'Invalid arXiv date in report path: {path}')
+    date.fromisoformat(report_date)
+    return {'category': category, 'date': report_date}
+
+
 def _repair_current_arxiv_identity(content: str, path: Path, data_dir: str) -> str:
     """Make generated arXiv identity fields agree with the stable file path."""
-    parts = _relative_parts(path, data_dir)
-    if len(parts) < 5 or parts[0] != "arxiv":
+    metadata = _arxiv_path_identity(path, data_dir)
+    if metadata is None:
         return content
 
-    category = parts[1]
-    report_date = f"{parts[2]}-{parts[3]}-{path.stem}"
+    category, report_date = metadata['category'], metadata['date']
     frontmatter_end = content.find("\n---", 4) if content.startswith("---\n") else -1
     if frontmatter_end < 0:
         return content
@@ -766,12 +800,9 @@ def _journal_metadata(content: str, path: Path, data_dir: str) -> dict[str, str]
 
 
 def _arxiv_metadata(content: str, path: Path, data_dir: str) -> dict[str, str]:
-    parts = _relative_parts(path, data_dir)
-    if len(parts) >= 5 and parts[0] == "arxiv":
-        return {
-            "category": parts[1],
-            "date": f"{parts[2]}-{parts[3]}-{path.stem}",
-        }
+    metadata = _arxiv_path_identity(path, data_dir)
+    if metadata is not None:
+        return metadata
 
     title_match = re.search(r"^#\s*(\d{4}-\d{2}-\d{2})\b", content, re.MULTILINE)
     candidates = set()

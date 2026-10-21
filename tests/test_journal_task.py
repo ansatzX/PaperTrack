@@ -73,6 +73,30 @@ def test_task_describes_data_and_import_without_selectors(tmp_path):
     assert 'Close EVERY task-created' in prompt
 
 
+@pytest.mark.parametrize('journal', ['jcim', 'jcp', 'prl'])
+def test_capture_only_prompt_has_one_publication_owner(tmp_path, journal):
+    prompt = issue_task(journal, journal_configs[journal], '66', '12', 2026,
+                        str(tmp_path / 'capture.json'), str(tmp_path / 'reports'),
+                        capture_only=True, time_budget_seconds=123)
+    assert '123-second budget' in prompt
+    assert 'stop as soon as complete' in prompt
+    assert 'Do not run the import command or write reports' in prompt
+    assert '--browser-snapshot' not in prompt
+    assert 'actual report path' not in prompt
+    assert 'task_tabs_closed=true' in prompt
+    assert 'skip\nthose in finally' in prompt
+    assert 'report exact tab IDs if cleanup is unverified' in prompt
+    assert 'Start a new comparison baseline when changing phase' in prompt
+    assert 'captured alone is not a\n  stall indicator' in prompt
+    if journal == 'prl':
+        assert 'saveHtml: true, abstractTab' in prompt
+        assert 'collectCuaRecentBatch' not in prompt
+    else:
+        assert 'collectCuaRecentBatch(cua, browserId, tab.id' in prompt
+        assert 'For partial, reuse recentUrl' in prompt
+        assert 'no Abstract-page tab is needed' in prompt
+
+
 @pytest.mark.parametrize('mode', ['issue', 'latest', 'backfill'])
 def test_task_cli_never_contacts_zotero_or_network(monkeypatch, capsys, tmp_path, mode):
     monkeypatch.setattr(cli, '_build_zotero', lambda: pytest.fail('task contacted Zotero'))
@@ -155,7 +179,7 @@ def test_unavailable_cannot_erase_prior_abstract(tmp_path, kind):
         assert '> [!quote]- Extract（原文摘录）'.encode() in before
         assert b'papertrack_provenance' not in before
     data['entries'][0].update(abstract='', abstract_type='unavailable', unavailable_reason='No control visible')
-    with pytest.raises(ValueError, match='prior abstract'):
+    with pytest.raises(ValueError, match='Recent Abstract supplementation is unresolved'):
         publish(tmp_path, data)
     assert target.read_bytes() == before
 

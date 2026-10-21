@@ -15,7 +15,7 @@ from papertrack.adapter_result import RATE_LIMITED
 from papertrack.arxiv.entry import ArxivEntry
 from papertrack.arxiv.fetch import query_arxiv_result
 from papertrack.config import official_arxiv_category
-from papertrack.journals.entry import JournalEntry
+from papertrack.journals.entry import JournalEntry, validate_issue_placement
 from papertrack.identity import normalize_doi
 from papertrack.reports.migration import (has_journal_quality_failure, preserve_task_state,
                         validate_report_content, write_report_file)
@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 
 class ArxivRateLimitError(RuntimeError):
     """Stop all category requests when the shared arXiv endpoint is throttled."""
+
+
+class ArxivFetchError(RuntimeError):
+    """An authoritative day could not be refreshed; preserve the old report."""
 
 # Jinja2 environment is lazily initialised to avoid filesystem access at
 # import time — useful when the module is imported for tests or utilities.
@@ -240,13 +244,8 @@ def _filter_one_arxiv_day_to_md(day_date: date, md_folder: str,
                 f"arXiv rate limited while fetching {category} {date_string}; "
                 "stopping this run to avoid worsening the throttle"
             )
-        logger.warning(
-            "Skipping arXiv %s %s because fetch outcome was %s",
-            category,
-            date_string,
-            arxiv_fetch.outcome,
-        )
-        return
+        raise ArxivFetchError(
+            f'arXiv {category} {date_string}: {arxiv_fetch.outcome}; {arxiv_fetch.message}')
     arxiv_dict = arxiv_fetch.entries
     if not arxiv_dict:
         return
@@ -254,14 +253,9 @@ def _filter_one_arxiv_day_to_md(day_date: date, md_folder: str,
     old_content = _read_existing_report(oneday_report_file)
     missing_old_ids = _report_entry_ids(old_content) - set(arxiv_dict)
     if missing_old_ids:
-        logger.warning(
-            "Preserving existing arXiv report because refreshed result lost %d "
-            "paper(s): %s %s",
-            len(missing_old_ids),
-            category,
-            date_string,
-        )
-        return
+        raise ArxivFetchError(
+            f'arXiv {category} {date_string}: refreshed result lost '
+            f'{len(missing_old_ids)} prior papers; existing report preserved')
 
     logger.info("processing %s, papers: %d", date_string, len(arxiv_dict))
 
@@ -527,6 +521,7 @@ def write_journal_entries_to_md(
     repair_backup_dir: str = '',
 ) -> bool:
     """Render already-authoritative journal entries without network access."""
+    validate_issue_placement(volume, issue)
     if not entries:
         return False
 

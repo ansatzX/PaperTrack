@@ -26,7 +26,7 @@ export function inspectSilverchairDOM() {
   return {
     issue_completion_markers: incomplete,
     url: location.href,
-    headings: Array.from(document.querySelectorAll('h2, .volume-issue__wrap')).map(e => e.innerText.trim()),
+    headings: Array.from(document.querySelectorAll('h1,h2,.volume-issue__wrap')).map(e => e.innerText.trim()),
     cards: cards.map(card => {
       const text = selector => card.querySelector(selector)?.innerText?.replace(/\s+/g, ' ').trim() || '';
       const controls = Array.from(card.querySelectorAll('.showAbstractLink'));

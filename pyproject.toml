@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0.1"]
+dev = ["pytest>=7.0.1", "ruff==0.17.1"]
 
 [project.scripts]
 papertrack = "papertrack.cli:main"
@@ -36,3 +36,51 @@ papertrack = ["reports/templates/*.j2", "categories.toml", "browser/*.mjs"]
 where = ["src"]
 include = ["papertrack", "papertrack.*"]
 namespaces = false
+
+[tool.ruff]
+required-version = "==0.17.1"
+target-version = "py310"
+line-length = 80
+indent-width = 4
+src = ["src"]
+force-exclude = true
+extend-exclude = [
+    ".work",
+    ".worktrees",
+    ".papertrack-runs",
+    ".papertrack_diagnostics",
+    ".papertrack_browser_profiles",
+    ".papertrack_official_cache",
+    ".state-machine",
+]
+
+[tool.ruff.lint]
+select = [
+    "E4", "E7", "E9", "E501",  # Imports, statements, syntax and line length.
+    "F",                       # Undefined names, unused imports and variables.
+    "I",                       # Deterministic import ordering.
+    "N",                       # PEP 8 naming conventions.
+    "D",                       # Google-style public API documentation.
+    "UP",                      # Python 3.10-compatible idioms.
+    "B",                       # Common bug patterns.
+    "C4",                      # Clearer comprehensions.
+    "SIM",                     # Avoid unnecessary control flow.
+    "RUF100",                  # Reject stale noqa suppressions.
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+known-first-party = ["papertrack"]
+force-sort-within-sections = true
+
+[tool.ruff.lint.per-file-ignores]
+# Tests communicate behavior through names and assertions, without API docstrings.
+"tests/**/*.py" = ["D"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+docstring-code-format = true

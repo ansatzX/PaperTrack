@@ -89,7 +89,7 @@ def run(tmp_path, **kwargs):
 
 
 def record(tmp_path):
-    paths = list((tmp_path / "reports/.papertrack-runs").glob("*/result.json"))
+    paths = list((tmp_path / ".papertrack-runs").glob("*/result.json"))
     assert len(paths) == 1
     return json.loads(paths[0].read_text()), paths[0].parent
 
@@ -139,6 +139,8 @@ def test_resume_launcher_records_source(fake_codex, tmp_path):
 def test_real_subprocess_acceptance_and_isolated_launch(fake_codex, tmp_path):
     result = run(tmp_path)
     data, folder = record(tmp_path)
+    assert folder.parent == tmp_path / '.papertrack-runs'
+    assert not (tmp_path / 'reports/.papertrack-runs').exists()
     assert data["status"] == "validated"
     assert data["exit_code"] == 0 and data["article_count"] == 1
     assert data['reading_coverage'] == {'abstract': 1, 'extract': 0, 'missing': 0, 'excluded': 0}
@@ -180,25 +182,11 @@ def test_unavailable_requires_official_html_evidence(
     monkeypatch.setenv('PAPERTRACK_TEST_CAPTURE', json.dumps(capture))
     if official_control_absent:
         monkeypatch.setenv('PAPERTRACK_TEST_MODE', 'unavailable')
-        monkeypatch.setattr(cli, '_build_zotero', lambda: None)
-        monkeypatch.setattr('sys.argv', [
-            'papertrack', 'journal', 'issue', '--journal', 'jcim',
-            '--volume', '66', '--issue', '12', '--run-agent',
-            '--data-dir', str(tmp_path / 'reports')])
-        cli.main()
-        data, _ = record(tmp_path)
-        assert data['status'] == 'complete'
-        assert data['reading_coverage']['missing'] == 1
-        assert 'source-confirmed unavailable: 1' in capsys.readouterr().out
-        report = (tmp_path / 'reports/acs/jcim/66/12.md').read_text()
-        from papertrack.reports.migration import validate_report_content
-        assert validate_report_content(report, source='journal')
-        assert 'Title:  Official paper' in report
-        assert '\nAbstract:' not in report
-        assert '\nExtract' not in report
-    else:
-        with pytest.raises(RuntimeError, match='type conflicts with HTML evidence'):
-            run(tmp_path)
+    with pytest.raises(RuntimeError, match='Recent Abstract supplementation is unresolved'):
+        run(tmp_path)
+    data, _ = record(tmp_path)
+    assert data['status'] == 'failed'
+    assert not list((tmp_path/'reports').rglob('*.md'))
 
 
 def test_explicit_issue_agent_validates_and_imports(fake_codex, tmp_path, monkeypatch, capsys):
@@ -410,7 +398,7 @@ def test_browser_prompts_use_real_cua_and_bound_tabs(tmp_path):
     prompt = issue_task('prl', journal_configs['prl'], '137', '13', 2026,
                         str(tmp_path/'capture.json'), str(tmp_path), discover_latest=True)
     assert 'collectCuaIssueBatch(cua, browserId, tab.id' in prompt
-    assert 'collectCuaRecentBatch(cua, browserId, tab.id' in prompt
+    assert 'collectCuaRecentBatch' not in prompt  # APS has no recent-page phase.
     assert 'discoverCuaLatestIssue(cua, browserId, tab.id' in prompt
     assert 'tab, checkpointPath:' in prompt
     assert 'saveHtml: true, abstractTab' in prompt

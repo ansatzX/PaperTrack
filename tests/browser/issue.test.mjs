@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {captureIssue} from './issue.mjs';
+import {captureIssue} from '../../src/papertrack/browser/issue.mjs';
 
 function harness({badIdentity = false, drift = false, neverLoads = []} = {}) {
   const calls = [];
@@ -18,7 +18,7 @@ function harness({badIdentity = false, drift = false, neverLoads = []} = {}) {
       const card=cards.find(c=>'#'+c.control===selector);card.expanded=!card.expanded;card.abstract=card.expanded&&!neverLoads.includes(card.doi)?'Loaded text':'';}})
   }}};
 }
-const request={url:'https://pubs.acs.org/toc/jcisd8/66/12',volume:'66',issue:'12'};
+const request={url:'https://pubs.acs.org/jcisd8/issue/66/12',volume:'66',issue:'12'};
 
 test('bounded batches resume without revisiting loaded text and include editorial extracts',async()=>{
   const {tab,calls}=harness();
@@ -50,7 +50,7 @@ test('membership change fails the capture',async()=>{
 });
 
 test('DOM parser prefers Abstract over an earlier Extract control',async()=>{
-  const {inspectSilverchairDOM}=await import('../src/papertrack/browser/dom.mjs');
+  const {inspectSilverchairDOM}=await import('../../src/papertrack/browser/dom.mjs');
   const oldDocument=globalThis.document, oldLocation=globalThis.location;
   const control=kind=>({id:kind,innerText:kind,getAttribute:name=>name==='data-abstract-type'?kind:null});
   const card={querySelector:()=>null,querySelectorAll:selector=>selector==='.showAbstractLink'?[control('extract'),control('abstract')]:[]};
@@ -67,7 +67,7 @@ test('DOM parser prefers Abstract over an earlier Extract control',async()=>{
 });
 
 test('recent collection targets only exact issue DOIs and only Abstract controls',async()=>{
-  const {captureRecentPage}=await import('../src/papertrack/browser/issue.mjs');
+  const {captureRecentPage}=await import('../../src/papertrack/browser/issue.mjs');
   const {tab,calls}=harness();
   const evaluate=tab.playwright.evaluate;
   const url='https://pubs.acs.org/jcisd8/latest-articles';
@@ -127,7 +127,7 @@ test('failed missing-evidence cards defer without revisiting completed captures'
 });
 
 test('Extract supports outermost block-child-p and keeps nested prose once',async()=>{
-  const {inspectSilverchairDOM}=await import('../src/papertrack/browser/dom.mjs');
+  const {inspectSilverchairDOM}=await import('../../src/papertrack/browser/dom.mjs');
   const oldDocument=globalThis.document,oldLocation=globalThis.location;
   const nested={innerHTML:'Nested',contains:()=>false};
   const outer={innerHTML:'Before <p>Nested</p> after <math><msup><mi>x</mi><mn>2</mn></msup></math>',contains:e=>e===nested};

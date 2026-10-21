@@ -1,5 +1,5 @@
 /** APS issue inventory plus abstract-only detail visits in a separate tab. */
-export async function captureApsIssue(tab, request, {abstractTab, navigate=true, previous=null, maxInteractions=4, saveAbstract=null}={}) {
+export async function captureApsIssue(tab, request, {abstractTab, navigate=true, previous=null, maxInteractions=4, saveAbstract=null,readingMissing=new Set()}={}) {
   const expected = new URL(request.url);
   if (expected.origin !== 'https://journals.aps.org' || !/^\/\w+\/issues\/\d+\/\d+$/.test(expected.pathname)) {
     throw new Error('Expected an APS formal issue URL');
@@ -30,6 +30,7 @@ export async function captureApsIssue(tab, request, {abstractTab, navigate=true,
       throw new Error('Previous APS capture belongs to a different issue inventory');
     }
     for(let i=0;i<entries.length;i++) {
+      if(readingMissing.has(entries[i].doi.toLowerCase())) continue;
       if(previous.entries[i].abstract_type === 'abstract') {
         entries[i].abstract=previous.entries[i].abstract || '';
       } else if(previous.entries[i].abstract_type === 'unavailable' && previous.entries[i].unavailable_reason) {

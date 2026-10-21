@@ -79,8 +79,8 @@ keep browser evidence and separate real acceptance from unit tests.
 `browser/collect.mjs` is the core fixed collector after access. It returns
 needs_access/partial/needs_attention/needs_extractor_update/wrong_issue/complete.
 On a readable page with parser failures, preserve evidence and fix source/tests;
-do not ask the runtime model to improvise selectors. `experiments/journal-workflow/` remains
-an optional older queue prototype. Generating task instructions does not launch
+do not ask the runtime model to improvise selectors. The retired queue prototype
+is recoverable from Git history. Generating task instructions does not launch
 Codex/Claude or imply successful collection. Legacy static access
 implementations are recoverable from checkpoint commit `8804413`.
 
@@ -89,8 +89,9 @@ Agent exit zero is not successful collection; missing, partial or invalid artifa
 must fail without replacing reports. Keep one invocation, with no automatic model
 fallback, broader permissions or retry service. The launcher runs in a dedicated
 output workspace and must not ask the child to edit code or publish reports.
-Browser JS ships as package data; repository `browser/` forwards to that single
-implementation. Do not introduce a separate browser transport for the launcher.
+Browser JS ships as package data from `src/papertrack/browser/`; browser tests
+live in `tests/browser/`. Do not introduce compatibility copies or a separate
+browser transport for the launcher.
 
 ## State And Migration
 
@@ -132,7 +133,8 @@ initial backfill or rolling refresh per category, with one sequential request
 stream. Keep script-level concurrency here; do not change Python for that purpose.
 
 Retain real agent capture JSON, rendered issue/archive/access HTML and run logs
-in the data directory's .papertrack-runs cache, including partial/failed runs.
+in the working directory's .papertrack-runs cache, including partial/failed runs.
+The data directory is the Markdown export destination, not the runtime cache root.
 Retain collector-owned `.readings/` per-DOI raw card/panel HTML evidence too;
 Silverchair can clear old panels before the final whole-page snapshot. The
 Python importer validates the panel's source URL, DOI and control binding.
@@ -155,9 +157,9 @@ src/papertrack/
 ├── adapter_result.py
 ├── calendar_plan.py
 └── categories.toml
-browser/                  # compatibility entrypoints and browser tests
-experiments/journal-workflow/  # optional older queue prototype
-tests/
+tests/                    # Python regression tests
+tests/browser/            # JS tests importing the packaged collector directly
+docs/browser/             # collector usage and dated acceptance records
 ```
 
 ## Development Commands
@@ -178,8 +180,13 @@ The deployed local environment is usually:
 ## Coding And Tests
 
 - Target Python 3.10+.
-- Follow the existing style: PEP 8, 4-space indentation, snake_case functions,
-  PascalCase dataclasses, internal helpers prefixed with `_`.
+- Use the Ruff policy in `pyproject.toml`: 80 columns, 4-space indentation,
+  double quotes, sorted imports and Google-style public API docstrings.
+  Use snake_case functions, PascalCase dataclasses and `_`-prefixed helpers.
+- Check with `ruff check .` and `ruff format --check .`; apply formatting with
+  `ruff format <changed-paths>`. Do not use unsafe fixes or suppress real errors
+  merely to make lint pass. Existing code has lint debt; report remaining issues
+  separately from checks passing on a focused change.
 - Prefer structured dataclasses and parser logic over positional lists or ad hoc
   string handling.
 - Add or update tests for parsing, source precedence, Zotero matching, report
@@ -196,7 +203,7 @@ The deployed local environment is usually:
 - Keep working scripts, report backups and temporary work under the project
   `.work/` directory, never `/tmp` or `/private`. Set `TMPDIR` to the absolute
   project `.work/tmp` path for tests and helper commands. Publisher capture
-  evidence remains in the data directory's `.papertrack-runs` cache.
+  evidence remains in the working directory's `.papertrack-runs` cache.
 
 - Agent workloads must run under a resource-limited systemd user scope, with no
   unbounded fallback. Current limits: MemoryHigh=6G, MemoryMax=8G,

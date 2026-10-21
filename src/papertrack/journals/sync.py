@@ -10,6 +10,7 @@ from papertrack.journals.capture import read_browser_issue, validate_reading_con
 from papertrack.journals.agent import run_issue_agent
 from papertrack.journals.inventory import canonical_url, parse_archive_page, validate_inventory
 from papertrack.journals.task import archive_url
+from papertrack.journals.storage import cache_roots, relocated_record, runs_root
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,8 @@ def _previously_observed_issues(root, journal, cfg):
                       and (issue_file / 'report.md').is_file()):
                     known.add((volume_dir.name, issue_file.name))
 
-    for path in (root / '.papertrack-runs').glob('*-sync-*/plan.json'):
+    for path in (path for cache in cache_roots(root)
+                 for path in cache.glob('*-sync-*/plan.json')):
         try:
             plan = json.loads(path.read_text())
         except (OSError, ValueError):
@@ -56,9 +58,10 @@ def _previously_observed_issues(root, journal, cfg):
 
 def _records(root, journal):
     records = []
-    for path in (root / '.papertrack-runs').glob('*/result.json'):
+    for path in (path for cache in cache_roots(root)
+                 for path in cache.glob('*/result.json')):
         try:
-            record = json.loads(path.read_text())
+            record = relocated_record(json.loads(path.read_text()), root, path.parent)
         except (ValueError, OSError):
             continue
         if record.get('journal') == journal:
@@ -178,7 +181,7 @@ def sync_journal(args, cfg, *, from_date, to_date):
     if start > end:
         raise ValueError('Journal date range is reversed')
     root = Path(args.data_dir)
-    runs = root / '.papertrack-runs'
+    runs = runs_root()
     known = _previously_observed_issues(root, args.journal, cfg)
     runs.mkdir(parents=True, exist_ok=True)
     folder = Path(tempfile.mkdtemp(prefix=f'{args.journal}-sync-', dir=runs))

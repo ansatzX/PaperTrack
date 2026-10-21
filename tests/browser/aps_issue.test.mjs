@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {captureApsIssue} from './aps_issue.mjs';
+import {captureApsIssue} from '../../src/papertrack/browser/aps_issue.mjs';
 
 const request={url:'https://journals.aps.org/prl/issues/136/1',volume:'136',issue:'1'};
 function harness({wrongDoi=false}={}) {

@@ -19,6 +19,24 @@ async function atomicWrite(file, value) {
   finally {await fs.rm(temporary,{force:true});}
 }
 
+async function apsEvidenceValid(checkpoint,row,request) {
+  const doi=doiOf(row.doi),key=createHash('sha256').update(doi).digest('hex');
+  const base=path.join(checkpoint+'.articles',key);
+  try {
+    const [html,index]=await Promise.all([fs.readFile(base+'.html'),fs.readFile(base+'.json','utf8')]);
+    const saved=JSON.parse(index),reading=saved.reading;
+    const url=new URL(reading.url),issue=new URL(request.url);
+    const observed=doiOf(String(reading.doi).replace(/^DOI:\s*/i,'').trim());
+    if(!html.length || saved.schema!=='papertrack-aps-reading-v1' || saved.doi!==doi ||
+      saved.sha256!==createHash('sha256').update(html).digest('hex') ||
+      url.origin!==issue.origin || url.pathname!==`/${issue.pathname.split('/')[1]}/abstract/${doi}` ||
+      observed!==doi || reading.mathPending) return false;
+    if(row.abstract_type==='unavailable') return !!reading.unavailableArticle && !reading.abstract && !!row.unavailable_reason;
+    const comparable=value=>String(value||'').normalize('NFKC').replace(/\s/g,'');
+    return row.abstract_type==='abstract' && !!reading.abstract && comparable(reading.abstract)===comparable(row.abstract);
+  } catch {return false;}
+}
+
 export async function collectIssueBatch(tab, request, {checkpointPath,abstractTab=null,
   maxInteractions=4,abstractTimeoutMs=10000,saveHtml=false}={}) {
   validateRequest(request);
@@ -42,13 +60,23 @@ export async function collectIssueBatch(tab, request, {checkpointPath,abstractTa
   const saveAbstract=saveHtml?async(detailTab,doi,{failed=false}={})=>{
     const key=createHash('sha256').update(doi.toLowerCase()).digest('hex');
     const evidence=await saveIssueHtml(detailTab,path.join(checkpointPath+'.articles',key+(failed?'.failed.html':'.html')),{apsAbstract:true});
+    if(!failed) {
+      const html=await fs.readFile(path.join(checkpointPath+'.articles',key+'.html'));
+      await atomicWrite(path.join(checkpointPath+'.articles',key+'.json'),JSON.stringify({
+        schema:'papertrack-aps-reading-v1',doi:doiOf(doi),
+        sha256:createHash('sha256').update(html).digest('hex'),reading:evidence.reading})+'\n');
+    }
     return evidence.reading;
   }:null;
   const readingMissing=new Set();
-  if(saveHtml && previous && new URL(request.url).hostname!=='journals.aps.org') {
+  if(saveHtml && previous) {
     for(const row of previous.entries) {
-      try {await fs.access(readingEvidencePath(checkpointPath,row.doi));}
-      catch(error) {if(error.code!=='ENOENT') throw error;readingMissing.add(String(row.doi).replace(/^https?:\/\/(?:dx\.)?doi.org\//i,'').toLowerCase());}
+      if(new URL(request.url).hostname==='journals.aps.org') {
+        if(!await apsEvidenceValid(checkpointPath,row,request)) readingMissing.add(doiOf(row.doi));
+      } else {
+        try {await fs.access(readingEvidencePath(checkpointPath,row.doi));}
+        catch(error) {if(error.code!=='ENOENT') throw error;readingMissing.add(doiOf(row.doi));}
+      }
     }
   }
   const saveReading=saveHtml?(source,row)=>saveReadingEvidence(source,checkpointPath,row):null;

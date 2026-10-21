@@ -15,9 +15,12 @@ data/
 *~
 docs/*
 !docs/README.md
+!docs/browser/
+!docs/browser/**
 !docs/legacy/
 .claude/
 .pytest_cache
+.ruff_cache/
 # Local runtime fetch and rebuild diagnostics
 .papertrack_diagnostics/
 .papertrack_state.json

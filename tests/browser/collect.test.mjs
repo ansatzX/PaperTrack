@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {probeIssueAccess,validateRequest} from './access.mjs';
-import {collectIssueBatch,readIssueHtml} from './collect.mjs';
-import {inspectSilverchairDOM} from './dom.mjs';
+import {probeIssueAccess,validateRequest} from '../../src/papertrack/browser/access.mjs';
+import {collectIssueBatch,readIssueHtml} from '../../src/papertrack/browser/collect.mjs';
+import {inspectSilverchairDOM} from '../../src/papertrack/browser/dom.mjs';
 
 const request={url:'https://pubs.acs.org/jcisd8/issue/66/12',volume:'66',issue:'12'};
 function harness() {
@@ -139,7 +139,7 @@ test('failed interaction produces an actionable stage and recovers without inven
 });
 
 test('CUA adapter binds only the supplied browser/tab and never uses a different REPL transport',async t=>{
-  const {collectCuaIssueBatch}=await import('./cua.mjs');
+  const {collectCuaIssueBatch}=await import('../../src/papertrack/browser/cua.mjs');
   const checkpointPath=await fixture(t),h=harness(),bound=[];
   let closed=0;h.tab.close=async()=>{closed++;};
   const agent={browsers:{get:async id=>{bound.push(id);return {tabs:{get:async tabId=>{bound.push(tabId);return h.tab;}}};}}};
@@ -167,7 +167,7 @@ test('HTML export avoids capped large string results and rejects truncated chunk
 });
 
 test('failed HTML export preserves prior source evidence',async t=>{
-  const {saveIssueHtml}=await import('./collect.mjs');
+  const {saveIssueHtml}=await import('../../src/papertrack/browser/collect.mjs');
   const target=(await fixture(t))+'.html';await fs.writeFile(target,'prior valid source');
   const tab={playwright:{evaluate:async()=>({length:40000,chunks:['truncated']})}};
   await assert.rejects(saveIssueHtml(tab,target),/html_snapshot_chunk_truncated/);
@@ -186,7 +186,7 @@ test('HTML export reads the live DOM once even when subsequent reads would chang
 });
 
 test('APS source HTML and paragraph text come from a single snapshot without figure controls',async t=>{
-  const {saveIssueHtml}=await import('./collect.mjs');
+  const {saveIssueHtml}=await import('../../src/papertrack/browser/collect.mjs');
   const target=(await fixture(t))+'.html';
   const oldDocument=globalThis.document,oldLocation=globalThis.location;
   let calls=0;
@@ -226,8 +226,8 @@ test('failed panel evidence save cannot count a new abstract as captured',async 
   const evaluate=h.tab.playwright.evaluate;
   h.tab.playwright.evaluate=async(fn,arg)=>{
     if(fn.name==='failedReadingSnapshotDOM') {
-        calls.push('failure-evidence');
-        const card=cards.find(c=>c.doi===arg.doi);
+        h.calls.push('failure-evidence');
+        const card=h.cards.find(c=>c.doi===arg.doi);
         return {schema:'papertrack-failed-reading-html-v1',url:request.url,doi:arg.doi,
           card_html:'<div>failed card</div>',panel_html:'<div>loading</div>',
           control:{id:arg.control,panel:arg.panel,expanded:String(card.expanded)}};
@@ -239,10 +239,12 @@ test('failed panel evidence save cannot count a new abstract as captured',async 
   assert.equal(result.status,'needs_attention');
   assert.equal(result.remaining,2);
   assert.equal(result.captured,0);
+  assert.equal(result.errors[0].evidence_error,undefined);
+  assert.ok(result.errors[0].evidence);
 });
 
 test('issue-to-recent workflow retains formal membership and writes a separate supplement',async t=>{
-  const {collectRecentBatch}=await import('../src/papertrack/browser/collect.mjs');
+  const {collectRecentBatch}=await import('../../src/papertrack/browser/collect.mjs');
   const checkpointPath=await fixture(t),issue=harness();
   const recentUrl='https://pubs.acs.org/jcisd8/latest-articles';
   issue.cards[0].abstract_type='unavailable';
@@ -270,7 +272,7 @@ test('issue-to-recent workflow retains formal membership and writes a separate s
 });
 
 test('recent pages without the issue DOI remain unresolved, not empty success',async t=>{
-  const {collectRecentBatch}=await import('../src/papertrack/browser/collect.mjs');
+  const {collectRecentBatch}=await import('../../src/papertrack/browser/collect.mjs');
   const checkpointPath=await fixture(t),h=harness();
   const recentUrl='https://pubs.acs.org/jcisd8/latest-articles';
   await fs.writeFile(checkpointPath,JSON.stringify({...request,recent_url:recentUrl,
@@ -321,7 +323,7 @@ test('failed sidecar write cannot replace the original interaction error',async 
 });
 
 test('failed DOM snapshot is bounded and records missing controls without claiming text',async t=>{
-  const {saveFailedReadingEvidence}=await import('../src/papertrack/browser/reading.mjs');
+  const {saveFailedReadingEvidence}=await import('../../src/papertrack/browser/reading.mjs');
   const checkpointPath=await fixture(t);
   const oldDocument=globalThis.document,oldLocation=globalThis.location;
   try {
@@ -423,7 +425,7 @@ test('AIP missing reading control still requires a discoverable recent link',asy
 });
 
 test('CUA adapter resolves the documented cua.getTab signature and rejects fabricated legacy runtime',async t=>{
-  const {collectCuaIssueBatch}=await import('./cua.mjs');
+  const {collectCuaIssueBatch}=await import('../../src/papertrack/browser/cua.mjs');
   const checkpointPath=await fixture(t),h=harness(),bound=[];
   h.tab.close=async()=>{};
   const cua={getTab:async(...args)=>{bound.push(args);return h.tab;}};
@@ -435,7 +437,7 @@ test('CUA adapter resolves the documented cua.getTab signature and rejects fabri
 });
 
 test('CUA adapter reuses a real bound tab across batches without getTab snapshots',async t=>{
-  const {collectCuaIssueBatch}=await import('./cua.mjs');
+  const {collectCuaIssueBatch}=await import('../../src/papertrack/browser/cua.mjs');
   const checkpointPath=await fixture(t),h=harness();
   h.tab.id='owned';h.tab.close=async()=>{};
   const cua={getTab:async()=>{assert.fail('Already bound tab must not be selected again');}};

@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 from papertrack.journals.capture import validate_reading_controls
 from papertrack.journals.cache_repair import repair_cached_extract_capture
 from papertrack.journals.task import issue_url
+from papertrack.journals.storage import runs_root
 
 logger = logging.getLogger(__name__)
 EXTRACT_CONFLICT = 'Extract text conflicts with HTML evidence'
@@ -154,7 +155,7 @@ def prepare_cached_extract_repairs(data_dir: str | Path, journal: str, cfg: dict
     candidates or archive discovery. This function performs no network access.
     """
     root = Path(data_dir)
-    runs_root = root / '.papertrack-runs'
+    runs_directory = runs_root()
     provider = cfg.get('provider') or 'acs'
     if provider not in ('acs', 'aip'):
         return {'journal': journal, 'repaired': [], 'failures': [], 'skipped': []}
@@ -210,7 +211,7 @@ def prepare_cached_extract_repairs(data_dir: str | Path, journal: str, cfg: dict
             continue
 
         source_hash = _sha256(capture)
-        run_dir = _run_directory(runs_root, journal, volume, issue)
+        run_dir = _run_directory(runs_directory, journal, volume, issue)
         try:
             repair = repair_cached_extract_capture(
                 capture, run_dir, provider=provider, code=code, volume=volume,

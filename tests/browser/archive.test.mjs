@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {collectCuaArchivePage} from '../src/papertrack/browser/cua.mjs';
+import {collectCuaArchivePage} from '../../src/papertrack/browser/cua.mjs';
 
 test('archive capture retains raw HTML and exact URL without collecting issues',async(t)=>{
   const dir=await fs.mkdtemp(path.join(os.tmpdir(),'papertrack-archive-'));

@@ -37,8 +37,10 @@ Daily runs log to `.papertrack_diagnostics/daily.log`, use a nonblocking lock to
 avoid overlap, and continue other sources after a failure while returning nonzero.
 Cron's user-bus environment is set explicitly; a working user bus and authorized
 browser connection are still required. Browser challenges can require a handoff.
-Python owns source iteration, locking, logging and failure status; the shell
-script only supplies the deployment command and resource limits.
+Bash owns the script lock and starts the arXiv and journal pipelines concurrently
+inside one Conda invocation. It waits for both and propagates either failure.
+The arXiv branch selects initial backfill or rolling refresh per category;
+individual Python commands own collection, validation and report generation.
 
 `journal refresh` first discovers dated formal issues from `--from-date` (default
 2026-01-01) through `--to-date` (default today). It follows official archive year/
@@ -88,7 +90,7 @@ abstract interaction allows one repeat of the same fixed call per DOI; repeated
 failure still stops and preserves evidence.
 
 Each run keeps `task.txt`, `events.jsonl`, `stderr.log`, `final.txt`, capture JSON,
-rendered HTML and `result.json` under `<data-dir>/.papertrack-runs/`. The agent
+rendered HTML and `result.json` under `<working-directory>/.papertrack-runs/`. The agent
 only collects; the parent Python process validates issue identity, inventory and
 abstracts before querying optional Zotero and writing the report. Exit code zero
 alone never authorizes publication. Timeout/failure retains partial evidence and
@@ -162,8 +164,8 @@ local JS modules. No model SDK is required by the fixed collector.
 
 The installed `papertrack/browser/cua.mjs` is the Codex handoff adapter, running
 inside the SAME `cua_repl` as browser access. It binds the documented DOM tab and
-calls the packaged `collect.mjs`. Repository `browser/*.mjs` entrypoints forward
-to this implementation; there is one collector, also included in the wheel.
+calls the packaged `collect.mjs` in `src/papertrack/browser/`. There is one
+collector, also included in the wheel; JS tests import it directly.
 Do not import it in a separate `node_repl` and assume browser variables are shared.
 The latter module is the fixed collection entrypoint. It probes access without
 navigating or solving challenges, calls the ACS/AIP or APS collector in bounded
@@ -182,7 +184,7 @@ Statuses separate `needs_access`, `partial`, `needs_attention`,
 `needs_extractor_update`, `wrong_issue` and `complete`. The agent may repair access
 and repeat the module call. On a readable page with parser failures, preserve
 artifacts and report the defect for a code/test change; do not improvise selectors.
-Details and supported browser API are in [browser/README.md](browser/README.md).
+Details and supported browser API are in [the browser guide](docs/browser/README.md).
 
 Import only a completed capture:
 
@@ -227,10 +229,10 @@ Their implementation and earlier acceptance records are recoverable from commit
 configuration have not been migrated or deleted. Any external schedule pointing
 at a removed script must be retired before it is used again.
 
-The optional [journal worker](experiments/journal-workflow/README.md) remains available as an
-older queue prototype. The new handoff uses the fixed browser module directly;
-it is independent of the Python `--run-agent` launcher. Claude launching is not implemented; `journal refresh` is the
-automatic date-range reconciliation entrypoint.
+The older queue prototype has been retired and is recoverable from Git history.
+The Python `--run-agent` launcher uses the packaged browser module directly.
+Claude launching is not implemented; `journal refresh` is the automatic
+date-range reconciliation entrypoint.
 
 ## Reports and local maintenance
 
@@ -337,25 +339,41 @@ src/papertrack/
   reports/               Rendering, templates, reading state and migrations
   browser/               Installed fixed JavaScript collector
 tests/                   Python tests and fixtures
-browser/                 Compatibility entrypoints and JavaScript tests
+  browser/               JavaScript collector tests
 scripts/                 Local maintenance tools
 docs/                    Documentation index, historical plans and experiments
-experiments/             Optional older prototypes
 ```
 
-See [the documentation map](docs/README.md). Generated reports and raw browser
-captures live under the configured data directory; `.papertrack-runs/` retains
-successful, partial and failed agent evidence. Local diagnostics and historical
+See [the documentation map](docs/README.md). Generated reports live under the
+configured data directory. Raw browser captures and successful, partial and failed
+agent evidence live in `.papertrack-runs/` under the working directory (`run.sh`
+changes to the project directory). Legacy export-directory caches remain readable;
+`papertrack.journals.storage.move_legacy_cache(data_dir)` moves an entire cache on
+the same filesystem while collectors are stopped, refusing to merge or overwrite.
+Original evidence and logs remain unchanged; a relocation manifest resolves old
+absolute paths in run records. Local diagnostics and historical
 `.papertrack_state.json` remain separate from source code.
 
 See [INSTALL.md](INSTALL.md) for installation and optional browser components.
 
 ```bash
 pip install -e '.[dev]'
+ruff check .
+ruff format --check .
 pytest -q
-node --test browser/*.test.mjs
-cd experiments/journal-workflow && npm test
+node --test tests/browser/*.test.mjs
 ```
+
+Ruff is pinned in the development dependencies and configured in `pyproject.toml`.
+The policy follows the [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html)
+where Ruff can enforce it: 80 columns, four-space indentation, naming and
+Google-style docstrings. Double quotes and LF endings are the project's formatting
+choices. Import sorting, bug checks and Python 3.10 modernization are enabled;
+tests do not require API docstrings. Runtime caches and temporary work are excluded
+even when passed explicitly. See [Ruff's configuration reference](https://docs.astral.sh/ruff/settings/).
+Use `ruff format <changed-paths>` for formatting and review any `ruff check --fix`
+changes before keeping them. Existing code has outstanding lint and formatting
+findings; adding the configuration does not imply the repository already passes.
 
 Tests mock network and Zotero. Live publisher access and an agent's end-to-end
 collection require separate acceptance in a review output directory.

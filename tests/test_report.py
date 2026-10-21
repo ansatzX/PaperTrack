@@ -769,12 +769,13 @@ from #quant-ph-2026-06-08
         ),
     )
 
-    report.filter_arxiv_days_to_md(
-        days=[date(2026, 6, 8)],
-        md_folder=str(tmp_path / "arxiv" / "quant-ph"),
-        category="quant-ph",
-        refresh_existing=True,
-    )
+    with pytest.raises(report.ArxivFetchError):
+        report.filter_arxiv_days_to_md(
+            days=[date(2026, 6, 8)],
+            md_folder=str(tmp_path / "arxiv" / "quant-ph"),
+            category="quant-ph",
+            refresh_existing=True,
+        )
 
     assert existing.read_bytes() == original.encode()
 
@@ -828,12 +829,13 @@ TASK
         ),
     )
 
-    report.filter_arxiv_days_to_md(
-        days=[date(2026, 6, 8)],
-        md_folder=str(tmp_path / "arxiv" / "quant-ph"),
-        category="quant-ph",
-        refresh_existing=True,
-    )
+    with pytest.raises(report.ArxivFetchError):
+        report.filter_arxiv_days_to_md(
+            days=[date(2026, 6, 8)],
+            md_folder=str(tmp_path / "arxiv" / "quant-ph"),
+            category="quant-ph",
+            refresh_existing=True,
+        )
 
     assert existing.read_text(encoding="utf-8") == original
 

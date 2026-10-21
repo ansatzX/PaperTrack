@@ -6,6 +6,8 @@ from pathlib import Path
 import shlex
 import sys
 
+from papertrack.journals.entry import validate_issue_placement
+
 
 _TAB_GROUP_CLEANUP = """Before creating task tabs, record the existing tab group IDs.
 In finally, after closing task-created tabs, delete any tab groups created by
@@ -18,8 +20,7 @@ verified, report the exact remaining group IDs instead of claiming cleanup.
 
 
 def issue_url(cfg: dict, volume: str, issue: str) -> str:
-    if not str(volume).isdigit() or not str(issue).isdigit():
-        raise ValueError("Formal volume and issue must be numeric")
+    validate_issue_placement(volume, issue)
     if cfg.get("acs_code"):
         return f"https://pubs.acs.org/{cfg['acs_code']}/issue/{volume}/{issue}"
     if cfg.get("provider") == "aip":
@@ -41,146 +42,106 @@ def issue_task(journal: str, cfg: dict, volume: str, issue: str, year: int,
         "--browser-snapshot", capture, "--data-dir", str(Path(data_dir).resolve()),
     ])
     module_path = str(Path(__file__).resolve().parents[1] / "browser" / "cua.mjs")
-    completion = ("Once complete, return the checkpoint path and counts. The parent PaperTrack process\n"
-                  "will independently validate and import it. Do not run the import command or write reports."
-                  if capture_only else
-                  f"Once complete, import with the repository Python environment:\n{command}")
+    completion = (
+        "The parent PaperTrack process validates the cache and writes reports. "
+        "Do not run the import command or write reports."
+        if capture_only else
+        f"Only after complete, import with the repository Python environment:\n{command}"
+    )
     request = json.dumps({"url": url, "volume": str(volume), "issue": str(issue)})
     discovery = ''
     if discover_latest:
-        discovery = f'''
-First establish access to the official archive above. Import the fixed module:
-var collector = await import({json.dumps(module_path)});
-Then, in a separate browser-tool invocation, run exactly one discovery call:
+        discovery = f'''First establish archive access, then run one discovery call:
 var discovery = await collector.discoverCuaLatestIssue(cua, browserId, tab.id,
   {json.dumps({'archiveUrl': url, 'code': cfg.get('acs_code') or cfg['slug']})},
   {{tab, evidencePath: {json.dumps(capture + '.archive.html')}}});
 nodeRepl.write(discovery);
-If needs_access, establish access and repeat. Any other non-ready status is a
-visible failure: stop, preserve evidence, and close task tabs. Do not invent URLs,
-issue numbers or archive parsers. Once ready, navigate your task-owned tab to
-discovery.request.url and establish issue access. Use discovery.request below.
-The archive evidence and capture must come from this same invocation.
-If reason is archive_not_loaded, allow the existing page to finish loading before
-repeating the fixed discovery call. An empty loading page is not evidence of an
-empty journal archive. Keep the same bounded task budget and no-progress limit.
+For needs_access, restore access; for archive_not_loaded, wait for loading.
+Otherwise stop unless ready. On ready, navigate to discovery.request.url and
+establish issue access. Use discovery.request below. Do not invent URLs or issue numbers.
 '''
         request = 'discovery.request'
-    detail = ("For APS, create a second task-owned Abstract-page tab and pass the real handle as abstractTab. "
-              "If an Abstract page is challenged, handle access in that tab and resume the collector."
-              if cfg.get("provider") == "aps" else "ACS/AIP use controls on the issue page; no detail tab is needed.")
-    detail_option = ", abstractTab" if cfg.get("provider") == "aps" else ""
-    target = ('the latest formal issue' if discover_latest else f'volume {volume}, issue {issue}')
-    return f'''Obtain browser access to {cfg['name']}: {target}.
-Official issue page: {url}
+    aps = cfg.get('provider') == 'aps'
+    detail = (
+        'Create a second task-owned Abstract-page tab as abstractTab; restore access there if challenged.'
+        if aps else 'Use issue-page controls; no Abstract-page tab is needed.'
+    )
+    detail_option = ', abstractTab' if aps else ''
+    recent = '' if aps else f'''- needs_recent: retain result.recent_url as recentUrl, navigate the SAME tab
+  there and establish access. Use this call instead of the issue call:
+  var result = await collector.collectCuaRecentBatch(cua, browserId, tab.id,
+    request, {{tab, checkpointPath: {json.dumps(capture)}, recentUrl,
+    maxInteractions: 4}}); nodeRepl.write(result);
+  For partial, reuse recentUrl. For needs_recent, follow the next observed URL.
+  Only exact issue DOIs may be supplemented; never add recent-only papers.
+'''
+    target = 'the latest formal issue' if discover_latest else f'volume {volume}, issue {issue}'
+    return f'''Collect {cfg['name']}: {target}.
+Official page: {url}
 Capture checkpoint: {capture}
+Finish within a {time_budget_seconds:g}-second budget; stop as soon as complete.
 
-Your responsibility is access: connect the user's authorized browser, navigate to
-this issue, handle access challenges and recover the connection. Execute directly;
-do not delegate or wait for another agent. Create a new task-owned issue tab for
-each new invocation; do not claim tabs owned by another agent session. Rediscover
-your own tabs on resume instead of
-assuming old IDs/variables remain valid. Preserve unrelated tabs and user sessions.
-Do not call browser.nameSession, create tab groups, or name tab groups. Do not
-mark task tabs as deliverables or handoffs. Close EVERY task-created issue and
-Abstract tab before returning, on success or failure; use try/finally for cleanup.
-{_TAB_GROUP_CLEANUP}
-The adapter closes both supplied tabs on complete and returns task_tabs_closed=true.
-Do not close those tabs again. Cleanup belongs at the end of the task, not after
-every partial batch. If a tool reports an error after closing a tab, inspect your
-remaining task-owned tabs before attempting another close; preserve the capture.
-If the browser disconnects and cleanup cannot be confirmed, report exact tab IDs.
-If a challenge needs human action you cannot complete, retain progress and report
-that exact blocker. Do not install transports or read browser profiles/cookies.
-The user has authorized normal browser verification for these journal pages.
-An automatic "Performing security verification" screen is not by itself a
-request for human input: allow it up to 30 seconds to settle, then inspect again
-within this invocation's total budget. If a visible verification control appears,
-use the normal browser UI where supported. Do not bypass browser security controls.
-Before returning an access failure, call the fixed discovery/collection adapter
-once on the blocked page with evidence saving enabled; its access gate retains
-the HTML without treating it as article data. Two immediate unchanged snapshots
-are not evidence that an automatic verification has exhausted that wait.
-{discovery}
+RESPONSIBILITY
+You establish browser access; packaged code collects data; Python validates it.
+Execute directly without delegation. Use only the fixed calls below: no custom
+selectors, parsers, abstract-copying loops or manually written capture JSON.
+Capture verbatim Abstract/Extract with its original type and unavailable_reason;
+never substitute teasers, summaries, TOC image recognition or third-party text.
+Formal issue membership is authoritative. inventory_complete means checked
+observed membership, not independent proof of publisher completeness.
 
-AFTER access, use the fixed collector below. Do not write selectors, HTML parsers,
-DOI extraction code or abstract-copying loops. Do not manually produce capture JSON.
-Use mcp__cua_repl.js for BOTH access and the module call below. Read its current
-documentation first. Retain the actual selected browser identifier as browserId
-and the real task-owned tab returned by cua.createBrowserTab or cua.getTab as tab.
-Use the existing cua object directly. Never construct, mock, or overwrite cua,
-agent, browsers, browser.tabs, or tab objects to imitate a missing API.
-The adapter supports cua.getTab(tabId, {{browser: browserId}}); pass the already
-bound tab below to avoid repeated getTab calls emitting large UI snapshots.
-If selecting a browser is needed, use the documented cua.getBrowser entry point;
-getBrowser alone does not create a tab. When opening Chrome tabs, omit the
-visible option (it is only supported for the in-app browser). {detail}
-mcp__node_repl.js is a DIFFERENT REPL and does not inherit browser handles.
-If the real cua runtime or module import is unavailable, report that exact
-capability failure; do not fabricate a runtime or replace the fixed collector.
+BROWSER AND ACCESS
+Use mcp__cua_repl.js for access and collection in the SAME runtime; read its
+current documentation. Keep the real cua, selected browserId and task-owned tab.
+Never construct, mock, or overwrite cua or browser/tab handles. Do not switch to
+mcp__node_repl.js. Create a fresh issue tab per invocation; rediscover your own
+handles on resume. Pass bound tab below; omit visible when creating Chrome tabs.
+{detail}
+Use ordinary authorized browser verification. Allow automatic verification up to
+30 seconds before reassessing; use visible verification controls where supported.
+Do not bypass security controls, read profiles/cookies or install transports.
+If human action or a runtime capability is required, report the exact blocker.
+Before returning an access failure, call the fixed adapter once to retain blocked
+page evidence, if the runtime is available. Do not treat it as article data.
 
-Run in the supported browser tool runtime:
-Use timeout_ms: 120000 and exactly ONE collector call per cua_repl invocation.
-Do not wrap multiple batches in a loop: the outer tool deadline can expire during
-a later click even though each individual collection batch is bounded.
+FIXED CALLS
+Import once in cua_repl:
 var collector = await import({json.dumps(module_path)});
+{discovery}
+After access, use timeout_ms: 120000 and exactly ONE collector call per cua_repl invocation.
+Do not loop batches inside a tool call. Keep the same checkpoint throughout.
 var request = {request};
 var result = await collector.collectCuaIssueBatch(cua, browserId, tab.id, request, {{
   tab, checkpointPath: {json.dumps(capture)}, maxInteractions: 4, saveHtml: true{detail_option}
 }});
 nodeRepl.write(result);
 
-This fixed code reads the real DOM, follows aria-controls (control IDs are opaque),
-expands Abstract/Extract panels, saves a bounded batch and retains prior text. It
-never launches browsers, solves challenges, makes publisher HTTP calls or invokes a model.
-HTML is saved at checkpoint + '.html' for parser diagnosis without another fetch.
-APS abstract detail HTML is saved by the collector inside checkpoint + '.articles/'.
-ACS/AIP reading panels are saved verbatim by the collector inside checkpoint + '.readings/'.
-Retain these files: closing a panel may remove its contents from the final issue HTML.
-Keep these files together with the checkpoint; Python validates their DOI and abstract text.
-The stable schema is papertrack-browser-issue-v1; title, authors, DOI, citation,
-article URL, verbatim Abstract/Extract, original type and unavailable_reason come
-from fixed code. Only official formal-issue members belong in the reading ledger.
-Do not substitute teasers, summaries, ASAP entries or third-party metadata.
-Report Abstract, Extract and missing reading text separately. An Extract is not
-a complete Abstract; captured counts include both kinds of reading text.
-
-Handle result.status:
-- partial: repeat the SAME module call and checkpoint while remaining decreases
-  OR captured increases. Retained text can already be counted as captured while
-  its missing raw panel evidence is being saved; an unchanged captured count alone
-  is NOT a stall. Compare consecutive batch results, not the original checkpoint's
-  remaining count, which may predate required evidence checks. For recent batches,
-  use their remaining count and next observed page URL to track progress.
-- needs_recent: the fixed collector found an official latest-articles link and
-  issue members with no reading control. Navigate the SAME task-owned tab to
-  result.recent_url and establish access. Then use exactly one call per tool turn:
-  result = await collector.collectCuaRecentBatch(cua, browserId, tab.id,
-    request, {{tab, checkpointPath: {json.dumps(capture)}, recentUrl: result.recent_url,
-    maxInteractions: 4}}); nodeRepl.write(result);
-  Retain the recent URL in a variable before calling. For partial, repeat this
-  recent call on that same URL. For needs_recent, follow its next observed URL.
-  Fixed code targets only exact issue DOIs, saves raw HTML and follows observed
-  rel=next links (at most 20 pages). Never match titles or add recent-only papers.
-  Missing Abstracts after the observed pages are exhausted remain needs_attention.
-- needs_access: handle access in the relevant tab, then resume the SAME checkpoint.
+NEXT STEP
+- partial: repeat the same call. Compare consecutive results in the current phase;
+  progress is decreased remaining, increased captured, or an advanced recent URL.
+  remaining also accounts for missing reading evidence: captured alone is not a
+  stall indicator. Start a new comparison baseline when changing phase.
+{recent}- needs_access: restore access in the affected tab, then resume the same call.
 - needs_attention with abstract_not_loaded, abstract_interaction_failed or
-  abstract_visit_failed: inspect actual access if needed, then retry the SAME
-  fixed module call once for that failed DOI. Keep the checkpoint and error history.
-  If the same DOI fails again, stop and report it; never declare it unavailable.
-- needs_extractor_update, wrong_issue, or other needs_attention on a readable page:
-  preserve evidence and return the exact status/errors; do not improvise a parser.
-- complete: local validation/import may proceed.
-Stop after two repeated identical failures, or two consecutive batches with neither
-decreased remaining nor increased captured (nor an advanced recent page URL), or
-a {time_budget_seconds:g}-second budget.
-A partial checkpoint is not a completed issue. Fixed inventory_complete records a
-checked observed inventory, not independent proof that publisher coverage is complete.
+  abstract_visit_failed: inspect access, then retry the SAME call once for that DOI.
+  If the same DOI fails again, stop; do not declare its reading unavailable.
+- complete: stop collection. {completion}
+- needs_extractor_update, wrong_issue or any other error: preserve evidence and
+  report it; readable-page parser failures require a package fix, not improvisation.
+Stop on two consecutive batches without progress, two identical failures, or the
+budget limit. Partial work is not success. Retain checkpoint and all collector
+HTML/evidence, including .articles/, .readings/ and recent-page files.
 
-{completion}
-Do not edit production Markdown directly or mark failed work processed. Report
-collector version, counts, errors, checkpoint path and actual report path. The
-program validates records and preserves reading/collection state before publication.
+CLEANUP AND RETURN
+Do not call browser.nameSession, create tab groups, or name tab groups.
+Close EVERY task-created tab on success/failure in finally; keep partial-batch tabs
+open. The adapter closes supplied tabs on complete (task_tabs_closed=true): skip
+those in finally. After a tool/close error, inspect remaining owned tabs first.
+{_TAB_GROUP_CLEANUP}
+Preserve unrelated tabs and sessions; report exact tab IDs if cleanup is unverified.
+Never mark task tabs as deliverables.
+Report status, collector version, counts, errors, checkpoint path and cleanup.
+Distinguish Abstract, Extract and missing readings; never invent a report path.
 '''
 
 

@@ -30,8 +30,10 @@ python main.py arxiv refresh --category quant-ph --data-dir /path/to/reports
 这会真实联网查询 arXiv。`run.sh` 保留原有日期桶逻辑和本机部署路径；移植时
 核对 Conda、项目与输出路径。不要改动已有环境来满足可选期刊组件。
 
-`run.sh` 不接收参数，只写死一条 `conda run` 调用每日 `refresh` 命令。
-循环、日志、锁和失败处理由 Python 包负责。单项任务直接调用包：
+`run.sh` 不接收参数，通过一条固定的 `conda run` 启动 Bash 调度。
+Bash 持有脚本锁，并行启动 arXiv 和期刊两条流水线，等待两者结束并传播失败。
+arXiv 按分类选择首次回填或滚动刷新；期刊 agent 保持串行。
+Python 包负责各项采集、验证和报告生成。单项任务直接调用包：
 
 ```bash
 python main.py journal issue --journal jcim --volume 66 --issue 12 --year 2026 --run-agent
@@ -62,9 +64,13 @@ papertrack journal issue --journal jcim --volume 66 --issue 12 --year 2026 \
 默认 `gpt-6-luna`，进程超时 660 秒，可用 `--agent-model` 和 `--agent-timeout`
 显式调整。只启动一次 Agent 进程，不自动重启、换模型或扩大权限；摘要交互失败可在
 同一次任务内用相同固定模块重试一次，同一 DOI 再失败即停止。任务内期限等于进程
-上限减去 60 秒，留出返回结果的时间。每次运行在输出目录下建立
+上限减去 60 秒，留出返回结果的时间。每次运行在当前工作目录下建立
 独立 `.papertrack-runs/` 子目录，保存任务、事件日志、stderr、最终回复、JSON、HTML
 和验收状态。Agent 只采集，包内 Python 验收后才写报告；退出成功不代表采集成功。
+`run.sh` 已切到项目目录，因此缓存固定在项目 `.papertrack-runs/`，
+`--data-dir` 仅指定 Markdown 导出目录。旧输出目录的缓存仍可读取；迁移应在
+停止采集后调用包内 `papertrack.journals.storage.move_legacy_cache(data_dir)`，
+整体移动且拒绝覆盖，原始证据和日志不改写。
 超时终止 Agent 进程组，保留局部结果和已有报告。运行目录是新建的非 Git 工作区，
 因此使用 `--skip-git-repo-check`，不向 Agent 开放源码仓库作为写入工作区。
 
@@ -96,12 +102,12 @@ python main.py journal issue --journal jcim --volume 66 --issue 12 --year 2026 \
 
 把标准输出交给具备浏览器工具、可以使用用户授权会话的 Codex、Claude Code
 或其他 agent。此命令只生成任务，不启动任何 agent，不提供浏览器连接。
-agent 负责进入可访问的官方卷期页，然后调用 `browser/collect.mjs` 的固定采集入口。
+agent 负责进入可访问的官方卷期页，然后调用包内 `papertrack/browser/collect.mjs` 的固定采集入口。
 解析、展开摘要和 JSON 写入由模块完成；agent 不临时编写选择器。访问阻碍无法解决时
 保留进度并交接。宿主需提供带 playwright.evaluate/locator 的 browser-client tab，
 并允许导入本地 JS 模块；没有这些能力时应明确报错。
 Codex 中连接浏览器和导入模块都在同一个 `cua_repl` 内执行；不要把模块放进另一个
-`node_repl` 后假设浏览器变量可共享。`browser/cua.mjs` 提供固定的公开 API 适配。
+`node_repl` 后假设浏览器变量可共享。包内 `papertrack/browser/cua.mjs` 提供固定的公开 API 适配。
 
 ```bash
 python main.py journal issue --journal jcim --volume 66 --issue 12 --year 2026 \
@@ -115,22 +121,18 @@ python main.py journal issue --journal jcim --volume 66 --issue 12 --year 2026 \
 Zotero 为可选本地服务；需要收藏匹配时启动桌面应用并允许本地 API 访问。
 其不可用时保留已有收藏分组；首次报告默认未收藏。Obsidian 不必在采集时运行。
 
-## 可选的原有浏览器工具
+## 浏览器采集器
 
-`src/papertrack/browser/` 是随包安装的固定采集器，仓库 `browser/` 保留转发入口和
-测试；`experiments/journal-workflow/` 是可选的已有队列
-原型。采集器在浏览器工具宿主的 Node 运行时内执行，不是普通终端里的独立浏览器
-服务，也不负责安装外部 agent 的浏览器能力。基础 Python/arXiv 不依赖它们。
-需要使用这些工具时分别阅读目录内 README，Node worker 要求 Node >=22：
+`src/papertrack/browser/` 是随包安装的唯一固定采集器；JavaScript 测试在
+`tests/browser/`，用法和历史验收记录在 [docs/browser](docs/browser/README.md)。
+采集器在浏览器工具宿主的 Node 运行时内执行，不负责安装外部 agent 的浏览器能力。
+基础 Python/arXiv 不依赖浏览器。离线测试无需额外 npm 依赖：
 
 ```bash
-cd experiments/journal-workflow
-npm ci --ignore-scripts
-npm test
+node --test tests/browser/*.test.mjs
 ```
 
-worker 仍需宿主提供活跃的浏览器连接，模型只参与有限恢复决策。
-该原型报告发布器依赖 POSIX fcntl；不要把它视为已验收 Windows 原生支持。
+旧队列 worker 原型及根目录的浏览器转发入口已移除，历史实现可从 Git 恢复。
 
 旧 `run_j.sh`、APS cache runner、HTTP fallback extras 和 Python 浏览器运行时
 已从当前源码删除，完整实现保存在 Git 提交 `8804413`。本轮没有修改系统 cron；

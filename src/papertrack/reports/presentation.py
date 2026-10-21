@@ -7,21 +7,26 @@ from pathlib import Path
 
 from papertrack.reports.markdown import repair_presentation
 from papertrack.journals.metadata import normalize_doi
+from papertrack.journals.storage import cache_roots, relocated_record
 
 
 @lru_cache(maxsize=4)
 def _captures(data_dir: str) -> dict:
     found = {}
-    for path in sorted((Path(data_dir) / '.papertrack-runs').glob('*/result.json')):
+    for path in sorted(path for cache in cache_roots(data_dir)
+                       for path in cache.glob('*/result.json')):
         try:
-            result = json.loads(path.read_text())
+            result = relocated_record(json.loads(path.read_text()), data_dir, path.parent)
         except (OSError, ValueError):
             continue
         if result.get('status') != 'complete' or not result.get('report_path'):
             continue
         key = str(Path(result['report_path']).resolve())
         if result.get('updated_at', '') > found.get(key, ({}, None))[0].get('updated_at', ''):
-            found[key] = (result, path.parent / 'capture.json')
+            capture = Path(result.get('capture_path') or path.parent / 'capture.json')
+            if not capture.is_absolute():
+                capture = path.parent / capture
+            found[key] = (result, capture)
     return found
 
 

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {latestIssueRequest,discoverLatestIssue} from '../src/papertrack/browser/discovery.mjs';
+import {latestIssueRequest,discoverLatestIssue} from '../../src/papertrack/browser/discovery.mjs';
 
 test('latest discovery ignores ASAP, other journals and external links; sorts numerically',()=>{
   assert.deepEqual(latestIssueRequest('https://pubs.acs.org/loi/jcisd8','jcisd8',[

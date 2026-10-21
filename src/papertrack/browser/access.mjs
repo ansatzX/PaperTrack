@@ -3,11 +3,10 @@ export function validateRequest(request) {
   const url = new URL(request.url);
   const volume = String(request.volume), issue = String(request.issue);
   if (url.protocol !== 'https:' || url.port || url.username || url.password ||
-      !/^\d+$/.test(volume) || !/^\d+$/.test(issue)) throw Error('invalid_issue_request');
+      !/^\d+$/.test(volume) || !/^\d+$/.test(issue) || Number(volume)<1 || Number(issue)<1) throw Error('invalid_issue_request');
   let match;
   if (url.hostname === 'pubs.acs.org') {
-    match = url.pathname.match(/^\/([^/]+)\/issue\/(\d+)\/(\d+)\/?$/) ||
-      url.pathname.match(/^\/toc\/([^/]+)\/(\d+)\/(\d+)\/?$/);
+    match = url.pathname.match(/^\/([^/]+)\/issue\/(\d+)\/(\d+)\/?$/);
   } else if (url.hostname === 'pubs.aip.org') {
     match = url.pathname.match(/^\/(?:aip\/)?([^/]+)\/issue\/(\d+)\/(\d+)\/?$/);
   } else if (url.hostname === 'journals.aps.org') {

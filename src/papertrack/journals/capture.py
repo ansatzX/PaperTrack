@@ -9,7 +9,7 @@ import unicodedata
 from urllib.parse import urlsplit
 
 from papertrack.adapter_result import AdapterResult, SUCCESS, PARTIAL
-from papertrack.journals.entry import JournalEntry
+from papertrack.journals.entry import JournalEntry, validate_issue_placement
 from papertrack.journals.metadata import normalize_doi, stamp
 
 
@@ -247,6 +247,7 @@ def read_browser_issue(path: str, *, provider: str, code: str, volume: str,
     Snapshots are explicit local input, never automatically promoted by age or
     used for an unrelated issue. Abstract failures remain visible; no network enrichment is performed.
     """
+    validate_issue_placement(volume, issue)
     data = json.loads(Path(path).read_text())
     if data.get('schema') != 'papertrack-browser-issue-v1':
         raise ValueError('Unsupported browser capture schema')
@@ -373,6 +374,9 @@ def read_browser_issue(path: str, *, provider: str, code: str, volume: str,
         if doi in recent:
             entry.abstract = recent[doi]
             kind = 'abstract'
+        if (provider in ('acs', 'aip') and kind == 'unavailable'
+                and doi not in recent):
+            raise ValueError(f'Recent Abstract supplementation is unresolved: {doi}')
         if kind not in ('abstract', 'extract'):
             no_abstract_control.append(doi)
         stamp(entry, 'official_browser')

@@ -1,1 +1,0 @@
-{"name":"papertrack-journal-workflow","version":"0.1.0","private":true,"type":"module","engines":{"node":">=22"},"scripts":{"test":"node --test test/*.test.mjs"},"dependencies":{"@crawlee/basic":"3.15.3","@crawlee/core":"3.15.3","openai":"^6.0.0","proper-lockfile":"4.1.2"}}

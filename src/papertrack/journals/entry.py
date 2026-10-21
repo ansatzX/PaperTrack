@@ -2,6 +2,13 @@ import re
 from dataclasses import dataclass, field
 
 
+def validate_issue_placement(volume: str, issue: str) -> None:
+    """Formal volume/issue identifiers are numeric path components."""
+    if any(not re.fullmatch(r'[0-9]+', str(value)) or int(value) < 1
+           for value in (volume, issue)):
+        raise ValueError('Formal volume and issue must be positive ASCII numbers')
+
+
 @dataclass
 class JournalEntry:
     doi: str
